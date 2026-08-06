@@ -125,6 +125,56 @@ func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, mod
 	return *agent, *module, nil
 }
 
+// ResolveCRS returns a signed Agent/module pair that contains the requested CRS
+// version. It includes the single retained rollback release in the search.
+func (c *Catalog) ResolveCRS(inventory model.Inventory, crsVersion string) (model.PackageArtifact, model.PackageArtifact, error) {
+	rollbackTargets := make(map[string]bool)
+	for _, artifact := range c.manifest.Artifacts {
+		if artifact.RollbackID != "" {
+			rollbackTargets[artifact.RollbackID] = true
+		}
+	}
+	var currentModules []model.PackageArtifact
+	var rollbackModules []model.PackageArtifact
+	for _, artifact := range c.manifest.Artifacts {
+		if artifact.Kind != "module" || !matchesBase(artifact, inventory) || artifact.WebServer != inventory.WebServer {
+			continue
+		}
+		if model.NormalizeIntegrationMode(artifact.IntegrationMode) != model.NormalizeIntegrationMode(inventory.IntegrationMode) || strings.TrimPrefix(artifact.CRSVersion, "v") != strings.TrimPrefix(crsVersion, "v") {
+			continue
+		}
+		if artifact.WebServerVersion != "" && artifact.WebServerVersion != inventory.WebServerVersion {
+			continue
+		}
+		if artifact.WebServerBuild != "" && artifact.WebServerBuild != inventory.WebServerBuild {
+			continue
+		}
+		if rollbackTargets[artifact.ID] {
+			rollbackModules = append(rollbackModules, artifact)
+		} else {
+			currentModules = append(currentModules, artifact)
+		}
+	}
+	modules := currentModules
+	if len(modules) == 0 {
+		modules = rollbackModules
+	}
+	if len(modules) != 1 {
+		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("expected one preferred %s module package with CRS %s, found %d", inventory.WebServer, crsVersion, len(modules))
+	}
+	module := modules[0]
+	var agents []model.PackageArtifact
+	for _, artifact := range c.manifest.Artifacts {
+		if artifact.Kind == "agent" && matchesBase(artifact, inventory) && artifact.Version == module.Version && rollbackTargets[artifact.ID] == rollbackTargets[module.ID] {
+			agents = append(agents, artifact)
+		}
+	}
+	if len(agents) != 1 {
+		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("expected one agent package for module release %s, found %d", module.Version, len(agents))
+	}
+	return agents[0], module, nil
+}
+
 func (c *Catalog) Artifact(id string) (model.PackageArtifact, bool) {
 	artifact, ok := c.byID[id]
 	return artifact, ok

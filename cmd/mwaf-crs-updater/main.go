@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -56,9 +57,27 @@ type gitTag struct {
 	} `json:"verification"`
 }
 
+type templateUpdate struct {
+	Key             string
+	PreviousVersion string
+	Version         string
+}
+
+type lifecycleCatalog struct {
+	DefaultKey string            `json:"default_key"`
+	Policies   []policyLifecycle `json:"policies"`
+}
+
+type policyLifecycle struct {
+	Key            string            `json:"key"`
+	CurrentVersion string            `json:"current_version"`
+	Versions       map[string]string `json:"versions"`
+}
+
 func main() {
 	lockPath := flag.String("lock", "packaging/sources.lock.yaml", "CRS source lock path")
 	templateDir := flag.String("templates", "internal/systempolicy/templates", "system policy template directory")
+	catalogPath := flag.String("catalog", "internal/systempolicy/catalog.json", "system policy lifecycle catalog path")
 	channel := flag.String("channel", "stable", "release channel: stable")
 	write := flag.Bool("write", false, "write an available update to the lock and matching templates")
 	field := flag.String("field", "", "print one locked field without accessing the network")
@@ -110,10 +129,18 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	if err := atomicWrite(*lockPath, updated, 0o644); err != nil {
+	lifecycle, err := readLifecycleCatalog(*catalogPath)
+	if err != nil {
 		fatal(err)
 	}
-	if err := updateTemplates(*templateDir, *channel, strings.TrimPrefix(next.Version, "v")); err != nil {
+	templateUpdates, err := updateTemplates(*templateDir, *channel, strings.TrimPrefix(next.Version, "v"), lifecycle)
+	if err != nil {
+		fatal(err)
+	}
+	if err := updateLifecycleCatalog(*catalogPath, templateUpdates); err != nil {
+		fatal(err)
+	}
+	if err := atomicWrite(*lockPath, updated, 0o644); err != nil {
 		fatal(err)
 	}
 	fmt.Printf("updated CRS %s from %s to %s\n", *channel, locked.Version, next.Version)
@@ -297,17 +324,24 @@ func rewriteSourceLock(raw []byte, lock sourceLock) ([]byte, error) {
 	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }
 
-func updateTemplates(directory, channel, crsVersion string) error {
+func updateTemplates(directory, channel, crsVersion string, lifecycle lifecycleCatalog) ([]templateUpdate, error) {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	type candidate struct {
 		item    map[string]any
 		version string
 	}
-	latestByKey := make(map[string]candidate)
-	updated := 0
+	currentVersions := make(map[string]string, len(lifecycle.Policies))
+	for _, policy := range lifecycle.Policies {
+		if policy.Key == "" || policy.CurrentVersion == "" || policy.Versions[policy.CurrentVersion] != "PUBLISHED" {
+			return nil, errors.New("system policy lifecycle current version must be published")
+		}
+		currentVersions[policy.Key] = policy.CurrentVersion
+	}
+	currentByKey := make(map[string]candidate)
+	updates := make([]templateUpdate, 0)
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -315,11 +349,11 @@ func updateTemplates(directory, channel, crsVersion string) error {
 		path := filepath.Join(directory, entry.Name())
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		var item map[string]any
 		if err := json.Unmarshal(raw, &item); err != nil {
-			return fmt.Errorf("decode %s: %w", path, err)
+			return nil, fmt.Errorf("decode %s: %w", path, err)
 		}
 		if item["crs_track"] != channel {
 			continue
@@ -327,14 +361,19 @@ func updateTemplates(directory, channel, crsVersion string) error {
 		key, _ := item["key"].(string)
 		version, _ := item["version"].(string)
 		if key == "" || version == "" {
-			return fmt.Errorf("template %s is missing key or version", path)
+			return nil, fmt.Errorf("template %s is missing key or version", path)
 		}
-		current, exists := latestByKey[key]
-		if !exists || compareVersions(version, current.version) > 0 {
-			latestByKey[key] = candidate{item: item, version: version}
+		if currentVersions[key] == version {
+			currentByKey[key] = candidate{item: item, version: version}
 		}
 	}
-	for key, current := range latestByKey {
+	keys := make([]string, 0, len(currentByKey))
+	for key := range currentByKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		current := currentByKey[key]
 		if current.item["crs_version"] == crsVersion {
 			continue
 		}
@@ -343,23 +382,70 @@ func updateTemplates(directory, channel, crsVersion string) error {
 		current.item["crs_version"] = crsVersion
 		formatted, err := json.MarshalIndent(current.item, "", "  ")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		path := filepath.Join(directory, key+"."+nextVersion+".json")
 		if _, err := os.Stat(path); err == nil {
-			return fmt.Errorf("template version already exists: %s", path)
+			return nil, fmt.Errorf("template version already exists: %s", path)
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
+			return nil, err
 		}
 		if err := atomicWrite(path, append(formatted, '\n'), 0o644); err != nil {
-			return err
+			return nil, err
 		}
-		updated++
+		updates = append(updates, templateUpdate{Key: key, PreviousVersion: current.version, Version: nextVersion})
 	}
-	if updated == 0 {
-		return fmt.Errorf("no %s system policy template was updated", channel)
+	if len(updates) == 0 {
+		return nil, fmt.Errorf("no %s system policy template was updated", channel)
 	}
-	return nil
+	return updates, nil
+}
+
+func readLifecycleCatalog(path string) (lifecycleCatalog, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return lifecycleCatalog{}, err
+	}
+	var catalog lifecycleCatalog
+	if err := json.Unmarshal(raw, &catalog); err != nil {
+		return lifecycleCatalog{}, fmt.Errorf("decode %s: %w", path, err)
+	}
+	return catalog, nil
+}
+
+func updateLifecycleCatalog(path string, updates []templateUpdate) error {
+	catalog, err := readLifecycleCatalog(path)
+	if err != nil {
+		return err
+	}
+	for _, update := range updates {
+		found := false
+		for index := range catalog.Policies {
+			policy := &catalog.Policies[index]
+			if policy.Key != update.Key {
+				continue
+			}
+			found = true
+			if policy.CurrentVersion != update.PreviousVersion || policy.Versions[update.PreviousVersion] != "PUBLISHED" {
+				return fmt.Errorf("system policy %s current lifecycle does not match template %s", update.Key, update.PreviousVersion)
+			}
+			if _, exists := policy.Versions[update.Version]; exists {
+				return fmt.Errorf("system policy lifecycle already contains %s@%s", update.Key, update.Version)
+			}
+			policy.Versions[update.PreviousVersion] = "DEPRECATED"
+			policy.Versions[update.Version] = "PUBLISHED"
+			policy.CurrentVersion = update.Version
+			break
+		}
+		if !found {
+			return fmt.Errorf("system policy lifecycle is missing key %s", update.Key)
+		}
+	}
+	formatted, err := json.MarshalIndent(catalog, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, append(formatted, '\n'), 0o644)
 }
 
 func bumpPatch(version string) string {

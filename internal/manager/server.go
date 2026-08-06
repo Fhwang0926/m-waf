@@ -56,6 +56,7 @@ type Server struct {
 	bootstrapLimiter *requestLimiter
 	downloadLimiter  *requestLimiter
 	policySyncMu     sync.Mutex
+	policySyncSignal chan struct{}
 	logger           *slog.Logger
 }
 
@@ -81,8 +82,18 @@ func NewServer(cfg config.Manager, store *Store, logger *slog.Logger) (*Server, 
 		cfg: cfg, store: store, catalog: catalog, catalogErr: catalogErr, ca: ca, policySigner: policySigner, policyCatalog: policyCatalog, templates: templates,
 		sessions: newSessionManager(cfg.SessionKey), loginLimiter: newLoginLimiter(),
 		bootstrapLimiter: newRequestLimiter(60, time.Minute), downloadLimiter: newRequestLimiter(8, time.Minute), logger: logger,
+		policySyncSignal: make(chan struct{}, 1),
 	}, nil
 }
+
+func (s *Server) TriggerPolicySync() {
+	select {
+	case s.policySyncSignal <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Server) PolicySyncSignal() <-chan struct{} { return s.policySyncSignal }
 
 func (s *Server) SyncCatalog(ctx context.Context) error {
 	if s.catalog == nil {
@@ -116,6 +127,13 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.Handle("GET /policies", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.policies))))
 	mux.Handle("GET /policies/new", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.newPolicy))))
 	mux.Handle("POST /policies", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.createPolicy))))
+	mux.Handle("GET /policies/{id}", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.enterprisePolicyDetail))))
+	mux.Handle("POST /policies/{id}/strategy", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.updateEnterprisePolicyStrategy))))
+	mux.Handle("POST /policies/{id}/convert", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.convertLegacyEnterprisePolicy))))
+	mux.Handle("POST /policies/{id}/rollback", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.rollbackEnterprisePolicy))))
+	mux.Handle("POST /policies/{id}/rollouts/{rollout_id}/approve", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.approveEnterprisePolicyRollout))))
+	mux.Handle("POST /policies/{id}/rollouts/{rollout_id}/retry", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.retryEnterprisePolicyRollout))))
+	mux.Handle("GET /system-policies", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.systemPolicies))))
 	mux.Handle("GET /groups", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.groups))))
 	mux.Handle("POST /groups", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.createGroup))))
 	mux.Handle("POST /groups/{id}", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.updateGroup))))
@@ -348,7 +366,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListPolicies(r.Context(), sessionFrom(r).ScopeEnterpriseID(), 200)
+	items, err := s.store.ListEnterprisePolicies(r.Context(), sessionFrom(r).ScopeEnterpriseID(), 500)
 	if err != nil {
 		http.Error(w, "load policies", http.StatusInternalServerError)
 		return
@@ -397,10 +415,18 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "정책 이름, 대상과 유효한 세부 설정이 필요합니다.", http.StatusBadRequest)
 		return
 	}
+	strategy := strings.TrimSpace(r.FormValue("update_strategy"))
+	if strategy == "" {
+		strategy = PolicyStrategyManual
+	}
+	if strategy != PolicyStrategyManual && strategy != PolicyStrategyAutomatic && strategy != PolicyStrategyPinned {
+		http.Error(w, "지원하지 않는 업데이트 전략입니다.", http.StatusBadRequest)
+		return
+	}
 	metadata := ManagedPolicyMetadata{
 		SchemaVersion: policyTemplate.SchemaVersion, TemplateKey: policyTemplate.Key, TemplateVersion: policyTemplate.Version,
 		CRSTrack: policyTemplate.CRSTrack, CRSVersion: policyTemplate.CRSVersion, Target: target,
-		AutoUpdate: r.FormValue("auto_update") == "on", PolicyOrigin: "administrator", MigrationStatus: "CURRENT",
+		AutoUpdate: strategy == PolicyStrategyAutomatic, PolicyOrigin: "administrator", MigrationStatus: "CURRENT",
 	}
 	artifact, settingsJSON, err := buildManagedPolicyArtifact(mode, paranoiaLevel, inboundScore, r.FormValue("request_body") == "on", r.FormValue("excluded_paths"), r.FormValue("excluded_ips"), r.FormValue("custom_rules"), metadata)
 	if err != nil {
@@ -413,6 +439,28 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "정책 대상을 찾을 수 없습니다: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	servers, err := s.store.ListServers(r.Context(), enterpriseID, systemPolicyServerLimit)
+	if err != nil {
+		http.Error(w, "load policy target servers", http.StatusInternalServerError)
+		return
+	}
+	policyID := randomID()
+	existingPolicies, err := s.store.ListEnterprisePolicies(r.Context(), enterpriseID, systemPolicyServerLimit)
+	if err != nil {
+		http.Error(w, "load enterprise policies", http.StatusInternalServerError)
+		return
+	}
+	candidate := EnterprisePolicyRecord{ID: policyID, EnterpriseID: enterpriseID, Target: target, Status: EnterprisePolicyActive, CurrentRevisionID: "candidate", UpdatedAt: time.Now().UTC()}
+	winners, err := s.enterprisePolicyWinners(r.Context(), append(existingPolicies, candidate), servers)
+	if err != nil {
+		http.Error(w, "resolve policy priority", http.StatusInternalServerError)
+		return
+	}
+	serverIDs = orderIDsByServers(winners[policyID], servers)
+	if len(serverIDs) == 0 {
+		http.Error(w, "정책 대상에 적용 가능한 서버가 없습니다.", http.StatusBadRequest)
+		return
+	}
 	revisionID := randomID()
 	hash, signature := s.policySigner.Sign(artifact)
 	relativePath := filepath.Join("policies", revisionID+".conf")
@@ -421,17 +469,23 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "write policy artifact", http.StatusInternalServerError)
 		return
 	}
-	if err := s.store.AssignPolicyToServers(r.Context(), enterpriseID, serverIDs, revisionID, name, description, mode, settingsJSON, filepath.ToSlash(relativePath), hash, signature, session.UserID); err != nil {
+	revision := PolicyRevisionInput{
+		ID: revisionID, SystemPolicyVersionID: policyTemplate.Reference(), Name: name, Description: description, Mode: mode,
+		SettingsJSON: settingsJSON, ArtifactPath: filepath.ToSlash(relativePath), ArtifactSHA256: hash, ArtifactSignature: signature, PolicyOrigin: "administrator",
+	}
+	rolloutID, err := s.store.CreateEnterprisePolicyWithRollout(r.Context(), enterpriseID, policyID, name, description, target, policyTemplate.Key, strategy, session.UserID, revision, "SEED", "QUEUED", serverIDs)
+	if err != nil {
 		_ = os.Remove(fullPath)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "server not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "assign policy", http.StatusInternalServerError)
+		http.Error(w, "create enterprise policy", http.StatusInternalServerError)
 		return
 	}
-	s.audit(r, session.Username, "policy.assign", target+":"+revisionID, "success")
-	http.Redirect(w, r, "/servers?notice="+url.QueryEscape("정책이 "+strconv.Itoa(len(serverIDs))+"대 서버에 배포 대기 중입니다."), http.StatusSeeOther)
+	s.audit(r, session.Username, "enterprise_policy.create", policyID+":"+rolloutID, "success")
+	s.TriggerPolicySync()
+	http.Redirect(w, r, "/policies/"+policyID+"?notice="+url.QueryEscape("기업 정책이 "+strconv.Itoa(len(serverIDs))+"대 서버에 단계 배포 대기 중입니다."), http.StatusSeeOther)
 }
 
 func (s *Server) newEnrollment(w http.ResponseWriter, r *http.Request) {
@@ -635,13 +689,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if err := s.SyncSystemPolicies(ctx); err != nil {
-			s.logger.Warn("system_policy_sync_after_enrollment_failed", "server_id", serverID, "error", err)
-		}
-	}()
+	s.TriggerPolicySync()
 	writeJSON(w, http.StatusCreated, model.EnrollResponse{ServerID: serverID, CertificatePEM: certificate, CACertificate: s.ca.CertificatePEM(), PolicyPublicKey: s.policySigner.PublicPEM(), AgentAPI: s.cfg.AgentPublicURL})
 }
 
@@ -671,6 +719,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "heartbeat failed")
 		return
 	}
+	s.TriggerPolicySync()
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": true, "server_time": time.Now().UTC()})
 }
 

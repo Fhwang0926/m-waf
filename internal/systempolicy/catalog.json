@@ -1,0 +1,12 @@
+{
+  "default_key": "crs-baseline",
+  "policies": [
+    {
+      "key": "crs-baseline",
+      "current_version": "1.0.0",
+      "versions": {
+        "1.0.0": "PUBLISHED"
+      }
+    }
+  ]
+}

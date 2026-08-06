@@ -114,6 +114,8 @@ func runSystemPolicySync(ctx context.Context, interval time.Duration, app *manag
 		select {
 		case <-ctx.Done():
 			return
+		case <-app.PolicySyncSignal():
+			syncPolicies()
 		case <-ticker.C:
 			syncPolicies()
 		}

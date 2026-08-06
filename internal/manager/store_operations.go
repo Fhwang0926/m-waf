@@ -23,21 +23,6 @@ type GroupRecord struct {
 	CreatedAt      time.Time
 }
 
-type PolicyRecord struct {
-	ID              string
-	EnterpriseName  string
-	Name            string
-	Description     string
-	Mode            string
-	Settings        PolicySettings
-	TargetCount     int
-	PendingCount    int
-	AppliedCount    int
-	FailedCount     int
-	SupersededCount int
-	CreatedAt       time.Time
-}
-
 func (s *Store) AuthorizeAgent(ctx context.Context, serverID string, certificate *x509.Certificate) error {
 	if certificate == nil || serverID == "" {
 		return sql.ErrNoRows
@@ -248,77 +233,6 @@ func (s *Store) AssignPackages(ctx context.Context, enterpriseID, serverID, agen
 		return "", sql.ErrNoRows
 	}
 	return id, tx.Commit()
-}
-
-func (s *Store) AssignPolicyToServers(ctx context.Context, enterpriseID string, serverIDs []string, revisionID, name, description, mode, settingsJSON, artifactPath, hash, signature, userID string) error {
-	if enterpriseID == "" || len(serverIDs) == 0 {
-		return errors.New("enterprise and target servers are required")
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO policy_revisions(id,enterprise_id,revision_name,description,mode,settings_json,artifact_path,artifact_sha256,artifact_signature) VALUES (?,?,?,?,?,?,?,?,?)`, revisionID, enterpriseID, name, description, mode, settingsJSON, artifactPath, hash, signature); err != nil {
-		return err
-	}
-	for _, serverID := range serverIDs {
-		var accessible int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM servers WHERE id=? AND enterprise_id=? AND revoked_at IS NULL`, serverID, enterpriseID).Scan(&accessible); err != nil {
-			return err
-		}
-		if accessible != 1 {
-			return fmt.Errorf("server %s: %w", serverID, sql.ErrNoRows)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE policy_deployments SET status='SUPERSEDED',detail='새 정책 배포로 대체됨',updated_at=UTC_TIMESTAMP(6) WHERE server_id=? AND status='PENDING'`, serverID); err != nil {
-			return err
-		}
-		result, err := tx.ExecContext(ctx, `UPDATE desired_states SET policy_revision_id=? WHERE server_id=?`, revisionID, serverID)
-		if err != nil {
-			return err
-		}
-		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-			if err != nil {
-				return err
-			}
-			return fmt.Errorf("server %s desired state: %w", serverID, sql.ErrNoRows)
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO policy_deployments(id,server_id,policy_revision_id,status,detail,requested_by) VALUES (?,?,?,'PENDING','',NULLIF(?,''))`, randomID(), serverID, revisionID, userID); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-func (s *Store) ListPolicies(ctx context.Context, enterpriseID string, limit int) ([]PolicyRecord, error) {
-	query := `SELECT pr.id,COALESCE(e.name,'미지정'),pr.revision_name,pr.description,pr.mode,pr.settings_json,
-COUNT(pd.id),COALESCE(SUM(pd.status='PENDING'),0),COALESCE(SUM(pd.status='APPLIED'),0),COALESCE(SUM(pd.status='FAILED'),0),COALESCE(SUM(pd.status='SUPERSEDED'),0),pr.created_at
-FROM policy_revisions pr LEFT JOIN enterprises e ON e.id=pr.enterprise_id LEFT JOIN policy_deployments pd ON pd.policy_revision_id=pr.id`
-	args := make([]any, 0, 2)
-	if enterpriseID != "" {
-		query += ` WHERE pr.enterprise_id=?`
-		args = append(args, enterpriseID)
-	}
-	query += ` GROUP BY pr.id,e.name,pr.revision_name,pr.description,pr.mode,pr.settings_json,pr.created_at ORDER BY pr.created_at DESC LIMIT ?`
-	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := make([]PolicyRecord, 0)
-	for rows.Next() {
-		var item PolicyRecord
-		var settings sql.NullString
-		if err := rows.Scan(&item.ID, &item.EnterpriseName, &item.Name, &item.Description, &item.Mode, &settings, &item.TargetCount, &item.PendingCount, &item.AppliedCount, &item.FailedCount, &item.SupersededCount, &item.CreatedAt); err != nil {
-			return nil, err
-		}
-		if settings.Valid {
-			_ = json.Unmarshal([]byte(settings.String), &item.Settings)
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
 }
 
 func (s *Store) ResolvePolicyTarget(ctx context.Context, scopeEnterpriseID, target string) (string, []string, error) {

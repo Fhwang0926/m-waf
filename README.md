@@ -212,7 +212,7 @@ dpkg-query -W -f='${binary:Package}\t${db:Status-Abbrev}\t${Version}\n' \
 
 Resolve the reported lock, disk-space, repository, dependency, or interrupted-DPKG problem first, then rerun the same reviewed installer command. An enrollment token is consumed only when Agent enrollment succeeds; if it has expired or was already consumed, create a new one in Manager. Do not purge Apache/Nginx, delete `/etc/mwaf`, or force-install an incompatible package as a recovery shortcut.
 
-The current MVP has no supported `tar.gz`, manual-copy, RPM, or automatic package rollback path. Systems that cannot use Ubuntu 24.04 amd64 DEBs remain unsupported. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation — DEB installation failure](docs/custom-webserver-installation.md#deb-설치가-실패한-경우).
+The current MVP has no supported `tar.gz`, manual-copy, or RPM installation path, and a failed bootstrap/APT transaction is not rolled back automatically. Systems that cannot use Ubuntu 24.04 amd64 DEBs remain unsupported. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation — DEB installation failure](docs/custom-webserver-installation.md#deb-설치가-실패한-경우).
 
 ## Operate the MVP
 
@@ -226,11 +226,15 @@ The current MVP has no supported `tar.gz`, manual-copy, RPM, or automatic packag
 - Agent control uses authenticated HTTPS polling during the normal heartbeat loop. It does not open a WebSocket or arbitrary command port, and arbitrary shell execution is not provided.
 - `Agent 중지` and `서버 종료` cannot be reversed through Manager after connectivity is lost; use the host console, service manager, hypervisor, or power controller to recover them.
 - Starting with the second tagged release, the release workflow verifies the previous signed image and embeds its Agent and module packages as explicit rollback targets.
-- **서버 그룹** manages enterprise-scoped groups and deploys one immutable policy revision to every active member.
-- **정책 관리** configures detection/blocking mode, CRS sensitivity, anomaly threshold, request-body inspection, URL/IP exclusions, and restricted custom `SecRule` lines. Each revision records its template, template version, CRS track/version, migration origin, update mode, and deployment counts.
-- Manager creates one enterprise-wide `DetectionOnly` baseline when an enterprise first has an enrolled server without a policy. It is attributed to the M-WAF system, signed like every other revision, and set to automatic template updates.
-- The system-policy controller runs at startup, after enrollment, and every `MWAF_POLICY_SYNC_INTERVAL` (default `15m`). Managed bindings use `server > group > enterprise` precedence; an explicitly assigned non-template policy locks that server and is not overwritten.
-- A template CRS change first queues the compatible signed Agent/module bundle. Only after heartbeat inventory reports the target CRS does Manager create and assign the migrated immutable policy revision.
+- **서버 그룹** manages enterprise-scoped groups used by enterprise-policy targets.
+- **시스템 정책** is a system-administrator read-only catalog of immutable GitHub-managed versions, CRS compatibility, lifecycle status, source commit, migration notes, and adoption counts. Manager does not provide create, edit, or publish controls for this catalog.
+- **기업 정책** adopts one published system-policy version and owns the enterprise target, detection/blocking mode, CRS sensitivity, anomaly threshold, request-body inspection, URL/IP exclusions, restricted custom `SecRule` lines, and update strategy. New standalone policies are blocked; untraceable existing revisions remain `LEGACY_LOCKED` until an administrator explicitly converts them.
+- Manager creates one enterprise-wide `DetectionOnly` baseline when an enterprise first enrolls an unprotected server. The signed seed is attributed to the M-WAF system and starts with the `MANUAL` update strategy.
+- Enterprise administrators choose `MANUAL` (approve each update), `AUTOMATIC` (start a staged rollout), or `PINNED` (show updates without applying them). Regular enterprise users cannot operate policies.
+- The policy controller runs at startup, after enrollment and Agent state changes, and every `MWAF_POLICY_SYNC_INTERVAL` (default `15m`). Target resolution keeps `server > group > enterprise` precedence.
+- Every update uses one online canary and then batches of at most 25. Offline servers remain deferred without blocking online servers; the first failure pauses the remaining rollout.
+- When CRS changes, Manager first applies a minimum signed `DetectionOnly` transition, deploys the compatible signed Agent/module pair, waits for heartbeat to confirm the target CRS, and then applies the migrated immutable enterprise revision. The migration preserves enterprise settings and validated custom rules.
+- Enterprise administrators can retry a failed rollout or roll back only to the immediately previous successful revision. Rollback restores the compatible Agent/CRS package pair as well as the policy and is blocked when the signed bundle is missing or the target system-policy version is withdrawn.
 - **서버 제어** queues only four fixed polling commands: Agent restart/stop and server restart/poweroff. Arbitrary shell input is not accepted.
 - **패키지 제어** force-installs the current compatible signed bundle or its explicit rollback pair; success is recorded only after the restarted Agent reports matching installed versions.
 - **등록 해제** preserves server/event history but blocks the enrolled Agent certificate immediately.
@@ -254,11 +258,11 @@ Do not use `docker compose down -v` on an environment whose MariaDB data must be
 
 ## System policy and CRS lifecycle
 
-`packaging/sources.lock.yaml` is the repository source of truth for the approved CRS tag, commit, archive, and SHA-256. The matching JSON files under `internal/systempolicy/templates/` define policy defaults and carry independent template versions. Policy revisions copy both versions into `settings_json`, so a deployed revision remains auditable after the repository moves forward.
+`packaging/sources.lock.yaml` is the repository source of truth for the approved CRS tag, commit, archive, and SHA-256. `internal/systempolicy/catalog.json` records the current immutable policy version and each version's `PUBLISHED`, `DEPRECATED`, or `WITHDRAWN` lifecycle status. Matching JSON files under `internal/systempolicy/templates/` define the immutable version contents. Enterprise-policy revisions copy both the system-policy and CRS versions, so a deployed revision remains auditable after the repository moves forward.
 
-`.github/workflows/crs-updates.yml` checks the official `coreruleset/coreruleset` GitHub releases each day. It accepts only non-draft stable CRS v4 releases, requires GitHub to report the annotated tag signature as verified, calculates the archive digest, adds a new immutable template version, updates the source lock, and opens or refreshes a review pull request. It does not merge, publish a bundle, or update customer servers directly.
+`.github/workflows/crs-updates.yml` checks the official `coreruleset/coreruleset` GitHub releases each day. It accepts only non-draft stable CRS v4 releases, requires GitHub to report the annotated tag signature as verified, calculates the archive digest, adds a new immutable template version, advances the lifecycle catalog, updates the source lock, and opens or refreshes a review pull request. It does not merge, publish a bundle, or update customer servers directly.
 
-After that pull request passes the standard package and installation checks and an approved Manager bundle is deployed, the runtime controller reconciles only policies marked for automatic updates. Custom values and validated custom rules are preserved across revisions. The CRS package and policy revision are separate rollout stages, so each server keeps its prior revision until heartbeat reports the approved CRS version and can progress independently of slower servers in the same binding.
+After that pull request passes the standard package and installation checks and an approved Manager bundle is deployed, the runtime controller records the new system-policy version. It waits for enterprise approval under `MANUAL`, starts the staged rollout under `AUTOMATIC`, and only reports availability under `PINNED`. No GitHub synchronization path directly replaces an enterprise policy.
 
 ## Verification and tag-only image publication
 

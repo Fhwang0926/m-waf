@@ -1,50 +1,66 @@
-# M-WAF 시스템 정책·OWASP CRS 수명주기 반영
+# M-WAF 시스템 정책·기업 정책 분리 및 수명주기 반영
 
 ## 결론
 
-시스템 초기 정책은 더 이상 모듈 패키지의 최소 `DetectionOnly` 파일에만 의존하지 않는다. Manager의 시스템 정책 컨트롤러가 최초 서버 등록 시 기업별 `CRS 기본 보호 정책` 개정본을 생성하고 서명한 뒤 배포한다. 자동 생성 배포의 `requested_by`는 `NULL`, 정책 출처는 `system-seed`로 기록해 관리자 요청과 구분하고, 정책 화면과 Manager 구조화 로그에서 생성 주체를 확인할 수 있게 했다.
+시스템 정책과 기업 정책을 별도 수명주기로 분리했다. 시스템 정책은 GitHub에서만 유지·검증·게시되는 불변 버전 카탈로그이며 Manager 화면은 조회 전용이다. 기업 정책은 게시된 시스템 정책 버전을 채택하고 기업 대상, 동작 모드, URL/IP 예외, 검증된 사용자 규칙과 업데이트 전략을 소유한다.
 
-공식 CRS 저장소의 변경은 즉시 운영 서버로 직행하지 않는다. GitHub Actions가 신규 안정 릴리스를 발견해 검증 가능한 변경 PR을 만들고, 기존 패키지 설치 검증과 승인 과정을 거쳐 서명 bundle이 배포된 다음에만 Manager가 서버별 CRS 패키지와 정책 개정을 순서대로 동기화한다.
+최초 보호 서버에는 최신 기본 `DetectionOnly` 시스템 정책을 기반으로 기업 기본 정책을 한 번 생성하고 단계 배포한다. 초기 전략은 `MANUAL`이다. 이후 업데이트 적용, 실패 재시도와 직전 성공본 롤백은 기업 관리자 또는 전체 범위의 시스템 관리자가 결정하며 일반 기업 사용자는 수행할 수 없다.
 
-## 1. 템플릿화
+## 1. GitHub 시스템 정책 카탈로그
 
-- `internal/systempolicy/templates/*.json`을 Manager 바이너리에 포함하는 시스템 정책 카탈로그를 추가했다.
-- 기본 템플릿은 DetectionOnly, CRS 민감도 1, 인바운드 임계점수 5, 요청 본문 검사 활성화로 시작한다.
-- 관리자가 만드는 정책도 선택한 템플릿 키·버전, CRS 트랙·버전, 대상과 자동 갱신 여부를 정책 설정에 함께 저장한다.
-- 기존 정책 생성기의 CRS v4 민감도 변수명을 `blocking_paranoia_level`과 `detection_paranoia_level`로 바로잡았다.
+- `internal/systempolicy/catalog.json`에 정책 키별 현재 버전과 `PUBLISHED`, `DEPRECATED`, `WITHDRAWN` 상태를 기록한다.
+- `internal/systempolicy/templates/*.json`은 기존 버전을 덮어쓰지 않는 불변 템플릿이다. Manager는 원문 SHA-256이 이미 동기화된 버전과 달라지면 동기화를 거부한다.
+- `system_policy_versions`는 템플릿 digest, CRS 버전, Manager source commit, migration 안내와 채택 기업/서버 집계의 기준을 저장한다.
+- 시스템 관리자 UI는 버전과 상태를 조회할 수 있지만 생성·편집·게시 동작은 제공하지 않는다.
+- 일일 GitHub Actions는 공식 `coreruleset/coreruleset` 안정 릴리스 중 GitHub가 서명을 검증한 annotated tag만 선택하고, archive SHA-256·source lock·새 템플릿 버전·수명주기 카탈로그를 함께 변경하는 PR을 만든다. PR을 병합하거나 고객 서버에 직접 적용하지 않는다.
 
-## 2. 버전 관리
+## 2. 기업 정책과 기존 데이터 전환
 
-- `packaging/sources.lock.yaml`을 승인된 CRS tag, commit, archive, SHA-256의 단일 기준으로 유지한다.
-- 모듈 DEB와 bundle manifest에 실제 포함된 CRS 버전을 기록하고 Agent heartbeat의 설치 버전과 비교할 수 있게 했다.
-- 시스템 정책 템플릿은 자체 버전을 가지며 업데이트 도구는 기존 JSON을 덮어쓰지 않고 새 템플릿 버전 파일을 추가한다.
-- 정책 개정본은 생성 당시의 템플릿/CRS 버전을 복사해 저장하므로 이후 저장소가 갱신되어도 당시 적용 내용을 추적할 수 있다.
+- `enterprise_policies`는 기업, 이름, 대상, 시스템 정책 키와 현재 버전, 현재/직전 성공 개정본, `MANUAL`·`AUTOMATIC`·`PINNED` 전략을 관리한다.
+- `policy_revisions`는 기업 정책, 시스템 정책 버전, 부모 개정본과 생성 원인을 연결한다. 기업 설정이 포함된 서명 artifact는 계속 불변으로 유지한다.
+- 신규 기업 정책은 `PUBLISHED` 시스템 정책을 기반으로만 생성한다. 독립 정책 생성 경로는 관리자 화면에서 제거했다.
+- 기존 `system-seed`는 기업 기본 정책과 `MANUAL`로, 관리자 `auto_update=true`는 `AUTOMATIC`, `false`는 `PINNED`로 변환한다.
+- `migrated_from` 체인은 하나의 기업 정책 개정 이력으로 연결한다. 시스템 템플릿 출처나 유효 대상을 확인할 수 없는 정책은 `LEGACY_LOCKED` 읽기 전용으로 보존한다.
+- `LEGACY_LOCKED` 정책은 현재 기업 설정을 보존하면서 최신 기본 시스템 정책 기반 개정본으로 명시적으로 전환할 수 있다.
 
-## 3. 정책별 마이그레이션
+## 3. 승인 전략과 동시성 보호
 
-- 자동 갱신을 선택한 정책 binding만 새 템플릿으로 마이그레이션한다.
-- 기존 동작 모드, 민감도, 임계점수, 본문 검사, URL/IP 예외와 검증된 사용자 규칙은 정책별로 보존한다.
-- 새 정책은 기존 개정본을 수정하지 않고 `migrated_from`을 가진 새 서명 개정본으로 생성한다.
-- 대상 충돌 시 `서버 > 그룹 > 기업 기본 정책` 순서로 적용하며, 템플릿 밖에서 명시적으로 지정한 정책은 서버 잠금으로 보고 자동 동기화가 덮어쓰지 않는다.
+- `MANUAL`: 새 시스템 버전의 불변 기업 개정본과 rollout을 준비하고 `AWAITING_APPROVAL`에서 대기한다.
+- `AUTOMATIC`: 새 버전이 게시되면 `QUEUED` rollout을 시작한다.
+- `PINNED`: 새 버전 정보만 표시하고 rollout을 만들지 않는다. 대기 중인 수동 승인 rollout은 전략을 `PINNED`로 변경하면 취소한다.
+- 전략 변경, 승인, 재시도, 전환과 롤백은 CSRF 및 기업 범위 검사를 거치고 관리자 감사 로그를 남긴다.
+- 모든 변경 요청은 화면에 표시된 현재 개정본을 함께 제출한다. 서버의 현재 개정본이나 rollout 상태가 달라졌으면 `409 Conflict`로 중복·지연 요청을 거부한다.
 
-## 4. 지속 업데이트와 반영
+## 4. 단계 배포와 CRS 연계
 
-- `.github/workflows/crs-updates.yml`이 매일 공식 `coreruleset/coreruleset` 안정 릴리스를 확인한다.
-- draft/prerelease를 제외하고 GitHub가 서명 검증 완료로 표시한 annotated tag만 허용한다.
-- 새 archive를 직접 내려받아 SHA-256을 계산한 뒤 source lock과 새 템플릿 버전을 변경하는 PR을 열거나 갱신한다.
-- Manager는 시작 시, 서버 등록 직후, 이후 기본 15분 간격으로 자동 관리 정책을 동기화한다.
-- 대상 서버의 CRS가 템플릿 버전과 다르면 먼저 해당 CRS가 포함된 호환 서명 bundle을 배포 대기시킨다.
-- heartbeat가 목표 CRS 설치를 보고한 서버부터 새 정책 개정본을 생성·배포하고, 아직 준비되지 않은 서버는 기존 개정본을 유지한 채 다음 주기에 이어서 반영한다. 패키지 배포 실패는 자동 반복하지 않고 로그에 남겨 운영 확인 대상으로 둔다.
+- `policy_rollouts`와 `policy_rollout_targets`가 초기 시드, 업데이트, 롤백, 자동 복구의 승인자·이전/목표 버전·서버별 단계를 기록한다.
+- 온라인 서버 한 대를 canary batch `0`으로 선택하고 성공한 뒤 최대 25대 단위로 확대한다. 최초 canary가 오프라인이면 다음 온라인 서버와 batch 위치를 교환한다.
+- 오프라인 서버는 이전 진행 단계를 보존한 `DEFERRED`로 남고 온라인 서버 진행을 막지 않는다. 다시 연결되면 중단한 단계부터 재개한다.
+- 한 서버라도 실패하면 남은 배포를 `PAUSED`로 전환한다. 재시도는 기존 rollout을 다시 사용하며 중복 요청은 거부한다.
+- CRS 변경 전 최소 서명 `DetectionOnly` 전환 정책을 적용하고 Agent의 정책 적용 결과와 다음 heartbeat를 확인한다.
+- 이후 목표 CRS가 포함된 서명 Agent/module 패키지를 배포하고 package `APPLIED`와 heartbeat의 CRS 버전을 함께 확인한다.
+- 마지막으로 기업 설정과 예외를 보존한 목표 개정본을 적용하고 policy `APPLIED`와 다음 heartbeat의 개정본 일치를 확인해야 서버 rollout이 완료된다.
+- 대상 충돌은 `서버 > 그룹 > 기업 기본 정책` 순서로 계산하고 새 정책 및 전환 rollout도 실제 승자 서버만 대상으로 한다.
 
-## 데이터 변경
+## 5. 직전 성공본 롤백과 자동 복구
 
-- 전진형 migration `005_system_policy_sync.sql`은 시스템 생성 정책 배포를 관리자 요청과 구분할 수 있도록 `policy_deployments.requested_by`만 nullable로 변경한다.
-- 신규 정책 테이블이나 별도 마이그레이션 상태 테이블은 추가하지 않고 기존 `policy_revisions.settings_json`, `desired_states`, 배포 이력을 재사용했다.
-- 실제 MariaDB migration, 초기화, reset 또는 데이터 변경은 수행하지 않았다.
+- 기업 정책은 완료된 rollout의 현재 개정본과 직전 성공 개정본 한 개를 유지한다.
+- 기업 관리자의 롤백은 직전 성공 정책과 그 시스템 정책이 요구하는 호환 Agent/CRS 패키지를 하나의 staged rollout으로 복구한다.
+- 목표 시스템 정책이 `WITHDRAWN`이거나 호환 패키지가 현재 서명 bundle에 없으면 롤백 시작을 차단한다.
+- 자동 업데이트 중 이미 변경된 canary 또는 batch 서버에서 실패하면 원래 성공 개정본으로 `RECOVERY` rollout을 자동 생성한다.
+- 복구용 CRS 패키지가 없으면 최소 `DetectionOnly` 전환 상태를 유지한 채 rollout을 `PAUSED`로 남기고 운영 상세 사유를 표시한다.
 
-## 확인 범위
+## 6. 데이터 변경
+
+- 전진형 migration `006_policy_domains_and_rollouts.sql`을 추가했다.
+- 신규 테이블: `system_policy_versions`, `enterprise_policies`, `policy_rollouts`, `policy_rollout_targets`.
+- 기존 `policy_revisions`에는 기업 정책·시스템 정책·부모 개정본·생성 원인 연결을 추가했다.
+- 기존 정책/패키지 deployment에는 `rollout_id` 연결을 추가했다.
+- migration은 실제 DB에 적용하지 않았으며 DB 초기화·reset·데이터 삭제도 수행하지 않았다. 기존 데이터 변환은 migration 이후 Manager의 멱등 동기화 과정에서 전진형으로 수행된다.
+
+## 7. 확인 범위
 
 - 변경한 Go 파일에 `gofmt`를 적용했다.
-- source lock 읽기, 템플릿 카탈로그, 동기화 우선순위, 패키지 선행 조건과 문서의 연결을 정적으로 검토했다.
-- 저장소 지침에 따라 Go/프론트엔드 빌드, 자동 테스트, 브라우저 실행, GitHub Actions 실행, 실제 CRS 다운로드와 DB migration 적용은 수행하지 않았다.
-- 운영 반영 전 PR 검증 workflow와 staging Agent에서 `패키지 적용 → heartbeat CRS 확인 → 정책 migration` 순서를 확인해야 한다.
+- JSON 카탈로그 대응, GitHub Actions YAML 파싱, 템플릿 블록, SQL 구문 구조 및 `git diff --check`를 정적으로 확인했다.
+- 저장소 지침에 따라 Go/프론트엔드 빌드, 자동 테스트, 브라우저 실행, GitHub Actions 실행, 실제 CRS 다운로드와 DB migration 적용은 수행하지 않는다.
+- 운영 반영 전 별도 승인 환경에서 migration 적용 후 `DetectionOnly 전환 → 패키지 APPLIED → heartbeat CRS 확인 → 기업 정책 APPLIED → heartbeat 개정본 확인`과 coordinated rollback을 검증해야 한다.

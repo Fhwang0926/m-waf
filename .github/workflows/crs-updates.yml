@@ -41,7 +41,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
-          if git diff --quiet -- packaging/sources.lock.yaml internal/systempolicy/templates; then
+          if git diff --quiet -- packaging/sources.lock.yaml internal/systempolicy/catalog.json internal/systempolicy/templates; then
             echo "No CRS update is available"
             exit 0
           fi
@@ -50,7 +50,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$branch"
-          git add packaging/sources.lock.yaml internal/systempolicy/templates
+          git add packaging/sources.lock.yaml internal/systempolicy/catalog.json internal/systempolicy/templates
           git commit -m "chore: prepare OWASP CRS ${version}"
           git push --force-with-lease origin "HEAD:refs/heads/${branch}"
           if gh pr view "$branch" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

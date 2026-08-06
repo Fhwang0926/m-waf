@@ -3,50 +3,8 @@ package manager
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"time"
 )
-
-type ManagedPolicyRecord struct {
-	ID           string
-	EnterpriseID string
-	Name         string
-	Description  string
-	Mode         string
-	Settings     PolicySettings
-	CreatedAt    time.Time
-}
-
-func (s *Store) ListManagedPolicyBindings(ctx context.Context) ([]ManagedPolicyRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT pr.id,pr.enterprise_id,pr.revision_name,pr.description,pr.mode,pr.settings_json,pr.created_at
-FROM policy_revisions pr
-WHERE EXISTS(SELECT 1 FROM desired_states ds WHERE ds.policy_revision_id=pr.id)
-ORDER BY pr.created_at`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := make([]ManagedPolicyRecord, 0)
-	for rows.Next() {
-		var item ManagedPolicyRecord
-		var raw sql.NullString
-		if err := rows.Scan(&item.ID, &item.EnterpriseID, &item.Name, &item.Description, &item.Mode, &raw, &item.CreatedAt); err != nil {
-			return nil, err
-		}
-		if raw.Valid {
-			if err := json.Unmarshal([]byte(raw.String), &item.Settings); err != nil {
-				return nil, fmt.Errorf("decode managed policy %s settings: %w", item.ID, err)
-			}
-		}
-		if item.Settings.TemplateKey == "" || !item.Settings.AutoUpdate || item.Settings.Target == "" {
-			continue
-		}
-		items = append(items, item)
-	}
-	return items, rows.Err()
-}
 
 func (s *Store) AssignExistingPolicyToServers(ctx context.Context, enterpriseID string, serverIDs []string, revisionID, userID string) error {
 	if enterpriseID == "" || revisionID == "" || len(serverIDs) == 0 {
@@ -72,7 +30,7 @@ func (s *Store) AssignExistingPolicyToServers(ctx context.Context, enterpriseID 
 		if currentRevision.String == revisionID {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE policy_deployments SET status='SUPERSEDED',detail='시스템 정책 동기화로 대체됨',updated_at=UTC_TIMESTAMP(6) WHERE server_id=? AND status='PENDING'`, serverID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE policy_deployments SET status='SUPERSEDED',detail='기업 정책 우선순위 동기화로 대체됨',updated_at=UTC_TIMESTAMP(6) WHERE server_id=? AND status='PENDING'`, serverID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE desired_states SET policy_revision_id=? WHERE server_id=?`, revisionID, serverID); err != nil {

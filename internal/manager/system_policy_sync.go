@@ -10,268 +10,558 @@ import (
 	"strings"
 
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
+	"github.com/Fhwang0926/m-waf/internal/version"
 )
 
 const systemPolicyServerLimit = 5000
 
-type policyWinner struct {
-	binding  ManagedPolicyRecord
-	priority int
-}
-
-// SyncSystemPolicies creates the missing enterprise baseline and reconciles
-// auto-updating policy bindings with the embedded, reviewed template catalog.
-// A policy chosen explicitly outside this catalog is treated as a per-server
-// lock and is never overwritten by the controller.
 func (s *Server) SyncSystemPolicies(ctx context.Context) error {
 	s.policySyncMu.Lock()
 	defer s.policySyncMu.Unlock()
 
+	if err := s.store.SyncSystemPolicyCatalog(ctx, s.policyCatalog, version.Commit); err != nil {
+		return fmt.Errorf("sync system policy catalog: %w", err)
+	}
+	if err := s.store.BackfillEnterprisePolicyDomains(ctx); err != nil {
+		return fmt.Errorf("backfill enterprise policies: %w", err)
+	}
 	servers, err := s.store.ListServers(ctx, "", systemPolicyServerLimit)
 	if err != nil {
-		return fmt.Errorf("list servers for system policy sync: %w", err)
+		return err
 	}
-	bindings, err := s.store.ListManagedPolicyBindings(ctx)
+	policies, err := s.store.ListEnterprisePolicies(ctx, "", systemPolicyServerLimit)
 	if err != nil {
-		return fmt.Errorf("list managed policy bindings: %w", err)
+		return err
 	}
-	seeded, seedErr := s.seedEnterprisePolicies(ctx, servers, bindings)
-	if seeded {
-		servers, err = s.store.ListServers(ctx, "", systemPolicyServerLimit)
-		if err != nil {
-			return errors.Join(seedErr, fmt.Errorf("reload servers after policy seed: %w", err))
-		}
-		bindings, err = s.store.ListManagedPolicyBindings(ctx)
-		if err != nil {
-			return errors.Join(seedErr, fmt.Errorf("reload managed policies after seed: %w", err))
-		}
-	}
-
-	serverByID := make(map[string]ServerRecord, len(servers))
-	managedIDs := make(map[string]bool, len(bindings))
-	for _, server := range servers {
-		if !server.Revoked {
-			serverByID[server.ID] = server
-		}
-	}
-	for _, binding := range bindings {
-		managedIDs[binding.ID] = true
-	}
-
-	winners := make(map[string]policyWinner)
 	var syncErrors []error
-	if seedErr != nil {
-		syncErrors = append(syncErrors, seedErr)
+	if err := s.seedEnterprisePolicies(ctx, servers, policies); err != nil {
+		syncErrors = append(syncErrors, err)
 	}
-	for _, binding := range bindings {
-		serverIDs, priority, err := s.resolveManagedPolicyTarget(ctx, binding, serverByID)
-		if err != nil {
-			syncErrors = append(syncErrors, fmt.Errorf("resolve managed policy %s: %w", binding.ID, err))
-			continue
-		}
-		for _, serverID := range serverIDs {
-			server, ok := serverByID[serverID]
-			if !ok || server.EnterpriseID != binding.EnterpriseID {
-				continue
-			}
-			if server.DesiredPolicyRevision != "" && !managedIDs[server.DesiredPolicyRevision] {
-				continue
-			}
-			current, exists := winners[serverID]
-			if !exists || priority > current.priority || priority == current.priority && binding.CreatedAt.After(current.binding.CreatedAt) {
-				winners[serverID] = policyWinner{binding: binding, priority: priority}
-			}
+	policies, err = s.store.ListEnterprisePolicies(ctx, "", systemPolicyServerLimit)
+	if err != nil {
+		return errors.Join(syncErrors...)
+	}
+	winners, err := s.enterprisePolicyWinners(ctx, policies, servers)
+	if err != nil {
+		syncErrors = append(syncErrors, err)
+	}
+	for _, policy := range policies {
+		if err := s.prepareAvailablePolicyUpdate(ctx, policy, winners[policy.ID], servers); err != nil {
+			syncErrors = append(syncErrors, fmt.Errorf("prepare enterprise policy %s update: %w", policy.ID, err))
 		}
 	}
-
-	targetsByBinding := make(map[string][]string)
-	bindingByID := make(map[string]ManagedPolicyRecord, len(bindings))
-	for _, binding := range bindings {
-		bindingByID[binding.ID] = binding
-	}
-	for serverID, winner := range winners {
-		targetsByBinding[winner.binding.ID] = append(targetsByBinding[winner.binding.ID], serverID)
-	}
-	for bindingID, serverIDs := range targetsByBinding {
-		sort.Strings(serverIDs)
-		if err := s.reconcileManagedPolicy(ctx, bindingByID[bindingID], serverIDs, serverByID); err != nil {
-			syncErrors = append(syncErrors, fmt.Errorf("reconcile managed policy %s: %w", bindingID, err))
+	rollouts, err := s.store.ListActivePolicyRollouts(ctx)
+	if err != nil {
+		syncErrors = append(syncErrors, err)
+	} else {
+		for _, rollout := range rollouts {
+			if err := s.processPolicyRollout(ctx, rollout); err != nil {
+				syncErrors = append(syncErrors, fmt.Errorf("process policy rollout %s: %w", rollout.ID, err))
+			}
 		}
+	}
+	if err := s.reconcileEnterprisePolicyMembership(ctx, policies, winners, servers); err != nil {
+		syncErrors = append(syncErrors, err)
 	}
 	return errors.Join(syncErrors...)
 }
 
-func (s *Server) seedEnterprisePolicies(ctx context.Context, servers []ServerRecord, bindings []ManagedPolicyRecord) (bool, error) {
-	hasEnterpriseBinding := make(map[string]bool)
-	for _, binding := range bindings {
-		kind, id, ok := strings.Cut(binding.Settings.Target, ":")
-		if ok && kind == "enterprise" && id == binding.EnterpriseID {
-			hasEnterpriseBinding[binding.EnterpriseID] = true
+func (s *Server) seedEnterprisePolicies(ctx context.Context, servers []ServerRecord, policies []EnterprisePolicyRecord) error {
+	hasEnterpriseDefault := make(map[string]bool)
+	for _, policy := range policies {
+		kind, id, ok := strings.Cut(policy.Target, ":")
+		if ok && kind == "enterprise" && id == policy.EnterpriseID {
+			hasEnterpriseDefault[policy.EnterpriseID] = true
 		}
 	}
-	unassigned := make(map[string][]string)
+	targets := make(map[string][]ServerRecord)
 	for _, server := range servers {
-		if !server.Revoked && server.EnterpriseID != "" && server.DesiredPolicyRevision == "" && !hasEnterpriseBinding[server.EnterpriseID] {
-			unassigned[server.EnterpriseID] = append(unassigned[server.EnterpriseID], server.ID)
+		if !server.Revoked && server.EnterpriseID != "" && server.DesiredPolicyRevision == "" && !hasEnterpriseDefault[server.EnterpriseID] {
+			targets[server.EnterpriseID] = append(targets[server.EnterpriseID], server)
 		}
 	}
-
 	policyTemplate := s.policyCatalog.Default()
 	var seedErrors []error
-	seeded := false
-	for enterpriseID, serverIDs := range unassigned {
-		sort.Strings(serverIDs)
+	for enterpriseID, targetServers := range targets {
+		policyID := randomID()
 		settings := PolicySettings{
 			SchemaVersion: policyTemplate.SchemaVersion, TemplateKey: policyTemplate.Key, TemplateVersion: policyTemplate.Version,
 			CRSTrack: policyTemplate.CRSTrack, CRSVersion: policyTemplate.CRSVersion, Target: "enterprise:" + enterpriseID,
-			AutoUpdate: true, PolicyOrigin: "system-seed", MigrationStatus: "CURRENT", ParanoiaLevel: policyTemplate.Defaults.ParanoiaLevel,
+			AutoUpdate: false, PolicyOrigin: "system-seed", MigrationStatus: "CURRENT", ParanoiaLevel: policyTemplate.Defaults.ParanoiaLevel,
 			InboundScore: policyTemplate.Defaults.InboundScore, RequestBody: policyTemplate.Defaults.RequestBody,
 		}
-		if _, err := s.createManagedPolicyRevision(ctx, enterpriseID, serverIDs, policyTemplate.Name, policyTemplate.Description, policyTemplate.Defaults.Mode, settings, ""); err != nil {
-			seedErrors = append(seedErrors, fmt.Errorf("seed enterprise %s: %w", enterpriseID, err))
+		revision, fullPath, err := s.preparePolicyRevision(policyTemplate, policyTemplate.Name, policyTemplate.Description, policyTemplate.Defaults.Mode, settings, "", "system-seed")
+		if err != nil {
+			seedErrors = append(seedErrors, err)
 			continue
 		}
-		seeded = true
-		s.logger.Info("system_policy_seeded", "enterprise_id", enterpriseID, "template", policyTemplate.Reference(), "crs_version", policyTemplate.CRSVersion, "server_count", len(serverIDs))
-	}
-	return seeded, errors.Join(seedErrors...)
-}
-
-func (s *Server) resolveManagedPolicyTarget(ctx context.Context, binding ManagedPolicyRecord, servers map[string]ServerRecord) ([]string, int, error) {
-	kind, id, ok := strings.Cut(binding.Settings.Target, ":")
-	if !ok || id == "" {
-		return nil, 0, errors.New("invalid managed policy target")
-	}
-	switch kind {
-	case "enterprise":
-		if id != binding.EnterpriseID {
-			return nil, 0, errors.New("enterprise target does not match policy owner")
-		}
-		serverIDs := make([]string, 0)
-		for _, server := range servers {
-			if server.EnterpriseID == binding.EnterpriseID {
-				serverIDs = append(serverIDs, server.ID)
-			}
-		}
-		return serverIDs, 1, nil
-	case "group", "server":
-		enterpriseID, serverIDs, err := s.store.ResolvePolicyTarget(ctx, binding.EnterpriseID, binding.Settings.Target)
+		serverIDs := orderedRolloutServerIDs(targetServers)
+		rolloutID, err := s.store.CreateEnterprisePolicyWithRollout(ctx, enterpriseID, policyID, policyTemplate.Name, policyTemplate.Description, settings.Target, policyTemplate.Key, PolicyStrategyManual, "", revision, "SEED", "QUEUED", serverIDs)
 		if err != nil {
-			return nil, 0, err
+			_ = os.Remove(fullPath)
+			seedErrors = append(seedErrors, err)
+			continue
 		}
-		if enterpriseID != binding.EnterpriseID {
-			return nil, 0, errors.New("resolved target does not match policy owner")
-		}
-		priority := 2
-		if kind == "server" {
-			priority = 3
-		}
-		return serverIDs, priority, nil
-	default:
-		return nil, 0, errors.New("unsupported managed policy target")
+		s.logger.Info("enterprise_policy_seeded", "enterprise_id", enterpriseID, "enterprise_policy_id", policyID, "rollout_id", rolloutID, "system_policy", policyTemplate.Reference(), "server_count", len(serverIDs))
 	}
+	return errors.Join(seedErrors...)
 }
 
-func (s *Server) reconcileManagedPolicy(ctx context.Context, binding ManagedPolicyRecord, serverIDs []string, servers map[string]ServerRecord) error {
-	if len(serverIDs) == 0 {
+func (s *Server) prepareAvailablePolicyUpdate(ctx context.Context, policy EnterprisePolicyRecord, serverIDs []string, servers []ServerRecord) error {
+	if !policy.HasUpdate() || policy.UpdateStrategy == PolicyStrategyPinned || policy.CurrentRevisionID == "" || len(serverIDs) == 0 || policy.HasActiveRollout || policy.LatestRolloutStatus == "FAILED" {
 		return nil
 	}
-	policyTemplate, ok := s.policyCatalog.Latest(binding.Settings.TemplateKey)
-	if !ok {
-		return fmt.Errorf("template %q is unavailable", binding.Settings.TemplateKey)
-	}
-	readyServerIDs, packageErr := s.ensureCRSPackages(ctx, binding, policyTemplate, serverIDs, servers)
-	if len(readyServerIDs) == 0 {
-		return packageErr
-	}
-	if binding.Settings.SchemaVersion == policyTemplate.SchemaVersion &&
-		binding.Settings.TemplateVersion == policyTemplate.Version &&
-		normalizeCRSVersion(binding.Settings.CRSVersion) == normalizeCRSVersion(policyTemplate.CRSVersion) {
-		return errors.Join(packageErr, s.store.AssignExistingPolicyToServers(ctx, binding.EnterpriseID, readyServerIDs, binding.ID, ""))
-	}
-
-	plan := systempolicy.PlanMigration(binding.Settings.SchemaVersion, binding.Settings.TemplateVersion, binding.Settings.CRSVersion, policyTemplate)
-	if plan.Status != "READY" {
-		return fmt.Errorf("migration status is %s", plan.Status)
-	}
-	settings := binding.Settings
-	settings.SchemaVersion = policyTemplate.SchemaVersion
-	settings.TemplateVersion = policyTemplate.Version
-	settings.CRSTrack = policyTemplate.CRSTrack
-	settings.CRSVersion = policyTemplate.CRSVersion
-	settings.PolicyOrigin = "system-migration"
-	settings.MigrationStatus = "MIGRATED"
-	settings.MigratedFrom = binding.ID
-	revisionID, err := s.createManagedPolicyRevision(ctx, binding.EnterpriseID, readyServerIDs, binding.Name, binding.Description, binding.Mode, settings, binding.ID)
+	blocked, err := s.store.PolicyUpdateBlocked(ctx, policy.ID, policy.LatestSystemPolicyID)
 	if err != nil {
-		return errors.Join(packageErr, err)
+		return err
 	}
-	s.logger.Info("system_policy_migrated", "enterprise_id", binding.EnterpriseID, "from_revision", binding.ID, "to_revision", revisionID, "template", policyTemplate.Reference(), "crs_version", policyTemplate.CRSVersion, "changes", plan.Changes, "warnings", plan.Warnings, "server_count", len(readyServerIDs))
-	return packageErr
+	if blocked {
+		return nil
+	}
+	targetTemplate, ok := splitSystemPolicyReference(s.policyCatalog, policy.LatestSystemPolicyID)
+	if !ok || targetTemplate.Status != systempolicy.StatusPublished {
+		return errors.New("latest published system policy is unavailable")
+	}
+	settings := policy.CurrentSettings
+	settings.SchemaVersion = targetTemplate.SchemaVersion
+	settings.TemplateKey = targetTemplate.Key
+	settings.TemplateVersion = targetTemplate.Version
+	settings.CRSTrack = targetTemplate.CRSTrack
+	settings.CRSVersion = targetTemplate.CRSVersion
+	settings.AutoUpdate = policy.UpdateStrategy == PolicyStrategyAutomatic
+	settings.PolicyOrigin = "system-migration"
+	settings.MigrationStatus = "READY"
+	settings.MigratedFrom = policy.CurrentRevisionID
+	revision, fullPath, err := s.preparePolicyRevision(targetTemplate, policy.Name, policy.Description, policy.CurrentMode, settings, policy.CurrentRevisionID, "system-migration")
+	if err != nil {
+		return err
+	}
+	status := "AWAITING_APPROVAL"
+	if policy.UpdateStrategy == PolicyStrategyAutomatic {
+		status = "QUEUED"
+	}
+	serverIDs = orderIDsByServers(serverIDs, servers)
+	rolloutID, err := s.store.CreatePolicyRollout(ctx, policy, policy.CurrentRevisionID, "UPDATE", status, "", &revision, "", targetTemplate.Reference(), serverIDs)
+	if err != nil {
+		_ = os.Remove(fullPath)
+		if strings.Contains(err.Error(), "active rollout") {
+			return nil
+		}
+		return err
+	}
+	s.logger.Info("enterprise_policy_update_available", "enterprise_policy_id", policy.ID, "rollout_id", rolloutID, "strategy", policy.UpdateStrategy, "from", policy.CurrentSystemPolicyID, "to", targetTemplate.Reference())
+	return nil
 }
 
-func (s *Server) ensureCRSPackages(ctx context.Context, binding ManagedPolicyRecord, policyTemplate systempolicy.Template, serverIDs []string, servers map[string]ServerRecord) ([]string, error) {
-	readyServerIDs := make([]string, 0, len(serverIDs))
-	var packageErrors []error
-	for _, serverID := range serverIDs {
-		server, ok := servers[serverID]
-		if !ok {
-			continue
+func (s *Server) processPolicyRollout(ctx context.Context, rollout PolicyRolloutRecord) error {
+	targetTemplate, ok := splitSystemPolicyReference(s.policyCatalog, rollout.TargetSystemPolicyVersionID)
+	if !ok {
+		_ = s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "FAILED", "시스템 정책 버전을 찾을 수 없습니다.")
+		return errors.New("target system policy version is unavailable")
+	}
+	if targetTemplate.Status == systempolicy.StatusWithdrawn {
+		_ = s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "FAILED", "회수된 시스템 정책 버전은 적용하거나 롤백할 수 없습니다.")
+		return errors.New("target system policy version is withdrawn")
+	}
+	targets, err := s.store.ListPolicyRolloutTargets(ctx, rollout.ID)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if target.Status == "FAILED" {
+			return s.handleRolloutFailure(ctx, rollout, targets, target.Detail)
 		}
-		if normalizeCRSVersion(server.Inventory.CRSVersion) == normalizeCRSVersion(policyTemplate.CRSVersion) {
-			readyServerIDs = append(readyServerIDs, serverID)
-			continue
-		}
-		if s.catalog == nil {
-			packageErrors = append(packageErrors, fmt.Errorf("server %s needs CRS %s but package catalog is unavailable", serverID, policyTemplate.CRSVersion))
-			continue
-		}
-		agentPackage, modulePackage, err := s.catalog.Resolve(server.Inventory)
-		if err != nil {
-			packageErrors = append(packageErrors, fmt.Errorf("server %s: %w", serverID, err))
-			continue
-		}
-		if normalizeCRSVersion(modulePackage.CRSVersion) != normalizeCRSVersion(policyTemplate.CRSVersion) {
-			packageErrors = append(packageErrors, fmt.Errorf("server %s package %s contains CRS %q, need %q", serverID, modulePackage.ID, modulePackage.CRSVersion, policyTemplate.CRSVersion))
-			continue
-		}
-		if server.AgentPackageID == agentPackage.ID && server.ModulePackageID == modulePackage.ID {
-			if server.PackageDeploymentStatus == "FAILED" {
-				packageErrors = append(packageErrors, fmt.Errorf("server %s CRS package deployment failed: %s", serverID, server.PackageDeploymentDetail))
+	}
+	for index := range targets {
+		target := &targets[index]
+		if target.Status == "DEFERRED" && target.Online {
+			resumeStatus := target.ResumeStatus
+			if resumeStatus == "" {
+				resumeStatus = "PENDING"
 			}
-			continue
+			if err := s.store.ResumePolicyRolloutTarget(ctx, rollout.ID, target.ServerID, resumeStatus); err != nil {
+				return err
+			}
+			target.Status = resumeStatus
+			target.ResumeStatus = ""
+		} else if target.Status != "DEFERRED" && target.Status != "APPLIED" && target.Status != "ROLLED_BACK" && target.Status != "FAILED" && !target.Online {
+			if err := s.store.DeferPolicyRolloutTarget(ctx, rollout.ID, target.ServerID, target.Status); err != nil {
+				return err
+			}
+			target.ResumeStatus = target.Status
+			target.Status = "DEFERRED"
 		}
-		if _, err := s.store.AssignPackages(ctx, binding.EnterpriseID, serverID, agentPackage.ID, modulePackage.ID, ""); err != nil {
-			packageErrors = append(packageErrors, fmt.Errorf("queue CRS package for server %s: %w", serverID, err))
-			continue
-		}
-		s.logger.Info("system_policy_crs_package_queued", "enterprise_id", binding.EnterpriseID, "server_id", serverID, "policy_revision", binding.ID, "module_package", modulePackage.ID, "crs_version", policyTemplate.CRSVersion)
 	}
-	return readyServerIDs, errors.Join(packageErrors...)
+	var deferredCanary *PolicyRolloutTargetRecord
+	canaryApplied := false
+	for index := range targets {
+		target := &targets[index]
+		if target.BatchNo != 0 {
+			continue
+		}
+		if target.Status == "APPLIED" || target.Status == "ROLLED_BACK" {
+			canaryApplied = true
+		}
+		if target.Status == "DEFERRED" {
+			deferredCanary = target
+		}
+	}
+	if !canaryApplied && deferredCanary != nil {
+		for index := range targets {
+			candidate := &targets[index]
+			if candidate.BatchNo > 0 && candidate.Status == "PENDING" && candidate.Online {
+				replacementBatch := candidate.BatchNo
+				if err := s.store.SwapPolicyRolloutCanary(ctx, rollout.ID, deferredCanary.ServerID, candidate.ServerID, replacementBatch); err != nil {
+					return err
+				}
+				deferredCanary.BatchNo = replacementBatch
+				candidate.BatchNo = 0
+				break
+			}
+		}
+	}
+	currentBatch := -1
+	for _, target := range targets {
+		if target.Status == "APPLIED" || target.Status == "ROLLED_BACK" || target.Status == "DEFERRED" {
+			continue
+		}
+		if currentBatch == -1 || target.BatchNo < currentBatch {
+			currentBatch = target.BatchNo
+		}
+	}
+	if currentBatch == -1 {
+		allDone := true
+		for _, target := range targets {
+			if target.Status == "DEFERRED" {
+				allDone = false
+				break
+			}
+		}
+		if allDone {
+			return s.store.CompletePolicyRollout(ctx, rollout)
+		}
+		return nil
+	}
+	rolloutStatus := "CANARY"
+	if currentBatch > 0 {
+		rolloutStatus = "EXPANDING"
+	}
+	if rollout.Status != rolloutStatus {
+		if err := s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, rolloutStatus, ""); err != nil {
+			return err
+		}
+	}
+	transitionRevisionID := existingTransitionRevision(targets)
+	for _, target := range targets {
+		if target.BatchNo != currentBatch || target.Status == "APPLIED" || target.Status == "ROLLED_BACK" {
+			continue
+		}
+		if !target.Online {
+			continue
+		}
+		if err := s.advanceRolloutTarget(ctx, rollout, targetTemplate, &transitionRevisionID, target); err != nil {
+			_ = s.store.UpdatePolicyRolloutTarget(ctx, rollout.ID, target.ServerID, "FAILED", truncate(err.Error(), 4096))
+			updatedTargets, loadErr := s.store.ListPolicyRolloutTargets(ctx, rollout.ID)
+			if loadErr != nil {
+				return errors.Join(err, loadErr)
+			}
+			return s.handleRolloutFailure(ctx, rollout, updatedTargets, err.Error())
+		}
+	}
+	return nil
 }
 
-func (s *Server) createManagedPolicyRevision(ctx context.Context, enterpriseID string, serverIDs []string, name, description, mode string, settings PolicySettings, migratedFrom string) (string, error) {
+func (s *Server) advanceRolloutTarget(ctx context.Context, rollout PolicyRolloutRecord, targetTemplate systempolicy.Template, transitionRevisionID *string, target PolicyRolloutTargetRecord) error {
+	switch target.Status {
+	case "PENDING", "DEFERRED":
+		if normalizeCRSVersion(target.InventoryCRSVersion) == normalizeCRSVersion(targetTemplate.CRSVersion) {
+			return s.store.AssignPolicyForRollout(ctx, rollout.ID, rollout.EnterpriseID, target.ServerID, target.FinalRevisionID, "", "POLICY_PENDING")
+		}
+		if rollout.FromRevisionID != "" {
+			if *transitionRevisionID == "" {
+				policy, err := s.store.EnterprisePolicyByID(ctx, rollout.EnterpriseID, rollout.EnterprisePolicyID)
+				if err != nil {
+					return err
+				}
+				revision, fullPath, err := s.prepareTransitionRevision(targetTemplate, policy, rollout.FromRevisionID)
+				if err != nil {
+					return err
+				}
+				if err := s.store.InsertPolicyRevision(ctx, rollout.EnterpriseID, rollout.EnterprisePolicyID, revision); err != nil {
+					_ = os.Remove(fullPath)
+					return err
+				}
+				*transitionRevisionID = revision.ID
+			}
+			return s.store.AssignPolicyForRollout(ctx, rollout.ID, rollout.EnterpriseID, target.ServerID, *transitionRevisionID, "", "TRANSITION_PENDING")
+		}
+		return s.queueRolloutPackage(ctx, rollout, targetTemplate, target)
+	case "TRANSITION_PENDING":
+		if target.TransitionPolicyStatus == "FAILED" {
+			return errors.New("DetectionOnly 전환 정책 적용에 실패했습니다.")
+		}
+		if target.CurrentPolicyRevision == target.TransitionRevisionID && target.TransitionPolicyStatus == "APPLIED" {
+			return s.queueRolloutPackage(ctx, rollout, targetTemplate, target)
+		}
+	case "PACKAGE_PENDING", "ROLLBACK_PENDING":
+		if target.PackageStatus == "FAILED" {
+			return errors.New("CRS 패키지 적용에 실패했습니다.")
+		}
+		if target.PackageStatus == "APPLIED" && normalizeCRSVersion(target.InventoryCRSVersion) == normalizeCRSVersion(targetTemplate.CRSVersion) {
+			return s.store.AssignPolicyForRollout(ctx, rollout.ID, rollout.EnterpriseID, target.ServerID, target.FinalRevisionID, "", "POLICY_PENDING")
+		}
+	case "POLICY_PENDING":
+		if target.PolicyStatus == "FAILED" {
+			return errors.New("최종 기업 정책 적용에 실패했습니다.")
+		}
+		if target.PolicyStatus == "APPLIED" && target.CurrentPolicyRevision == target.FinalRevisionID {
+			return s.store.UpdatePolicyRolloutTarget(ctx, rollout.ID, target.ServerID, "APPLIED", "")
+		}
+	}
+	return nil
+}
+
+func (s *Server) queueRolloutPackage(ctx context.Context, rollout PolicyRolloutRecord, targetTemplate systempolicy.Template, target PolicyRolloutTargetRecord) error {
+	if s.catalog == nil {
+		return errors.New("서명 패키지 catalog를 사용할 수 없습니다.")
+	}
+	server, err := s.store.ServerByID(ctx, rollout.EnterpriseID, target.ServerID)
+	if err != nil {
+		return err
+	}
+	agentPackage, modulePackage, err := s.catalog.ResolveCRS(server.Inventory, targetTemplate.CRSVersion)
+	if err != nil {
+		return err
+	}
+	targetStatus := "PACKAGE_PENDING"
+	if rollout.Type == "ROLLBACK" || rollout.Type == "RECOVERY" {
+		targetStatus = "ROLLBACK_PENDING"
+	}
+	_, err = s.store.AssignPackagesForRollout(ctx, rollout.ID, rollout.EnterpriseID, target.ServerID, agentPackage.ID, modulePackage.ID, "", targetStatus)
+	return err
+}
+
+func (s *Server) handleRolloutFailure(ctx context.Context, rollout PolicyRolloutRecord, targets []PolicyRolloutTargetRecord, detail string) error {
+	policy, err := s.store.EnterprisePolicyByID(ctx, rollout.EnterpriseID, rollout.EnterprisePolicyID)
+	if err != nil {
+		return err
+	}
+	if rollout.Type != "UPDATE" || policy.UpdateStrategy != PolicyStrategyAutomatic || rollout.FromRevisionID == "" {
+		return s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "PAUSED", truncate(detail, 4096))
+	}
+	recoveryServers := make([]string, 0)
+	for _, target := range targets {
+		if target.Status != "PENDING" && target.Status != "DEFERRED" && (target.Status != "FAILED" || rolloutTargetChanged(target)) {
+			recoveryServers = append(recoveryServers, target.ServerID)
+		}
+	}
+	if len(recoveryServers) == 0 {
+		return s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "PAUSED", truncate(detail, 4096))
+	}
+	if err := s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "FAILED", truncate(detail, 4096)); err != nil {
+		return err
+	}
+	fromRevision, err := s.store.PolicyRevisionByID(ctx, rollout.EnterprisePolicyID, rollout.FromRevisionID)
+	if err != nil {
+		return err
+	}
+	_, err = s.store.CreatePolicyRollout(ctx, policy, policy.CurrentRevisionID, "RECOVERY", "QUEUED", "", nil, fromRevision.ID, fromRevision.SystemPolicyVersionID, recoveryServers)
+	return err
+}
+
+func rolloutTargetChanged(target PolicyRolloutTargetRecord) bool {
+	return target.TransitionRevisionID != "" || target.PackageDeploymentID != "" || target.DesiredPolicyRevision == target.FinalRevisionID && target.FinalRevisionID != ""
+}
+
+func (s *Server) preparePolicyRevision(policyTemplate systempolicy.Template, name, description, mode string, settings PolicySettings, parentRevisionID, origin string) (PolicyRevisionInput, string, error) {
 	metadata := ManagedPolicyMetadata{
 		SchemaVersion: settings.SchemaVersion, TemplateKey: settings.TemplateKey, TemplateVersion: settings.TemplateVersion,
 		CRSTrack: settings.CRSTrack, CRSVersion: settings.CRSVersion, Target: settings.Target, AutoUpdate: settings.AutoUpdate,
-		PolicyOrigin: settings.PolicyOrigin, MigrationStatus: settings.MigrationStatus, MigratedFrom: migratedFrom,
+		PolicyOrigin: settings.PolicyOrigin, MigrationStatus: settings.MigrationStatus, MigratedFrom: parentRevisionID,
 	}
 	artifact, settingsJSON, err := buildManagedPolicyArtifact(mode, settings.ParanoiaLevel, settings.InboundScore, settings.RequestBody, strings.Join(settings.ExcludedPaths, "\n"), strings.Join(settings.ExcludedIPs, "\n"), settings.CustomRules, metadata)
 	if err != nil {
-		return "", err
+		return PolicyRevisionInput{}, "", err
 	}
 	revisionID := randomID()
 	hash, signature := s.policySigner.Sign(artifact)
 	relativePath := filepath.Join("policies", revisionID+".conf")
 	fullPath := filepath.Join(s.cfg.ArtifactRoot, relativePath)
 	if err := writeArtifact(fullPath, artifact); err != nil {
-		return "", err
+		return PolicyRevisionInput{}, "", err
 	}
-	if err := s.store.AssignPolicyToServers(ctx, enterpriseID, serverIDs, revisionID, truncate(name, 255), truncate(description, 1024), mode, settingsJSON, filepath.ToSlash(relativePath), hash, signature, ""); err != nil {
-		_ = os.Remove(fullPath)
-		return "", err
+	return PolicyRevisionInput{
+		ID: revisionID, SystemPolicyVersionID: policyTemplate.Reference(), ParentRevisionID: parentRevisionID,
+		Name: truncate(name, 255), Description: truncate(description, 1024), Mode: mode, SettingsJSON: settingsJSON,
+		ArtifactPath: filepath.ToSlash(relativePath), ArtifactSHA256: hash, ArtifactSignature: signature, PolicyOrigin: origin,
+	}, fullPath, nil
+}
+
+func (s *Server) prepareTransitionRevision(target systempolicy.Template, policy EnterprisePolicyRecord, parentRevisionID string) (PolicyRevisionInput, string, error) {
+	settings := PolicySettings{
+		SchemaVersion: target.SchemaVersion, TemplateKey: target.Key, TemplateVersion: target.Version, CRSTrack: target.CRSTrack,
+		CRSVersion: target.CRSVersion, Target: policy.Target, PolicyOrigin: "system-transition", MigrationStatus: "TRANSITION",
+		ParanoiaLevel: 1, InboundScore: 5, RequestBody: true,
 	}
-	return revisionID, nil
+	return s.preparePolicyRevision(target, policy.Name+" 전환 보호", "CRS 변경 중 사용하는 최소 DetectionOnly 정책", "DetectionOnly", settings, parentRevisionID, "system-transition")
+}
+
+func (s *Server) enterprisePolicyWinners(ctx context.Context, policies []EnterprisePolicyRecord, servers []ServerRecord) (map[string][]string, error) {
+	type winner struct {
+		policy   EnterprisePolicyRecord
+		priority int
+	}
+	serverByID := make(map[string]ServerRecord, len(servers))
+	for _, server := range servers {
+		if !server.Revoked {
+			serverByID[server.ID] = server
+		}
+	}
+	winners := make(map[string]winner)
+	for _, policy := range policies {
+		if policy.Status != EnterprisePolicyActive || policy.CurrentRevisionID == "" {
+			continue
+		}
+		ids, priority, err := s.resolveEnterprisePolicyTarget(ctx, policy, servers)
+		if err != nil {
+			continue
+		}
+		for _, serverID := range ids {
+			server, ok := serverByID[serverID]
+			if !ok || server.EnterpriseID != policy.EnterpriseID {
+				continue
+			}
+			current, exists := winners[serverID]
+			if !exists || priority > current.priority || priority == current.priority && policy.UpdatedAt.After(current.policy.UpdatedAt) {
+				winners[serverID] = winner{policy: policy, priority: priority}
+			}
+		}
+	}
+	result := make(map[string][]string)
+	for serverID, winner := range winners {
+		result[winner.policy.ID] = append(result[winner.policy.ID], serverID)
+	}
+	for policyID := range result {
+		sort.Strings(result[policyID])
+	}
+	return result, nil
+}
+
+func (s *Server) resolveEnterprisePolicyTarget(ctx context.Context, policy EnterprisePolicyRecord, servers []ServerRecord) ([]string, int, error) {
+	kind, id, ok := strings.Cut(policy.Target, ":")
+	if !ok || id == "" {
+		return nil, 0, errors.New("invalid enterprise policy target")
+	}
+	if kind == "enterprise" {
+		if id != policy.EnterpriseID {
+			return nil, 0, errors.New("enterprise target mismatch")
+		}
+		ids := make([]string, 0)
+		for _, server := range servers {
+			if !server.Revoked && server.EnterpriseID == policy.EnterpriseID {
+				ids = append(ids, server.ID)
+			}
+		}
+		return ids, 1, nil
+	}
+	enterpriseID, ids, err := s.store.ResolvePolicyTarget(ctx, policy.EnterpriseID, policy.Target)
+	if err != nil {
+		return nil, 0, err
+	}
+	if enterpriseID != policy.EnterpriseID {
+		return nil, 0, errors.New("resolved enterprise target mismatch")
+	}
+	priority := 2
+	if kind == "server" {
+		priority = 3
+	}
+	return ids, priority, nil
+}
+
+func (s *Server) reconcileEnterprisePolicyMembership(ctx context.Context, policies []EnterprisePolicyRecord, winners map[string][]string, servers []ServerRecord) error {
+	revisionOwners := make(map[string]string)
+	policyByID := make(map[string]EnterprisePolicyRecord)
+	for _, policy := range policies {
+		policyByID[policy.ID] = policy
+		if policy.CurrentRevisionID != "" {
+			revisionOwners[policy.CurrentRevisionID] = policy.ID
+		}
+	}
+	serverByID := make(map[string]ServerRecord, len(servers))
+	for _, server := range servers {
+		serverByID[server.ID] = server
+	}
+	var reconcileErrors []error
+	for policyID, serverIDs := range winners {
+		policy := policyByID[policyID]
+		eligible := make([]string, 0)
+		for _, serverID := range serverIDs {
+			server := serverByID[serverID]
+			if server.DesiredPolicyRevision == policy.CurrentRevisionID {
+				continue
+			}
+			if server.DesiredPolicyRevision != "" {
+				if _, managed := revisionOwners[server.DesiredPolicyRevision]; !managed {
+					continue
+				}
+			}
+			eligible = append(eligible, serverID)
+		}
+		if len(eligible) != 0 {
+			if err := s.store.AssignExistingPolicyToServers(ctx, policy.EnterpriseID, eligible, policy.CurrentRevisionID, ""); err != nil {
+				reconcileErrors = append(reconcileErrors, err)
+			}
+		}
+	}
+	return errors.Join(reconcileErrors...)
+}
+
+func splitSystemPolicyReference(catalog *systempolicy.Catalog, reference string) (systempolicy.Template, bool) {
+	key, versionText, ok := strings.Cut(reference, "@")
+	if !ok {
+		return systempolicy.Template{}, false
+	}
+	return catalog.Version(key, versionText)
+}
+
+func existingTransitionRevision(targets []PolicyRolloutTargetRecord) string {
+	for _, target := range targets {
+		if target.TransitionRevisionID != "" {
+			return target.TransitionRevisionID
+		}
+	}
+	return ""
+}
+
+func orderedRolloutServerIDs(servers []ServerRecord) []string {
+	sort.Slice(servers, func(i, j int) bool {
+		if servers[i].Status == "ONLINE" && servers[j].Status != "ONLINE" {
+			return true
+		}
+		if servers[i].Status != "ONLINE" && servers[j].Status == "ONLINE" {
+			return false
+		}
+		return servers[i].Name < servers[j].Name
+	})
+	ids := make([]string, 0, len(servers))
+	for _, server := range servers {
+		ids = append(ids, server.ID)
+	}
+	return ids
+}
+
+func orderIDsByServers(ids []string, servers []ServerRecord) []string {
+	allowed := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		allowed[id] = true
+	}
+	selected := make([]ServerRecord, 0, len(ids))
+	for _, server := range servers {
+		if allowed[server.ID] {
+			selected = append(selected, server)
+		}
+	}
+	return orderedRolloutServerIDs(selected)
 }
 
 func normalizeCRSVersion(value string) string {

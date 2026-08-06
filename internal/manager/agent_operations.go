@@ -21,6 +21,7 @@ func (s *Server) policyResult(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusNotFound, "policy deployment not found")
 		return
 	}
+	s.TriggerPolicySync()
 	writeJSON(w, http.StatusOK, map[string]bool{"accepted": true})
 }
 
@@ -38,6 +39,7 @@ func (s *Server) packageDeploymentResult(w http.ResponseWriter, r *http.Request)
 		writeProblem(w, http.StatusNotFound, "package deployment not found")
 		return
 	}
+	s.TriggerPolicySync()
 	writeJSON(w, http.StatusOK, map[string]bool{"accepted": true})
 }
 
