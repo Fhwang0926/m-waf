@@ -151,7 +151,8 @@ jobs:
             -v "$PWD/dist:/dist:ro" \
             "$TEST_WEBSERVER_IMAGE" sh -euxc '
               export DEBIAN_FRONTEND=noninteractive
-              apt-get --no-download install --no-install-recommends -y /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-apache_*.deb
+              dpkg --unpack /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-apache_*.deb
+              apt-get --no-download --fix-broken install --no-install-recommends -y
               dpkg-query -W mwaf-agent mwaf-modsecurity-apache
               /usr/bin/mwaf-agent -version
               apachectl configtest
@@ -171,7 +172,8 @@ jobs:
             -v "$PWD/dist:/dist:ro" \
             "$TEST_WEBSERVER_IMAGE" sh -euxc '
               export DEBIAN_FRONTEND=noninteractive
-              apt-get --no-download install --no-install-recommends -y /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-nginx_*.deb
+              dpkg --unpack /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-nginx_*.deb
+              apt-get --no-download --fix-broken install --no-install-recommends -y
               dpkg-query -W mwaf-agent mwaf-modsecurity-nginx
               /usr/bin/mwaf-agent -version
               nginx -t
@@ -192,7 +194,8 @@ jobs:
               apt-get --no-download install --no-install-recommends -y libapache2-mod-security2
               mkdir -p /opt/hosting/apache/bin
               ln -s "$(command -v apachectl)" /opt/hosting/apache/bin/apachectl
-              apt-get install --no-install-recommends -y /dist/packages/mwaf-modsecurity-apache-external_*.deb
+              dpkg --unpack /dist/packages/mwaf-modsecurity-apache-external_*.deb
+              apt-get --no-download --fix-broken install --no-install-recommends -y
               /usr/lib/mwaf/configure-external \
                 --webserver apache \
                 --binary /opt/hosting/apache/bin/apachectl \
@@ -225,7 +228,8 @@ jobs:
               apt-get --no-download install --no-install-recommends -y libnginx-mod-http-modsecurity
               mkdir -p /opt/hosting/nginx/sbin
               ln -s "$(command -v nginx)" /opt/hosting/nginx/sbin/nginx
-              apt-get install --no-install-recommends -y /dist/packages/mwaf-modsecurity-nginx-external_*.deb
+              dpkg --unpack /dist/packages/mwaf-modsecurity-nginx-external_*.deb
+              apt-get --no-download --fix-broken install --no-install-recommends -y
               /usr/lib/mwaf/configure-external \
                 --webserver nginx \
                 --binary /opt/hosting/nginx/sbin/nginx \

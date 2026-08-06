@@ -10,7 +10,7 @@ PR, `dev` push, 태그 검증에서 매번 반복되던 Go 의존성 처리, OWA
 - `packaging/sources.lock.yaml`에서 읽은 정확한 CRS SHA-256을 키로 `dist/coreruleset.tar.gz`를 캐시한다.
 - CRS cache hit 여부와 무관하게 package build 직전에 SHA-256을 다시 검증한다. 손상된 cache는 제거하고 공식 lock URL에서 다시 받은 뒤 최종 해시를 재검증한다.
 - Apache, Nginx, `curl`, `jq`, `logrotate`와 두 ModSecurity Connector DEB를 포함한 CI 전용 Ubuntu 24.04 fixture를 최소 전용 build context에서 만들고 BuildKit의 `gha` cache로 재사용한다. 이미 설치된 기반 패키지 archive는 제거하고 시험에 필요한 Connector와 미설치 의존성 DEB만 보존한다. Ubuntu 저장소 변화가 계속 가려지지 않도록 UTC 주차가 바뀌면 APT layer를 갱신한다.
-- 네 개의 설치 시험은 fixture 위에서 매번 현재 실행이 만든 M-WAF DEB를 `apt-get --no-download`로 실제 설치한다.
+- 네 개의 설치 시험은 fixture 위에서 매번 현재 실행이 만든 M-WAF DEB를 `dpkg --unpack`으로 등록한 뒤 `apt-get --no-download --fix-broken install`로 캐시된 의존성과 함께 실제 설정한다. 로컬 DEB 경로를 `apt-get --no-download install`에 직접 전달할 때 발생하는 APT의 `Pathname to install is not absolute` 오류를 피한다.
 - Manager image의 BuildKit cache는 `mwaf-manager-amd64`, 설치 fixture는 `mwaf-ci-webservers-amd64` scope를 사용해 서로 덮어쓰지 않는다.
 - Manager Docker build context는 `dist/bundle`, `dist/package-signing.pub`, `dist/empty`만 허용해 CRS archive, DEB, metadata와 private signing key가 context에 들어가지 않도록 줄였다.
 - Pages는 별도 build 단계가 없는 정적 업로드이므로 불필요한 cache action을 추가하지 않았다.
@@ -34,3 +34,10 @@ PR, `dev` push, 태그 검증에서 매번 반복되던 Go 의존성 처리, OWA
 - 저장소 지침에 따라 프론트엔드 빌드와 테스트는 수행하지 않았다.
 - 로컬 검증용 Docker image tag는 확인 후 모두 제거했다.
 - 실제 GitHub `gha` cache hit와 전체 GitHub Actions 실행은 push 이후 확인해야 한다.
+
+## 후속 CI 설치 오류 수정
+
+- `apt-get --no-download install /dist/packages/*.deb`가 로컬 파일을 내부적으로 basename으로 다시 처리하며 `Pathname to install is not absolute`로 종료되는 문제를 수정했다.
+- Apache, Nginx 및 두 외부 연동 설치 시험 모두 M-WAF DEB를 `dpkg --unpack`한 뒤 `apt-get --no-download --fix-broken install`로 fixture에 저장된 의존 패키지와 함께 설정한다.
+- Workflow YAML 파싱, 네 설치 경로의 변경 여부, 로컬 DEB가 더 이상 `apt-get` 인수로 전달되지 않는지와 `git diff --check`를 확인했다.
+- GitHub CLI 인증이 만료된 상태라 실제 Actions 재실행은 수행하지 않았다.
