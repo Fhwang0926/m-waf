@@ -335,6 +335,8 @@ Pull requests, `dev` pushes, and manual workflow runs stop after verification. T
 3. immutable `sha-<full-commit-sha>`;
 4. build provenance using GitHub OIDC.
 
+For the first successful tagged publication, the workflow confirms through the GitHub Packages API that the `m-waf-manager` container package does not exist, then creates a five-package bundle without an N-1 rollback target. From the second successful release onward, `latest` must be downloadable and its signed bundle must verify; an existing package with a missing `latest` tag fails closed instead of publishing without rollback packages. Failed pre-publication tag attempts do not force the first successful version to be named `v0.1.0`.
+
 The workflow does not initialize MariaDB or run browser/frontend tests. External-mode CI validates the M-WAF integration contract against pre-installed connectors, not every possible customer compiler/ABI combination. Full Manager-to-Agent enrollment, mTLS, policy, event-ingest, and database integration stays outside CI and is available through `deploy/e2e/run.sh` on a dedicated disposable Linux host.
 
 The workflow publishes the package but cannot perform GitHub's irreversible first-time visibility choice. After making the package public once, confirm anonymous access before distributing the Compose stack:
