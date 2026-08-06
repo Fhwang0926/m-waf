@@ -29,7 +29,6 @@ create_random_secret() {
 
 create_random_secret secrets/mariadb_app_password 24
 create_random_secret secrets/mariadb_root_password 32
-create_random_secret secrets/mwaf_admin_password 18
 create_random_secret secrets/mwaf_session_key 32
 
 if [ ! -e secrets/mwaf_policy_signing_key.pem ] || [ ! -e secrets/mwaf_policy_signing_public.pem ]; then
@@ -71,4 +70,4 @@ fi
 
 chmod 0600 secrets/*
 echo "Prepared M-WAF deployment secrets without overwriting existing files."
-echo "Admin password: $script_dir/secrets/mwaf_admin_password"
+echo "Open the Admin UI to create the first system administrator."

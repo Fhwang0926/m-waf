@@ -4,6 +4,7 @@ deploy/compose/.env
 deploy/compose/secrets/*
 !deploy/compose/secrets/README.md
 bin/
+.local/
 dist/
 coverage.out
 *.log

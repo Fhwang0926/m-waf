@@ -14,12 +14,31 @@ import (
 	"time"
 )
 
-const sessionCookieName = "mwaf_session"
+const (
+	sessionCookieName   = "mwaf_session"
+	setupCSRFCookieName = "mwaf_setup_csrf"
+)
 
 type sessionData struct {
-	Username  string `json:"username"`
-	ExpiresAt int64  `json:"expires_at"`
-	CSRF      string `json:"csrf"`
+	UserID         string `json:"user_id"`
+	Username       string `json:"username"`
+	DisplayName    string `json:"display_name"`
+	Role           Role   `json:"role"`
+	EnterpriseID   string `json:"enterprise_id,omitempty"`
+	EnterpriseName string `json:"enterprise_name,omitempty"`
+	ExpiresAt      int64  `json:"expires_at"`
+	CSRF           string `json:"csrf"`
+}
+
+func (s sessionData) RoleLabel() string    { return s.Role.Label() }
+func (s sessionData) IsSystemAdmin() bool  { return s.Role == RoleSystemAdmin }
+func (s sessionData) CanOperate() bool     { return roleAtLeast(s.Role, RoleEnterpriseAdmin) }
+func (s sessionData) CanManageUsers() bool { return s.CanOperate() }
+func (s sessionData) ScopeEnterpriseID() string {
+	if s.IsSystemAdmin() {
+		return ""
+	}
+	return s.EnterpriseID
 }
 
 type sessionManager struct {
@@ -28,12 +47,38 @@ type sessionManager struct {
 
 func newSessionManager(key []byte) *sessionManager { return &sessionManager{key: key} }
 
-func (s *sessionManager) create(username string) (string, sessionData, error) {
+func (s *sessionManager) setupCSRF() (string, error) {
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	payload := base64.RawURLEncoding.EncodeToString(raw)
+	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte("setup:" + payload))
+	return payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (s *sessionManager) validSetupCSRF(token string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return false
+	}
+	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte("setup:" + parts[0]))
+	actual, err := base64.RawURLEncoding.DecodeString(parts[1])
+	return err == nil && hmac.Equal(actual, mac.Sum(nil))
+}
+
+func (s *sessionManager) create(user UserRecord) (string, sessionData, error) {
 	random := make([]byte, 24)
 	if _, err := rand.Read(random); err != nil {
 		return "", sessionData{}, err
 	}
-	data := sessionData{Username: username, ExpiresAt: time.Now().UTC().Add(8 * time.Hour).Unix(), CSRF: base64.RawURLEncoding.EncodeToString(random)}
+	data := sessionData{
+		UserID: user.ID, Username: user.Username, DisplayName: user.DisplayName, Role: user.Role,
+		EnterpriseID: user.EnterpriseID, EnterpriseName: user.EnterpriseName,
+		ExpiresAt: time.Now().UTC().Add(8 * time.Hour).Unix(), CSRF: base64.RawURLEncoding.EncodeToString(random),
+	}
 	raw, err := json.Marshal(data)
 	if err != nil {
 		return "", sessionData{}, err
@@ -65,7 +110,7 @@ func (s *sessionManager) parse(token string) (sessionData, error) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return sessionData{}, err
 	}
-	if data.Username == "" || data.CSRF == "" || time.Now().UTC().Unix() >= data.ExpiresAt {
+	if data.UserID == "" || data.Username == "" || data.CSRF == "" || !roleAtLeast(data.Role, RoleEnterpriseUser) || time.Now().UTC().Unix() >= data.ExpiresAt {
 		return sessionData{}, errors.New("expired session")
 	}
 	return data, nil
@@ -79,6 +124,14 @@ func clearSessionCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 }
 
+func setSetupCSRFCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{Name: setupCSRFCookieName, Value: token, Path: "/setup", MaxAge: 600, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+}
+
+func clearSetupCSRFCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: setupCSRFCookieName, Value: "", Path: "/setup", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+}
+
 func secureEqual(a, b []byte) bool {
 	ah := sha256.Sum256(a)
 	bh := sha256.Sum256(b)
@@ -88,6 +141,46 @@ func secureEqual(a, b []byte) bool {
 type loginLimiter struct {
 	mu       sync.Mutex
 	attempts map[string][]time.Time
+}
+
+type requestLimitWindow struct {
+	started time.Time
+	count   int
+}
+
+type requestLimiter struct {
+	mu      sync.Mutex
+	windows map[string]requestLimitWindow
+	limit   int
+	window  time.Duration
+}
+
+func newRequestLimiter(limit int, window time.Duration) *requestLimiter {
+	return &requestLimiter{windows: make(map[string]requestLimitWindow), limit: limit, window: window}
+}
+
+func (l *requestLimiter) allow(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if len(l.windows) > 1024 {
+		for entryKey, entry := range l.windows {
+			if now.Sub(entry.started) >= l.window {
+				delete(l.windows, entryKey)
+			}
+		}
+	}
+	current := l.windows[key]
+	if current.started.IsZero() || now.Sub(current.started) >= l.window {
+		l.windows[key] = requestLimitWindow{started: now, count: 1}
+		return true
+	}
+	if current.count >= l.limit {
+		return false
+	}
+	current.count++
+	l.windows[key] = current
+	return true
 }
 
 func newLoginLimiter() *loginLimiter { return &loginLimiter{attempts: make(map[string][]time.Time)} }

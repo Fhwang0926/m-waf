@@ -5,7 +5,7 @@
 | 항목 | 내용 |
 |---|---|
 | 문서명 | M-WAF 통합 웹방화벽 개발 계획서 |
-| 문서 버전 | v0.5 |
+| 문서 버전 | v0.6 |
 | 작성일 | 2026-08-06 |
 | 문서 상태 | 기본 수직 MVP 구현 완료, 확장 항목 TODO |
 | 대상 독자 | 제품 책임자, 보안 담당자, 백엔드 개발자, 시스템 개발자, 운영 담당자, QA 담당자 |
@@ -13,7 +13,7 @@
 | 1차 지원 환경 | Linux, Apache HTTP Server, Nginx, ModSecurity, OWASP CRS 4.x |
 | 배포 형태 | 보호 서버 설치형 에이전트 및 모듈 + 별도 중앙 관리자 서버 Docker Compose 배포 |
 
-> 구현 상태(2026-08-06): Manager, MariaDB schema, Agent, 정책 모드 적용/롤백, 감사 로그 spool/배치 전송, Ubuntu 24.04 amd64 Apache/Nginx DEB, Manager 내장 서명 bundle, Compose 및 `dev` GHCR workflow까지 구현했다. 실제 MVP 지원 범위와 검증 결과는 [`../complete/2026-08-06-m-waf-mvp-implementation.md`](../complete/2026-08-06-m-waf-mvp-implementation.md)에 기록한다. 이 문서의 Rocky/RPM, 서버 그룹, 예외, RBAC, 승인, 원격 upgrade와 HA 항목은 후속 계획으로 유지한다.
+> 구현 상태(2026-08-06): Manager, MariaDB schema, Agent, 정책 적용/롤백, 감사 로그 spool/배치 전송, Ubuntu 24.04 amd64 Apache/Nginx DEB, Manager 내장 서명 bundle과 Compose를 구현했다. PR과 `dev`는 검증만 수행하고 `vMAJOR.MINOR.PATCH` 태그에서만 GHCR Manager image를 생성·게시한다. 실제 MVP 지원 범위와 검증 결과는 [`../complete/2026-08-06-m-waf-mvp-implementation.md`](../complete/2026-08-06-m-waf-mvp-implementation.md)에 기록한다.
 
 ## 1. 문서 목적
 
@@ -32,7 +32,7 @@
 7. ModSecurity, Connector, CRS와 테스트 도구는 공식 오픈소스 upstream을 그대로 가져와 검증 후 빌드한다.
 8. upstream 소스는 기본적으로 수정하지 않고 M-WAF는 빌드·패키징·중앙관리에 필요한 최소 코드만 추가한다.
 9. 관리자 서버는 `mwaf-manager`와 MariaDB를 Docker Compose로 배포하며 고객 웹 서버에는 Docker를 요구하지 않는다.
-10. `dev` 브랜치의 검증된 빌드는 공개 GHCR Manager image로 게시하고, 같은 빌드에서 생성한 Agent와 웹서버별 모듈 패키지를 Manager image 안에 포함한다.
+10. `dev` 브랜치는 검증만 수행하고, `vMAJOR.MINOR.PATCH` 태그의 검증된 빌드만 공개 GHCR Manager image로 게시한다. 같은 tag commit에서 생성한 Agent와 웹서버별 모듈 패키지를 Manager image 안에 포함한다.
 
 ## 2. 제품 정의
 
@@ -331,7 +331,7 @@ flowchart LR
 
 | 출발지 | 목적지 | 포트 | 용도 | 비고 |
 |---|---|---:|---|---|
-| 보호 서버 bootstrap/Agent | Manager Agent API | TCP 9443 | 등록, package resolve/download, heartbeat, 정책과 이벤트 | 최초 bootstrap은 일회용 token, 등록 후 mTLS |
+| 보호 서버 bootstrap/Agent | Manager Agent API | TCP 10443 | 등록, package resolve/download, heartbeat, 정책과 이벤트 | 최초 bootstrap은 일회용 token, 등록 후 mTLS |
 | 관리자 브라우저 | Manager Admin UI/API | TCP 8443 | 정책 및 서버 관리 | HTTPS, 관리망 접근 제한 |
 | Manager 컨테이너 | MariaDB 컨테이너 | TCP 3306 | 관리 데이터와 이벤트 저장 | Compose 내부 network 전용, host port 공개 금지 |
 | 외부 사용자 | 보호 서버 Apache/Nginx | 기존 80/443 | 고객 웹 트래픽 | M-WAF 관리 통신과 분리 |
@@ -613,15 +613,15 @@ deploy/compose/
 
 `images.lock.yaml`에는 Manager와 MariaDB image의 registry, 전체 version, multi-architecture별 digest, source repository, license, SBOM 위치와 검증 일자를 기록한다. Compose 기준 구성은 다음과 같다. 릴리스 과정에서 두 이미지 변수를 정확한 version과 digest로 채우며 `latest` 또는 움직이는 `lts` tag만 사용하지 않는다.
 
-공개 저장소 clone 직후의 개발 배포 진입점은 다음 하나로 통일한다.
+공개 저장소 clone 직후의 로컬 개발 진입점은 다음 하나로 통일한다.
 
 ```text
 git clone https://github.com/Fhwang0926/m-waf.git
 cd m-waf
-make deploy-dev
+make dev
 ```
 
-`make deploy-dev`는 `deploy/compose/prepare.sh`를 호출해 Docker/Compose version을 확인하고, 없는 `.env`와 random secret file만 새로 생성하고, 공개 GHCR image를 pull한 뒤 `docker compose up -d`를 실행한다. 기존 `.env`, secret 또는 volume은 절대 덮어쓰거나 초기화하지 않는다. 기본 개발 image는 `ghcr.io/fhwang0926/m-waf-manager:dev`이며 실제 pull digest를 배포 기록에 남긴다. 운영 배포는 mutable `:dev`가 아니라 승인된 `dev-<full-commit-sha>` 또는 release digest를 `.env`에 고정한다.
+`make dev`는 Manager Docker image를 만들지 않고 현재 checkout의 Go source를 직접 실행한다. 로컬 MariaDB와 없는 secret만 준비하며 기존 `.env`, secret 또는 volume은 덮어쓰거나 초기화하지 않는다. 태그 릴리스 배포는 `MWAF_MANAGER_IMAGE`를 승인된 전체 버전 또는 digest로 설정한 뒤 `make deploy`를 사용한다.
 
 ```yaml
 name: mwaf
@@ -654,7 +654,7 @@ services:
       retries: 5
 
   manager:
-    image: ${MWAF_MANAGER_IMAGE:-ghcr.io/fhwang0926/m-waf-manager:dev}
+    image: ${MWAF_MANAGER_IMAGE:-ghcr.io/fhwang0926/m-waf-manager:latest}
     restart: unless-stopped
     depends_on:
       mariadb:
@@ -674,7 +674,7 @@ services:
       - mwaf_logs:/var/log/mwaf-manager
     ports:
       - "${MWAF_ADMIN_BIND:-127.0.0.1}:8443:8443"
-      - "${MWAF_AGENT_BIND:-0.0.0.0}:9443:9443"
+      - "${MWAF_AGENT_BIND:-0.0.0.0}:${MWAF_AGENT_PORT:-10443}:${MWAF_AGENT_PORT:-10443}"
     networks:
       - manager_net
       - db_net
@@ -712,7 +712,7 @@ networks:
 - Manager OCI image는 non-root 사용자와 최소 base image를 사용하며 shell과 package manager를 포함하지 않는다.
 - MariaDB 데이터, Manager 상태/Artifact와 로그는 컨테이너 교체와 무관한 named volume에 보존한다.
 - Admin UI의 기본 bind는 `127.0.0.1`이며 원격 관리가 필요하면 관리망 IP를 명시한다.
-- Agent API 9443만 보호 서버가 접근할 수 있도록 host firewall을 제한한다.
+- Agent API 10443만 보호 서버가 접근할 수 있도록 host firewall을 제한한다.
 - 운영 절차에서 `docker compose down -v`, volume 삭제, DB reset을 사용하지 않는다.
 - 이미지 upgrade 전 MariaDB와 `mwaf_data`를 백업하고 복원 가능성을 확인한다.
 - production image digest 변경은 릴리스 승인과 rollback digest를 함께 기록한다.
@@ -728,7 +728,7 @@ networks:
 | 시스템 디스크 | 40 GB | 40 GB 이상 |
 | DB/Artifact 디스크 | SSD 100 GB | SSD 200 GB 이상 |
 | 운영체제 | 지원되는 64-bit Linux LTS | 지원되는 64-bit Linux LTS |
-| 네트워크 | TCP 9443/8443 제한 접근 | 보호 서버에서 TCP 9443, 관리망에서 TCP 8443 접근 |
+| 네트워크 | TCP 10443/8443 제한 접근 | 보호 서버에서 TCP 10443, 관리망에서 TCP 8443 접근 |
 | 시간 동기화 | NTP 또는 동등 기능 | NTP 또는 동등한 시간 동기화 필수 |
 | 백업 | 외부 암호화 백업 저장소 | 관리자 서버와 분리된 암호화 백업 저장소 |
 
@@ -795,7 +795,7 @@ networks:
 | 통합 환경 | Docker Compose 또는 격리 VM | Manager-Agent-Apache/Nginx 통합 검증 |
 | Manager 배포 | Docker Engine + Docker Compose plugin | Manager와 MariaDB의 버전 고정 및 단일 명령 배포 |
 | Container image | M-WAF Manager OCI image + MariaDB 공식 image | 검증된 runtime과 영속 volume 분리 |
-| CI/CD | GitHub Actions | `dev` push 검증, package matrix build, Manager image 게시 |
+| CI/CD | GitHub Actions | PR/`dev` package 검증, release tag 전용 Manager image 게시 |
 | Container registry | GitHub Container Registry | 공개 `ghcr.io/fhwang0926/m-waf-manager` 배포 |
 | Package 배포 | Manager image 내장 DEB/RPM repository | Manager release와 Agent/module version을 한 bundle로 고정 |
 | 취약점 검사 | `govulncheck`, `gosec`, Trivy | Go 의존성 및 배포 Artifact 검사 |
@@ -1133,27 +1133,25 @@ Package build 결과는 Manager image build 전에 다음 구조로 모은다.
 - Manager image 크기는 릴리스 지표로 측정하며 지원 matrix 밖 package를 임의로 누적하지 않는다.
 - Manager UI와 API는 자신의 image에 없는 package version을 선택할 수 없다.
 
-### 10.8 `dev` 브랜치 GitHub Actions 및 GHCR 게시
+### 10.8 PR/`dev` 검증 및 태그 전용 GHCR 게시
 
-본 계획에서 백엔드 Docker image는 Admin API, Agent API, 내장 UI와 package repository를 함께 제공하는 `mwaf-manager` image를 의미한다. Workflow 파일은 `.github/workflows/dev-manager-image.yml`로 한다. `dev` 브랜치 push와 수동 `workflow_dispatch`에서만 publish job을 실행하고 pull request 및 fork workflow에서는 검증 build만 허용한다.
+본 계획에서 백엔드 Docker image는 Admin API, Agent API, 내장 UI와 package repository를 함께 제공하는 `mwaf-manager` image를 의미한다. Workflow 파일은 `.github/workflows/dev-manager-image.yml`로 유지한다. Pull request, `dev` 브랜치 push와 수동 실행은 검증 job만 허용하고 `vMAJOR.MINOR.PATCH` 태그에서만 publish job을 실행한다.
 
 ```yaml
-name: dev-manager-image
+name: verify-and-release-manager
 
 on:
   push:
     branches: [dev]
+    tags: ["v*.*.*"]
   workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
-  attestations: write
-  id-token: write
 
 concurrency:
-  group: dev-manager-image
-  cancel-in-progress: false
+  group: mwaf-${{ github.ref }}
+  cancel-in-progress: true
 ```
 
 Workflow job 순서는 다음과 같다.
@@ -1162,26 +1160,26 @@ Workflow job 순서는 다음과 같다.
 2. `build-agent`: 지원 OS/architecture용 `mwaf-agent` DEB/RPM을 빌드하고 package test, checksum, SBOM과 build-info를 생성한다.
 3. `build-modules`: Apache/Nginx build matrix별 module DEB/RPM을 공식 upstream 절차로 빌드하고 configtest/go-ftw 결과를 생성한다.
 4. `assemble-bundle`: 모든 matrix artifact가 성공한 경우에만 직전 승인 Manager digest의 rollback package를 검증해 결합하고 repository metadata, compatibility manifest와 bundle signature를 생성한다.
-5. `build-manager`: Go Manager binary와 UI를 빌드하고 release bundle을 OCI layer에 복사한다.
-6. `image-verify`: image를 실행하여 bundle signature, package catalog, MariaDB readiness와 최소 bootstrap resolve를 검증한다.
-7. `publish-ghcr`: GitHub `GITHUB_TOKEN`으로 GHCR에 로그인하여 image를 push한다.
-8. `attest`: image digest에 build provenance와 SBOM attestation을 연결하고 최종 digest를 workflow summary에 기록한다.
+5. PR/`dev`/수동 실행은 여기서 종료하며 Manager Docker image를 생성하지 않는다.
+6. tag 실행은 검증된 DEB만 artifact로 전달하고 보호된 release key로 bundle을 서명한다.
+7. `build-manager`: tag commit의 Go Manager와 서명 bundle로 OCI image를 빌드한다.
+8. `publish-ghcr`: tag publish job에만 `packages: write`, `attestations: write`, `id-token: write`를 부여하고 image와 provenance를 게시한다.
 
 게시 대상과 tag 정책은 다음과 같다.
 
 ```text
-ghcr.io/fhwang0926/m-waf-manager:dev                 개발 최신 mutable tag
-ghcr.io/fhwang0926/m-waf-manager:dev-<full-sha>      commit 고정 immutable tag
+ghcr.io/fhwang0926/m-waf-manager:<major.minor.patch> release version
+ghcr.io/fhwang0926/m-waf-manager:sha-<full-sha>      commit 고정 immutable tag
+ghcr.io/fhwang0926/m-waf-manager:latest              최신 정식 release 편의 tag
 ghcr.io/fhwang0926/m-waf-manager@sha256:<digest>     배포 및 감사 기준
 ```
 
-- `dev` tag는 clone 후 빠른 시험 배포 용도로만 사용한다.
-- 운영 또는 장기 파일럿은 full commit tag 또는 digest로 고정한다.
+- `latest`, major와 major.minor tag는 편의용이며 운영 또는 장기 파일럿은 전체 version 또는 digest로 고정한다.
 - package matrix 중 하나라도 실패하거나 bundle/image 검증이 실패하면 어떤 tag도 push하지 않는다.
 - OCI label `org.opencontainers.image.source=https://github.com/Fhwang0926/m-waf`를 포함해 GHCR package와 source repository를 연결한다.
 - GHCR package visibility는 public으로 설정하고 익명 pull을 배포 인수 시험으로 확인한다.
 - workflow는 장기 credential/PAT를 사용하지 않고 `GITHUB_TOKEN` 최소 권한을 사용한다.
-- DEB/RPM 및 bundle signing private key는 보호된 `dev-publish` GitHub Environment secret으로만 주입하며 Manager image에는 verification public key만 포함한다.
+- Bundle signing private key는 `RELEASE_BUNDLE_SIGNING_KEY_B64` secret으로 tag publish job에만 주입하며, 없으면 release를 실패시킨다. Manager image에는 verification public key만 포함한다.
 - 공식/외부 GitHub Action은 tag가 아닌 검토된 전체 commit SHA로 고정한다.
 - fork pull request에는 package write, signing secret과 id-token publish 권한을 제공하지 않는다.
 - 중간 DEB/RPM은 짧은 보존기간의 CI artifact로만 전달하며 고객 설치 source는 최종 Manager image로 제한한다.
@@ -1736,7 +1734,7 @@ MVP에서는 한 사용자가 여러 역할을 가질 수 있도록 한다. 2인
 - Manager source commit과 내장 package bundle source commit 일치 검증
 - GHCR package를 공개 source repository에 OCI source label로 연결
 - 공개 저장소에는 package/OCI signing private key, 운영 secret, enrollment token을 저장하지 않음
-- `dev` publish는 보호된 branch push에서만 허용하고 fork/PR에는 package write와 signing secret을 제공하지 않음
+- tag publish는 보호된 release tag에서만 허용하고 `dev`, fork/PR에는 package write와 signing secret을 제공하지 않음
 - ModSecurity, Connector, CRS의 정확한 버전 기록
 - 정책 Artifact Ed25519 서명
 - Agent에 신뢰할 수 있는 정책 공개키 고정
@@ -1991,7 +1989,7 @@ Agent와 Manager는 하나의 Go module에서 공통 모델, Artifact 검증 및
 - Manager/MariaDB Docker Compose 배포 Artifact
 - Embedded Package Catalog, compatibility resolver와 bootstrap/package API
 - Agent/Apache/Nginx package bundle OCI layer 포함
-- clone 후 `make deploy-dev` 단일 진입점
+- clone 후 로컬 source 개발은 `make dev`, 태그 image 배포는 `make deploy` 단일 진입점
 - Agent API
 - 서버 및 그룹 관리
 - 정책과 Revision 관리
@@ -2073,7 +2071,7 @@ Agent와 Manager는 하나의 Go module에서 공통 모델, Artifact 검증 및
 - Go 및 OS 의존성 취약점 검사
 - 설치/업그레이드/제거 검증
 - Manager 백업 및 복원 스크립트
-- `.github/workflows/dev-manager-image.yml`과 `dev` branch GHCR publish
+- `.github/workflows/dev-manager-image.yml`의 PR/`dev` 검증과 release tag 전용 GHCR publish
 - package matrix build, bundle assemble, Manager image build의 순차 gate
 - OCI source label, public visibility, SBOM과 provenance attestation
 - commit tag/digest 고정과 익명 pull 검증
@@ -2085,8 +2083,9 @@ Agent와 Manager는 하나의 Go module에서 공통 모델, Artifact 검증 및
 - 패키지 무결성 검증
 - Manager 백업 복원 리허설
 - 기존 정책을 유지한 Agent 업그레이드
-- `dev` push에서 bundle을 포함한 Manager image가 GHCR에 게시됨
-- public clone에서 registry 로그인 없이 `make deploy-dev` 기동
+- `dev` push에서는 image가 생성되지 않고 검증만 완료됨
+- `vMAJOR.MINOR.PATCH` tag에서 bundle을 포함한 Manager image가 GHCR에 게시됨
+- public clone에서 `make dev`로 source 개발 환경이 기동됨
 - package build 하나가 실패하면 Manager image가 게시되지 않음
 
 ### 단계 7. 파일럿 및 운영 전환 — 3주
@@ -2143,7 +2142,7 @@ Agent와 Manager는 하나의 Go module에서 공통 모델, Artifact 검증 및
 - Docker Compose 최초 기동, 재기동과 image 교체 후 volume 보존
 - MariaDB healthcheck 실패 시 Manager 시작 대기와 복구
 - MariaDB 일시 중단 중 Agent spool 유지 및 복구 후 재전송
-- 공개 저장소 clone 후 `make deploy-dev` 최초 기동
+- 공개 저장소 clone 후 `make dev` source 개발 및 `make deploy` tag image 최초 기동
 - GHCR 익명 pull과 OCI source label/repository 연결
 - Manager image 내부 Agent/Apache/Nginx package catalog 완전성
 - Bootstrap inventory별 정확한 Agent/module 두 package resolve
@@ -2322,7 +2321,7 @@ DB와 `mwaf_data` volume은 동일 복구 지점으로 식별할 수 있는 mani
 - 기존 Apache/Nginx 주 설정을 직접 덮어쓰지 않는다.
 - 미지원 Apache/Nginx에서는 안전하게 설치가 중단된다.
 - 설치 및 제거 실패 시 기존 웹 서비스가 유지된다.
-- 공개 저장소 clone 후 `make deploy-dev`로 Manager와 MariaDB가 기동된다.
+- 공개 저장소 clone 후 `make dev`로 source Manager와 개발 MariaDB가 기동된다.
 - Manager 서버의 상시 실행 application service는 `mwaf-manager`와 `mariadb` 두 컨테이너뿐이다.
 - Agent와 Apache/Nginx module은 별도 Manager-side container가 아니라 Manager image에 포함된 고객 서버용 signed package다.
 - MariaDB 3306은 host에 publish되지 않고 Compose 내부 network에서만 접근된다.
@@ -2381,9 +2380,10 @@ DB와 `mwaf_data` volume은 동일 복구 지점으로 식별할 수 있는 mani
 ### 25.8 공개 저장소 CI와 package 공급
 
 - `dev` 브랜치 push가 `.github/workflows/dev-manager-image.yml`을 실행한다.
-- Agent와 지원 Apache/Nginx module matrix가 모두 성공한 경우에만 Manager image가 생성된다.
+- PR과 `dev`에서는 Agent와 지원 Apache/Nginx module matrix를 검증하지만 Manager image를 생성하지 않는다.
+- `vMAJOR.MINOR.PATCH` 태그에서 동일 검증이 모두 성공한 경우에만 Manager image가 생성된다.
 - Manager image에는 같은 source commit의 Agent/module package, manifest, checksum, signature, SBOM과 license가 포함된다.
-- image는 `ghcr.io/fhwang0926/m-waf-manager:dev`, `dev-<full-sha>`와 digest로 게시된다.
+- image는 전체 release version, major/minor 편의 tag, `latest`, `sha-<full-sha>`와 digest로 게시된다.
 - GHCR image는 public이며 로그인하지 않은 환경에서 pull된다.
 - OCI image label과 provenance에서 공개 source repository와 commit을 확인할 수 있다.
 - Bootstrap은 Manager에서 Agent 1개와 정확한 웹서버 module 1개만 내려받아 고객 서버에 설치한다.
@@ -2403,7 +2403,7 @@ DB와 `mwaf_data` volume은 동일 복구 지점으로 식별할 수 있는 mani
 - 이벤트 보존 기간
 - 클라이언트 IP 중앙 저장 허용 여부
 - Manager 백업 RPO/RTO
-- `dev` branch protection과 publish 승인 담당자
+- `dev` branch protection과 release tag 생성·publish 승인 담당자
 - GHCR package public visibility 및 repository 연결 설정 담당자
 - DEB/RPM 및 bundle signing key 보관 방식
 - Manager image 최대 허용 크기와 N/N-1 rollback bundle 범위

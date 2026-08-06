@@ -51,25 +51,25 @@ func LoadCertificateAuthority(certificatePath, privateKeyPath string) (*Certific
 
 func (c *CertificateAuthority) CertificatePEM() string { return c.certificatePEM }
 
-func (c *CertificateAuthority) SignAgentCSR(csrPEM, serverID string) (string, string, error) {
+func (c *CertificateAuthority) SignAgentCSR(csrPEM, serverID string) (string, string, time.Time, error) {
 	block, _ := pem.Decode([]byte(csrPEM))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
-		return "", "", errors.New("invalid certificate request PEM")
+		return "", "", time.Time{}, errors.New("invalid certificate request PEM")
 	}
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	if err := csr.CheckSignature(); err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serial, err := rand.Int(rand.Reader, serialLimit)
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	spiffe, _ := url.Parse("spiffe://mwaf/agent/" + serverID)
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Second)
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
@@ -84,10 +84,10 @@ func (c *CertificateAuthority) SignAgentCSR(csrPEM, serverID string) (string, st
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, c.certificate, csr.PublicKey, c.privateKey)
 	if err != nil {
-		return "", "", err
+		return "", "", time.Time{}, err
 	}
 	encoded := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	return string(encoded), hex.EncodeToString(serial.Bytes()), nil
+	return string(encoded), hex.EncodeToString(serial.Bytes()), template.NotAfter, nil
 }
 
 func parseSigner(der []byte) (crypto.Signer, error) {

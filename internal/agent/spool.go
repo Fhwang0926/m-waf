@@ -14,9 +14,10 @@ import (
 )
 
 type SpoolItem struct {
-	Batch      model.EventBatch `json:"batch"`
-	NextOffset int64            `json:"next_offset"`
-	path       string
+	Batch        model.EventBatch `json:"batch"`
+	NextPosition AuditPosition    `json:"next_position"`
+	NextOffset   int64            `json:"next_offset,omitempty"`
+	path         string
 }
 
 type EventSpool struct {
@@ -25,8 +26,8 @@ type EventSpool struct {
 
 func NewEventSpool(directory string) *EventSpool { return &EventSpool{directory: directory} }
 
-func (s *EventSpool) Put(batch model.EventBatch, nextOffset int64) (SpoolItem, error) {
-	item := SpoolItem{Batch: batch, NextOffset: nextOffset, path: filepath.Join(s.directory, batch.BatchID+".json")}
+func (s *EventSpool) Put(batch model.EventBatch, nextPosition AuditPosition) (SpoolItem, error) {
+	item := SpoolItem{Batch: batch, NextPosition: nextPosition, path: filepath.Join(s.directory, batch.BatchID+".json")}
 	raw, err := json.Marshal(item)
 	if err != nil {
 		return SpoolItem{}, err
@@ -62,7 +63,11 @@ func (s *EventSpool) Pending() ([]SpoolItem, error) {
 		if err := decoder.Decode(&item); err != nil {
 			return nil, fmt.Errorf("decode event spool %s: %w", entry.Name(), err)
 		}
-		if item.Batch.BatchID == "" || item.NextOffset < 0 || entry.Name() != item.Batch.BatchID+".json" {
+		if item.NextPosition.Empty() && item.NextOffset > 0 {
+			item.NextPosition.Offset = item.NextOffset
+		}
+		item.NextOffset = 0
+		if item.Batch.BatchID == "" || item.NextPosition.Offset < 0 || entry.Name() != item.Batch.BatchID+".json" {
 			return nil, fmt.Errorf("invalid event spool %s", entry.Name())
 		}
 		item.path = path

@@ -4,6 +4,12 @@ services:
   mariadb:
     image: ${MARIADB_IMAGE:-mariadb:11.8.6@sha256:78a5047d3ba33975f183f183c2464cc7f1eab13ec8667e57cc9a5821d6da7577}
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
     environment:
       MARIADB_DATABASE: ${MWAF_DB_NAME:-mwaf}
       MARIADB_USER: ${MWAF_DB_USER:-mwaf}
@@ -28,23 +34,27 @@ services:
       retries: 10
 
   manager:
-    image: ${MWAF_MANAGER_IMAGE:-ghcr.io/fhwang0926/m-waf-manager:dev}
+    image: ${MWAF_MANAGER_IMAGE:-ghcr.io/fhwang0926/m-waf-manager:latest}
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
     depends_on:
       mariadb:
         condition: service_healthy
     environment:
-      MWAF_ADMIN_ADDR: :8443
-      MWAF_AGENT_ADDR: :9443
-      MWAF_AGENT_PUBLIC_URL: ${MWAF_AGENT_PUBLIC_URL:-https://localhost:9443}
+      MWAF_ADMIN_ADDR: ":${MWAF_ADMIN_PORT:-8443}"
+      MWAF_AGENT_ADDR: ":${MWAF_AGENT_PORT:-10443}"
+      MWAF_AGENT_PUBLIC_URL: "${MWAF_AGENT_PUBLIC_URL:-https://${MWAF_MANAGER_HOST:-localhost}:${MWAF_AGENT_PORT:-10443}}"
       MWAF_DB_HOST: mariadb
       MWAF_DB_PORT: "3306"
       MWAF_DB_NAME: ${MWAF_DB_NAME:-mwaf}
       MWAF_DB_USER: ${MWAF_DB_USER:-mwaf}
       MWAF_DB_PASSWORD_FILE: /run/secrets/mariadb_app_password
       MWAF_DB_MIGRATE: "true"
-      MWAF_ADMIN_USERNAME: ${MWAF_ADMIN_USERNAME:-admin}
-      MWAF_ADMIN_PASSWORD_FILE: /run/secrets/mwaf_admin_password
       MWAF_SESSION_KEY_FILE: /run/secrets/mwaf_session_key
       MWAF_TLS_CERT: /run/secrets/mwaf_tls_cert
       MWAF_TLS_KEY: /run/secrets/mwaf_tls_key
@@ -59,7 +69,6 @@ services:
       MWAF_EVENT_RETENTION: ${MWAF_EVENT_RETENTION:-720h}
     secrets:
       - mariadb_app_password
-      - mwaf_admin_password
       - mwaf_session_key
       - mwaf_tls_cert
       - mwaf_tls_key
@@ -71,8 +80,8 @@ services:
       - mwaf_data:/var/lib/mwaf-manager
       - mwaf_logs:/var/log/mwaf-manager
     ports:
-      - "${MWAF_ADMIN_BIND:-127.0.0.1}:8443:8443"
-      - "${MWAF_AGENT_BIND:-0.0.0.0}:9443:9443"
+      - "${MWAF_ADMIN_BIND:-127.0.0.1}:${MWAF_ADMIN_PORT:-8443}:${MWAF_ADMIN_PORT:-8443}"
+      - "${MWAF_AGENT_BIND:-0.0.0.0}:${MWAF_AGENT_PORT:-10443}:${MWAF_AGENT_PORT:-10443}"
     networks:
       - manager_net
       - db_net
@@ -89,8 +98,6 @@ secrets:
     file: ./secrets/mariadb_app_password
   mariadb_root_password:
     file: ./secrets/mariadb_root_password
-  mwaf_admin_password:
-    file: ./secrets/mwaf_admin_password
   mwaf_session_key:
     file: ./secrets/mwaf_session_key
   mwaf_tls_cert:

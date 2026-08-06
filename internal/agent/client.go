@@ -3,11 +3,14 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -17,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Fhwang0926/m-waf/internal/config"
@@ -25,6 +29,7 @@ import (
 
 type Client struct {
 	cfg      config.Agent
+	mu       sync.RWMutex
 	http     *http.Client
 	serverID string
 }
@@ -42,10 +47,14 @@ func NewClient(cfg config.Agent) (*Client, error) {
 	return client, nil
 }
 
-func (c *Client) ServerID() string { return c.serverID }
+func (c *Client) ServerID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.serverID
+}
 
 func (c *Client) Enroll(ctx context.Context, inventory model.Inventory) error {
-	if c.serverID != "" {
+	if c.ServerID() != "" {
 		return nil
 	}
 	if c.cfg.EnrollmentToken == "" {
@@ -85,16 +94,73 @@ func (c *Client) Enroll(ctx context.Context, inventory model.Inventory) error {
 	if err := atomicWrite(filepath.Join(c.cfg.StateDirectory, "server-id"), []byte(response.ServerID+"\n"), 0o640); err != nil {
 		return err
 	}
-	c.serverID = response.ServerID
 	httpClient, err := c.buildHTTPClient(true)
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
+	c.serverID = response.ServerID
 	c.http = httpClient
+	c.mu.Unlock()
 	if c.cfg.EnrollmentFile != "" {
 		_ = os.Remove(c.cfg.EnrollmentFile)
 	}
 	return nil
+}
+
+func (c *Client) CertificateExpiresWithin(window time.Duration) (bool, time.Time, error) {
+	certificate, err := loadLeafCertificate(c.cfg.Certificate)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	return time.Until(certificate.NotAfter) <= window, certificate.NotAfter, nil
+}
+
+func (c *Client) RenewCertificate(ctx context.Context) (time.Time, error) {
+	keyPEM, err := os.ReadFile(c.cfg.PrivateKey)
+	if err != nil {
+		return time.Time{}, err
+	}
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		return time.Time{}, errors.New("decode agent private key")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse agent private key: %w", err)
+	}
+	signer, ok := parsed.(crypto.Signer)
+	if !ok {
+		return time.Time{}, errors.New("agent private key cannot sign")
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{Organization: []string{"M-WAF Agent"}, CommonName: c.ServerID()}}, signer)
+	if err != nil {
+		return time.Time{}, err
+	}
+	request := model.CertificateRenewRequest{CSRPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))}
+	var response model.CertificateRenewResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/agent/v1/certificate/renew", request, &response); err != nil {
+		return time.Time{}, err
+	}
+	if response.CertificatePEM == "" || response.ExpiresAt.IsZero() {
+		return time.Time{}, errors.New("manager returned an invalid renewed certificate")
+	}
+	if _, err := tls.X509KeyPair([]byte(response.CertificatePEM), keyPEM); err != nil {
+		return time.Time{}, fmt.Errorf("renewed certificate does not match agent key: %w", err)
+	}
+	if err := atomicWrite(c.cfg.Certificate, []byte(response.CertificatePEM), 0o640); err != nil {
+		return time.Time{}, err
+	}
+	httpClient, err := c.buildHTTPClient(true)
+	if err != nil {
+		return time.Time{}, err
+	}
+	c.mu.Lock()
+	previous := c.http
+	c.http = httpClient
+	c.mu.Unlock()
+	previous.CloseIdleConnections()
+	return response.ExpiresAt, nil
 }
 
 func (c *Client) Heartbeat(ctx context.Context, heartbeat model.HeartbeatRequest) error {
@@ -109,6 +175,24 @@ func (c *Client) DesiredState(ctx context.Context) (model.DesiredState, error) {
 
 func (c *Client) SendEvents(ctx context.Context, batch model.EventBatch) error {
 	return c.doJSON(ctx, http.MethodPost, "/agent/v1/events/batch", batch, nil)
+}
+
+func (c *Client) SendPolicyResult(ctx context.Context, revisionID, status, detail string) error {
+	return c.doJSON(ctx, http.MethodPost, "/agent/v1/policies/"+revisionID+"/result", model.DeploymentResult{Status: status, Detail: detail}, nil)
+}
+
+func (c *Client) SendPackageResult(ctx context.Context, deploymentID, status, detail string) error {
+	return c.doJSON(ctx, http.MethodPost, "/agent/v1/package-deployments/"+deploymentID+"/result", model.DeploymentResult{Status: status, Detail: detail}, nil)
+}
+
+func (c *Client) NextCommand(ctx context.Context) (model.AgentCommand, error) {
+	var command model.AgentCommand
+	err := c.doJSON(ctx, http.MethodGet, "/agent/v1/commands/next", nil, &command)
+	return command, err
+}
+
+func (c *Client) SendCommandResult(ctx context.Context, commandID, status, detail string) error {
+	return c.doJSON(ctx, http.MethodPost, "/agent/v1/commands/"+commandID+"/result", model.DeploymentResult{Status: status, Detail: detail}, nil)
 }
 
 func (c *Client) EnsurePolicyPublicKey(ctx context.Context) error {
@@ -131,12 +215,51 @@ func (c *Client) DownloadPolicy(ctx context.Context, path string) ([]byte, error
 	return c.doBytes(ctx, path, 1<<20)
 }
 
+func (c *Client) DownloadPackage(ctx context.Context, item model.PackageDownload, destination string) error {
+	if item.ID == "" || !strings.HasPrefix(item.URL, "/agent/v1/packages/") || item.Size < 1 || item.Size > 1<<30 {
+		return errors.New("invalid package download")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.ManagerURL, "/")+item.URL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		return fmt.Errorf("manager returned %s: %s", resp.Status, strings.TrimSpace(string(limited)))
+	}
+	file, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	hash := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(resp.Body, item.Size+1))
+	closeErr := file.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if written != item.Size {
+		return fmt.Errorf("package size mismatch: got %d want %d", written, item.Size)
+	}
+	if !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), item.SHA256) {
+		return errors.New("package checksum mismatch")
+	}
+	return nil
+}
+
 func (c *Client) doBytes(ctx context.Context, path string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.ManagerURL, "/")+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +294,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, requestBody, r
 	if requestBody != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -186,6 +309,12 @@ func (c *Client) doJSON(ctx context.Context, method, path string, requestBody, r
 		}
 	}
 	return nil
+}
+
+func (c *Client) httpClient() *http.Client {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.http
 }
 
 func (c *Client) buildHTTPClient(withCertificate bool) (*http.Client, error) {
@@ -207,6 +336,22 @@ func (c *Client) buildHTTPClient(withCertificate bool) (*http.Client, error) {
 	}
 	transport := &http.Transport{TLSClientConfig: tlsConfig, MaxIdleConns: 4, MaxIdleConnsPerHost: 4, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 30 * time.Second}
 	return &http.Client{Transport: transport, Timeout: 2 * time.Minute}, nil
+}
+
+func loadLeafCertificate(path string) (*x509.Certificate, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, errors.New("decode agent certificate")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	return certificate, nil
 }
 
 func atomicWrite(path string, data []byte, mode os.FileMode) error {

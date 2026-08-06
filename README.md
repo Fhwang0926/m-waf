@@ -5,7 +5,7 @@ M-WAF is a lightweight hosting-provider WAF control plane. Customer web servers 
 1. `mwaf-agent`
 2. `mwaf-modsecurity-apache` or `mwaf-modsecurity-nginx`
 
-The separate Manager server runs MariaDB and one Manager container. That Manager image embeds the exact Agent package and both web-server module packages produced from the same `dev` commit.
+The separate Manager server runs MariaDB and one Manager container. A tagged release image embeds the exact Agent package and both web-server module packages produced from the same release commit.
 
 ## Project introduction page
 
@@ -15,6 +15,7 @@ The no-build static introduction page is published with GitHub Pages:
 - Page source: `site/`
 - Deployment workflow: `.github/workflows/pages.yml`
 - Trigger: a `dev` push that changes `site/**` or the Pages workflow, and manual workflow dispatch
+- Product positioning: enterprise-oriented architecture, support scope, and a source-attributed comparison with the DeepFinder software WAF
 
 Before the first publication, set **Repository Settings → Pages → Build and deployment → Source** to **GitHub Actions**. The workflow uploads only the `site/` directory and uses the minimum Pages deployment permissions. Until the workflow has been pushed and completed successfully, the public URL may return 404.
 
@@ -27,11 +28,12 @@ Before the first publication, set **Repository Settings → Pages → Build and 
 | Customer OS | Ubuntu Server 24.04 LTS, amd64 |
 | Web server | Ubuntu 24.04 distro-default Apache or Nginx build matching the embedded catalog |
 | WAF | Apache ModSecurity v2 distro module or Nginx libmodsecurity v3 connector package |
-| Rules | Unmodified OWASP CRS v4.28.0 |
-| Policy | Per-server `DetectionOnly` or `On`, signed and rollback-safe |
+| Rules | OWASP CRS v4.28.0 with managed sensitivity, threshold, URL/IP exclusions, and restricted custom `SecRule` additions |
+| Policy | Per-server or server-group policy revisions, signed, status-tracked, and rollback-safe |
 | Events | ModSecurity JSON audit log batch forwarding and Manager event list |
+| Access | Enterprise-isolated users, enterprise administrators, and one first-setup system administrator |
 
-Rocky Linux/RPM, ARM64, custom-built web servers, server groups, rule exclusions, RBAC, HA, and automatic Agent/module upgrades are outside this first executable MVP. Unsupported inventory is rejected before the installer changes the web-server configuration.
+Rocky Linux/RPM, ARM64, custom-built web servers, custom permission sets, HA, and unattended scheduled upgrades are outside this first executable MVP. A manager can force a compatible signed-bundle Agent/module update or manifest-declared rollback. Unsupported inventory is rejected before the installer changes the web-server configuration.
 
 ## Supported customer web servers and versions
 
@@ -83,16 +85,42 @@ flowchart LR
 
 The Compose stack intentionally has only two runtime services: `mariadb` and `manager`. Agent and module are not containers; their signed DEB files live under `/opt/mwaf/bundles/current` inside the Manager image and are installed on real customer web servers.
 
-## Deploy the Manager from a clone
+## Local source development
+
+Prerequisites are Docker Engine with the Compose plugin, OpenSSL, and Go 1.26 or newer. Start the complete local development path with one command:
+
+```sh
+make dev
+```
+
+The command creates missing local secrets and certificates, starts an isolated `mwaf-local` MariaDB project on `127.0.0.1:3306`, applies forward-only migrations to that local database, and runs the Manager directly from the current source with `go run`. It does not build a Manager Docker image. It uses `dist/bundle` when present and otherwise extracts the signed package bundle from `MWAF_BUNDLE_IMAGE`. Before the first tagged release exists, Manager still starts for UI/API development with package installation endpoints marked unavailable.
+
+- Admin UI: `https://localhost:8443/setup`
+- Agent API: `https://localhost:10443`
+- Stop the foreground Manager: `Ctrl-C`
+- Stop local MariaDB without deleting its volume: `make dev-down`
+- Follow local MariaDB output: `make dev-db-logs`
+
+Admin UI and Agent API ports are independent. Override either one before `make dev` or in `deploy/compose/.env`:
+
+```dotenv
+MWAF_ADMIN_PORT=8443
+MWAF_AGENT_PORT=10443
+```
+
+Local source development binds both endpoints to loopback by default. `MWAF_DEV_ADMIN_BIND` and `MWAF_DEV_AGENT_BIND` can change those local bind addresses. Container deployment uses `MWAF_ADMIN_BIND` and `MWAF_AGENT_BIND`; keep the Admin UI on a management network, while protected servers must be able to reach the Agent API.
+
+HTML templates and CSS are embedded in the Go binary. After changing Go, HTML, or CSS, stop the foreground process and run `make dev` again. Never add `-v` to the local Compose shutdown command unless the isolated development data is intentionally disposable.
+
+## Deploy a tagged Manager release from a clone
 
 Prerequisites: Docker Engine, the Docker Compose plugin, OpenSSL, and access to the public GHCR image.
 
-After the first successful `dev` workflow publish, the repository owner must perform GitHub's one-time visibility setting: **Profile → Packages → m-waf-manager → Package settings → Change visibility → Public**. GitHub creates a personal-account package as private by default even when it is linked to a public source repository. Public container visibility is required for anonymous clone-to-deploy pulls and cannot later be changed back to private.
+After the first tagged release is published, the repository owner must perform GitHub's one-time visibility setting: **Profile → Packages → m-waf-manager → Package settings → Change visibility → Public**. GitHub creates a personal-account package as private by default even when it is linked to a public source repository. Public container visibility is required for anonymous clone-to-deploy pulls and cannot later be changed back to private.
 
 ```sh
 git clone https://github.com/Fhwang0926/m-waf.git
 cd m-waf
-git switch dev
 cp deploy/compose/.env.example deploy/compose/.env
 ```
 
@@ -100,27 +128,33 @@ Before the first start, edit these two values in `deploy/compose/.env`:
 
 ```dotenv
 MWAF_MANAGER_HOST=manager.example.com
-MWAF_AGENT_PUBLIC_URL=https://manager.example.com:9443
+MWAF_ADMIN_PORT=8443
+MWAF_AGENT_PORT=10443
+MWAF_AGENT_PUBLIC_URL=https://manager.example.com:10443
+MWAF_MANAGER_IMAGE=ghcr.io/fhwang0926/m-waf-manager:0.1.0
 ```
 
 Then deploy:
 
 ```sh
-make deploy-dev
+make deploy
 ```
 
 `prepare.sh` only creates missing secret files and certificates. It never overwrites existing secrets or volumes. The database port is internal to Compose and is not published on the host.
 
-Read the generated initial password and open the administrator UI:
+Manager and MariaDB container output uses Docker's size-bounded `local` logging driver (`10 MB` per file, up to `5` compressed files per container). MariaDB's file-based slow-query log is disabled in the minimal stack because it requires a separate host log-rotation policy.
+
+Check that the services are running and open the administrator UI:
 
 ```sh
-cat deploy/compose/secrets/mwaf_admin_password
 docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml ps
 ```
 
 - Admin UI: `https://manager.example.com:8443`
-- Agent/package API: `https://manager.example.com:9443`
+- Agent/package API: `https://manager.example.com:10443`
 - Local CA certificate to import or securely copy: `deploy/compose/secrets/mwaf_ca_cert.pem`
+
+On the first visit, `/setup` asks for the system administrator username, display name, and password. The setup route closes after the first account is created. The system administrator then creates each enterprise and its first enterprise administrator from **기업 관리** and **사용자 관리**.
 
 The generated TLS certificate is signed by the local M-WAF CA. For public browser trust, terminate Admin HTTPS at an existing reverse proxy with an approved certificate while leaving the Agent API mTLS path intact.
 
@@ -134,9 +168,9 @@ The generated TLS certificate is signed by the local M-WAF CA. For public browse
 Example:
 
 ```sh
-curl --fail --cacert ./mwaf_ca_cert.pem https://manager.example.com:9443/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
+curl --fail --cacert ./mwaf_ca_cert.pem https://manager.example.com:10443/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
 sudo sh /tmp/mwaf-install.sh \
-  --manager https://manager.example.com:9443 \
+  --manager https://manager.example.com:10443 \
   --token 'ONE_USE_TOKEN' \
   --ca ./mwaf_ca_cert.pem
 ```
@@ -154,43 +188,67 @@ No compiler, Go toolchain, Docker runtime, or source checkout is required on the
 
 ## Operate the MVP
 
-- **서버** shows inventory, Agent/module versions, status, heartbeat, and applied policy revision.
-- **정책 배포** creates a signed per-server policy containing only `SecRuleEngine DetectionOnly` or `SecRuleEngine On`.
+- **시스템 관리자** can view all enterprises, create enterprises, create enterprise administrators/users, and operate every server.
+- **기업 관리자** can view and operate only its enterprise, and can add read-only enterprise users.
+- **기업 사용자** can view only its enterprise's servers and WAF events.
+- **시스템 설정** controls WAF event retention (default 30 days) and administrator audit retention (default 365 days). Cleanup runs at startup and then on the configured cleanup interval in bounded batches.
+- **서버** shows inventory, Agent/module versions, heartbeat, policy/package deployment results, and the latest fixed control command.
+- Agent control uses authenticated HTTPS polling during the normal heartbeat loop. It does not open a WebSocket or arbitrary command port, and arbitrary shell execution is not provided.
+- `Agent 중지` and `서버 종료` cannot be reversed through Manager after connectivity is lost; use the host console, service manager, hypervisor, or power controller to recover them.
+- Package rollback is enabled only when the signed bundle manifest names valid previous Agent and module artifacts.
+- **서버 그룹** manages enterprise-scoped groups and deploys one immutable policy revision to every active member.
+- **정책 관리** configures detection/blocking mode, CRS sensitivity, anomaly threshold, request-body inspection, URL/IP exclusions, and restricted custom `SecRule` lines. It also shows per-revision pending, success, and failure counts.
+- **서버 제어** queues only four fixed polling commands: Agent restart/stop and server restart/poweroff. Arbitrary shell input is not accepted.
+- **패키지 제어** force-installs the current compatible signed bundle or the bundle manifest's explicit rollback pair and records the Agent result.
+- **등록 해제** preserves server/event history but blocks the enrolled Agent certificate immediately.
+- **사용자 관리** supports display-name/role/password updates, activation changes, and audit-preserving soft deletion within the administrator's enterprise scope.
 - Agent verifies the Ed25519 signature and SHA-256, writes `/etc/mwaf/active/main.conf`, runs `apachectl configtest` or `nginx -t`, and reloads only on a change.
 - If validation or reload fails, Agent restores the prior policy and reloads it.
-- ModSecurity writes JSON lines to `/var/log/modsecurity/audit.jsonl`; Agent sends at most 500 events per idempotent batch.
+- Each Agent uses a Manager-issued client certificate so the mTLS API can bind heartbeat, policy, package, command, and event traffic to one enrolled server without storing a reusable API password.
+- Agent renews its 90-day mTLS certificate with the existing private key beginning 30 days before expiration.
+- ModSecurity writes JSON lines to `/var/log/modsecurity/audit.jsonl`; distro `logrotate` bounds the file and Agent tracks device, inode, and offset across truncation or replacement.
+- Agent drains up to 20 idempotent batches of 500 events every 2 seconds and applies exponential retry backoff up to one minute when Manager is unavailable.
 
 Useful Manager commands:
 
 ```sh
 make logs
-make pull-dev
+make pull
 make down
 ```
 
 Do not use `docker compose down -v` on an environment whose MariaDB data must be retained.
 
-## `dev` image publication
+## Verification and tag-only image publication
 
-Every push to `dev` runs `.github/workflows/dev-manager-image.yml`. The workflow:
+Relevant pull requests, every push to `dev`, and `vMAJOR.MINOR.PATCH` tags run `.github/workflows/dev-manager-image.yml`. The read-only verification job:
 
 1. tests the Go code;
 2. builds the Linux amd64 Agent;
 3. builds `mwaf-agent`, Apache, and Nginx DEB packages;
 4. downloads official CRS v4.28.0 and verifies its locked SHA-256;
 5. records exact Apache/Nginx version and build hashes in the bundle catalog;
-6. signs the bundle manifest;
-7. embeds all three packages in the Manager image;
-8. publishes `ghcr.io/fhwang0926/m-waf-manager:dev` and `:dev-<full-commit-sha>`;
-9. publishes build provenance using GitHub OIDC.
+6. installs the Agent and Apache module on a clean pinned Ubuntu 24.04 amd64 container and runs `apachectl configtest`;
+7. installs the Agent and Nginx module on a separate clean container and runs `nginx -t`;
+8. verifies both clean environments match the catalog's exact server version/build hash, load ModSecurity and CRS, and create the protected audit log;
+9. signs a temporary verification bundle without creating a Manager Docker image.
+
+Pull requests, `dev` pushes, and manual workflow runs stop after verification. They do not build or publish the project Docker image. Only a validated semantic release tag push such as `v0.1.0` starts the publish job. The job downloads the exact tested DEBs through a workflow artifact, requires `RELEASE_BUNDLE_SIGNING_KEY_B64`, signs the release bundle, embeds it in the Manager image, and then publishes:
+
+1. `ghcr.io/fhwang0926/m-waf-manager:<major.minor.patch>`;
+2. moving convenience tags `<major.minor>`, `<major>`, and `latest`;
+3. immutable `sha-<full-commit-sha>`;
+4. build provenance using GitHub OIDC.
+
+The workflow does not initialize MariaDB or run browser/frontend tests. Full Manager-to-Agent enrollment, mTLS, policy, event-ingest, and database integration remains a separate disposable-environment test stage.
 
 The workflow publishes the package but cannot perform GitHub's irreversible first-time visibility choice. After making the package public once, confirm anonymous access before distributing the Compose stack:
 
 ```sh
-docker pull ghcr.io/fhwang0926/m-waf-manager:dev
+docker pull ghcr.io/fhwang0926/m-waf-manager:latest
 ```
 
-For a stable dev signing identity, set repository secret `DEV_BUNDLE_SIGNING_KEY_B64` to a base64-encoded Ed25519 PKCS#8 private-key PEM. If absent, the dev workflow creates an image-local ephemeral signing key so a clean public fork can still build. Production releases should require a protected persistent key and deploy by immutable digest.
+Set repository secret `RELEASE_BUNDLE_SIGNING_KEY_B64` to a base64-encoded Ed25519 PKCS#8 private-key PEM before pushing the first release tag. Tagged publication fails closed when the key is absent; release images never use an ephemeral signing identity. Production deployments should pin the full version tag or image digest rather than `latest`.
 
 ## Local backend verification
 
@@ -213,7 +271,7 @@ migrations/                  Forward-only MariaDB schema
 packaging/                   Agent/module DEB builders and source locks
 build/containers/manager/    Manager multi-stage Dockerfile
 deploy/compose/              Clone-to-deploy Manager stack
-.github/workflows/           dev branch build and GHCR publication
+.github/workflows/           PR/dev verification and tag-only GHCR publication
 site/                        No-build GitHub Pages introduction site
 docs/                        Detailed design and completion records
 ```

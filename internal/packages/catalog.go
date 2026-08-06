@@ -78,11 +78,17 @@ func (c *Catalog) ManifestSHA256() string {
 }
 
 func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, model.PackageArtifact, error) {
+	rollbackTargets := make(map[string]bool)
+	for _, artifact := range c.manifest.Artifacts {
+		if artifact.RollbackID != "" {
+			rollbackTargets[artifact.RollbackID] = true
+		}
+	}
 	var agent *model.PackageArtifact
 	var module *model.PackageArtifact
 	for i := range c.manifest.Artifacts {
 		artifact := c.manifest.Artifacts[i]
-		if !matchesBase(artifact, inventory) {
+		if rollbackTargets[artifact.ID] || !matchesBase(artifact, inventory) {
 			continue
 		}
 		switch artifact.Kind {
@@ -111,6 +117,31 @@ func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, mod
 		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("no %s module package for %s %s version %s build %s", inventory.WebServer, inventory.OSID, inventory.OSVersion, inventory.WebServerVersion, inventory.WebServerBuild)
 	}
 	return *agent, *module, nil
+}
+
+func (c *Catalog) Artifact(id string) (model.PackageArtifact, bool) {
+	artifact, ok := c.byID[id]
+	return artifact, ok
+}
+
+func (c *Catalog) Rollback(agentID, moduleID string) (model.PackageArtifact, model.PackageArtifact, error) {
+	agent, ok := c.byID[agentID]
+	if !ok || agent.Kind != "agent" || agent.RollbackID == "" {
+		return model.PackageArtifact{}, model.PackageArtifact{}, errors.New("agent rollback package is unavailable")
+	}
+	module, ok := c.byID[moduleID]
+	if !ok || module.Kind != "module" || module.RollbackID == "" {
+		return model.PackageArtifact{}, model.PackageArtifact{}, errors.New("module rollback package is unavailable")
+	}
+	agentRollback, ok := c.byID[agent.RollbackID]
+	if !ok || agentRollback.Kind != "agent" {
+		return model.PackageArtifact{}, model.PackageArtifact{}, errors.New("agent rollback target is invalid")
+	}
+	moduleRollback, ok := c.byID[module.RollbackID]
+	if !ok || moduleRollback.Kind != "module" {
+		return model.PackageArtifact{}, model.PackageArtifact{}, errors.New("module rollback target is invalid")
+	}
+	return agentRollback, moduleRollback, nil
 }
 
 func (c *Catalog) Open(id string) (model.PackageArtifact, *os.File, error) {

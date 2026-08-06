@@ -1,0 +1,19 @@
+{{define "users.html"}}
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 사용자 관리</title><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/policy.css"></head>
+<body>{{template "navigation" .}}
+<main class="container"><div class="page-head"><div><p class="eyebrow">ACCESS CONTROL</p><h1>사용자 관리</h1></div></div>
+{{if .Notice}}<div class="alert">{{.Notice}}</div>{{end}}{{if .Error}}<div class="alert error">{{.Error}}</div>{{end}}
+<div class="admin-grid">
+  <section class="panel"><h2>사용자 추가</h2><p class="muted">{{if .IsSystemAdmin}}기업 관리자 또는 기업 사용자를 추가합니다.{{else}}소속 기업의 조회 전용 사용자를 추가합니다.{{end}}</p>
+    {{if and .IsSystemAdmin (not .Enterprises)}}<div class="empty">먼저 <a href="/enterprises">기업을 등록하세요.</a></div>{{else}}<form method="post" action="/users"><input type="hidden" name="csrf" value="{{.CSRF}}">
+      {{if .IsSystemAdmin}}<label>기업<select name="enterprise_id" required>{{range .Enterprises}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label><label>권한<select name="role" required><option value="enterprise_user">기업 사용자</option><option value="enterprise_admin">기업 관리자</option></select></label>{{end}}
+      <label>사용자명<input name="username" minlength="3" maxlength="128" pattern="[A-Za-z0-9._-]+" autocomplete="off" required></label>
+      <label>표시 이름<input name="display_name" maxlength="255" autocomplete="off" required></label>
+      <label>임시 비밀번호<input type="password" name="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+      <label>임시 비밀번호 확인<input type="password" name="password_confirm" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+      <button type="submit">사용자 추가</button>
+    </form>{{end}}
+  </section>
+  <section class="panel"><div class="panel-head"><h2>사용자 목록</h2><span class="badge">{{len .Users}}명</span></div>{{if .Users}}<table><thead><tr>{{if .IsSystemAdmin}}<th>기업</th>{{end}}<th>사용자</th><th>권한</th><th>상태</th><th>최근 로그인</th><th>관리</th></tr></thead><tbody>{{range .Users}}<tr>{{if $.IsSystemAdmin}}<td>{{if .EnterpriseName}}{{.EnterpriseName}}{{else}}시스템{{end}}</td>{{end}}<td>{{.DisplayName}}<small>{{.Username}}</small></td><td>{{.RoleLabel}}</td><td><span class="badge {{if .Active}}ok{{else}}warn{{end}}">{{if .Active}}활성{{else}}비활성{{end}}</span></td><td>{{if .LastLoginAt.Valid}}{{.LastLoginAt.Time.Format "2006-01-02 15:04"}}{{else}}로그인 전{{end}}</td><td>{{if .Manageable}}<a href="/users/{{.ID}}">수정</a>{{else}}<span class="muted">—</span>{{end}}</td></tr>{{end}}</tbody></table>{{else}}<div class="empty">등록된 사용자가 없습니다.</div>{{end}}</section>
+</div></main></body></html>
+{{end}}

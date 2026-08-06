@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,36 +20,50 @@ type AuditReader struct {
 	checkpointPath string
 }
 
+type AuditPosition struct {
+	Device uint64 `json:"device,omitempty"`
+	Inode  uint64 `json:"inode,omitempty"`
+	Offset int64  `json:"offset"`
+}
+
+func (p AuditPosition) Empty() bool { return p.Device == 0 && p.Inode == 0 && p.Offset == 0 }
+
 func NewAuditReader(path, stateDirectory string) *AuditReader {
 	return &AuditReader{path: path, checkpointPath: stateDirectory + "/audit.offset"}
 }
 
-func (a *AuditReader) ReadBatch(limit int) ([]model.SecurityEvent, int64, error) {
+func (a *AuditReader) ReadBatch(limit int) ([]model.SecurityEvent, AuditPosition, error) {
 	if a.path == "" {
-		return nil, 0, nil
+		return nil, AuditPosition{}, nil
 	}
 	f, err := os.Open(a.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, 0, nil
+			return nil, AuditPosition{}, nil
 		}
-		return nil, 0, err
+		return nil, AuditPosition{}, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return nil, 0, err
+		return nil, AuditPosition{}, err
 	}
-	offset := a.checkpoint()
-	if info.Size() < offset {
-		offset = 0
+	device, inode := auditFileIdentity(info)
+	position := a.checkpoint()
+	if (position.Device != 0 || position.Inode != 0) && (position.Device != device || position.Inode != inode) {
+		position.Offset = 0
 	}
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return nil, offset, err
+	if info.Size() < position.Offset {
+		position.Offset = 0
+	}
+	position.Device = device
+	position.Inode = inode
+	if _, err := f.Seek(position.Offset, io.SeekStart); err != nil {
+		return nil, position, err
 	}
 	reader := bufio.NewReaderSize(f, 64<<10)
 	events := make([]model.SecurityEvent, 0, limit)
-	next := offset
+	next := position
 	for {
 		line, readErr := reader.ReadBytes('\n')
 		if errors.Is(readErr, io.EOF) {
@@ -59,15 +72,18 @@ func (a *AuditReader) ReadBatch(limit int) ([]model.SecurityEvent, int64, error)
 			break
 		}
 		if readErr != nil {
-			return nil, offset, readErr
+			return nil, position, readErr
 		}
-		next += int64(len(line))
+		lineEnd := next.Offset + int64(len(line))
 		line = line[:len(line)-1]
 		parsed := parseAuditLine(line)
 		remaining := limit - len(events)
-		if len(parsed) > remaining {
-			parsed = parsed[:remaining]
+		if len(events) > 0 && len(parsed) > remaining {
+			// A JSON line is the checkpoint unit. Retry the whole line in the
+			// next batch instead of advancing past messages that did not fit.
+			break
 		}
+		next.Offset = lineEnd
 		events = append(events, parsed...)
 		if len(events) >= limit {
 			break
@@ -76,20 +92,28 @@ func (a *AuditReader) ReadBatch(limit int) ([]model.SecurityEvent, int64, error)
 	return events, next, nil
 }
 
-func (a *AuditReader) Commit(offset int64) error {
-	return atomicWrite(a.checkpointPath, []byte(strconv.FormatInt(offset, 10)+"\n"), 0o640)
+func (a *AuditReader) Commit(position AuditPosition) error {
+	raw, err := json.Marshal(position)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(a.checkpointPath, append(raw, '\n'), 0o640)
 }
 
-func (a *AuditReader) checkpoint() int64 {
+func (a *AuditReader) checkpoint() AuditPosition {
 	raw, err := os.ReadFile(a.checkpointPath)
 	if err != nil {
-		return 0
+		return AuditPosition{}
 	}
-	offset, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
-	if err != nil || offset < 0 {
-		return 0
+	var position AuditPosition
+	if json.Unmarshal(raw, &position) == nil && position.Offset >= 0 {
+		return position
 	}
-	return offset
+	var legacyOffset int64
+	if _, err := fmt.Sscan(strings.TrimSpace(string(raw)), &legacyOffset); err == nil && legacyOffset >= 0 {
+		return AuditPosition{Offset: legacyOffset}
+	}
+	return AuditPosition{}
 }
 
 func parseAuditLine(line []byte) []model.SecurityEvent {

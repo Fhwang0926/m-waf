@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -15,8 +16,10 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,16 +41,18 @@ const (
 )
 
 type Server struct {
-	cfg          config.Manager
-	store        *Store
-	catalog      *packages.Catalog
-	catalogErr   error
-	ca           *CertificateAuthority
-	policySigner *PolicySigner
-	templates    *template.Template
-	sessions     *sessionManager
-	loginLimiter *loginLimiter
-	logger       *slog.Logger
+	cfg              config.Manager
+	store            *Store
+	catalog          *packages.Catalog
+	catalogErr       error
+	ca               *CertificateAuthority
+	policySigner     *PolicySigner
+	templates        *template.Template
+	sessions         *sessionManager
+	loginLimiter     *loginLimiter
+	bootstrapLimiter *requestLimiter
+	downloadLimiter  *requestLimiter
+	logger           *slog.Logger
 }
 
 func NewServer(cfg config.Manager, store *Store, logger *slog.Logger) (*Server, error) {
@@ -66,7 +71,8 @@ func NewServer(cfg config.Manager, store *Store, logger *slog.Logger) (*Server, 
 	catalog, catalogErr := packages.Load(cfg.BundleRoot, cfg.BundlePublicKey, version.Commit, cfg.BundleAllowUnsigned)
 	return &Server{
 		cfg: cfg, store: store, catalog: catalog, catalogErr: catalogErr, ca: ca, policySigner: policySigner, templates: templates,
-		sessions: newSessionManager(cfg.SessionKey), loginLimiter: newLoginLimiter(), logger: logger,
+		sessions: newSessionManager(cfg.SessionKey), loginLimiter: newLoginLimiter(),
+		bootstrapLimiter: newRequestLimiter(60, time.Minute), downloadLimiter: newRequestLimiter(8, time.Minute), logger: logger,
 	}, nil
 }
 
@@ -86,19 +92,38 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(staticFS)))
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
+	mux.HandleFunc("GET /setup", s.setup)
+	mux.HandleFunc("POST /setup", s.setup)
 	mux.HandleFunc("GET /login", s.login)
 	mux.HandleFunc("POST /login", s.login)
 	mux.Handle("POST /logout", s.requireAdmin(http.HandlerFunc(s.logout)))
 	mux.Handle("GET /", s.requireAdmin(http.HandlerFunc(s.dashboard)))
 	mux.Handle("GET /servers", s.requireAdmin(http.HandlerFunc(s.servers)))
+	mux.Handle("POST /servers/{id}/commands", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.createServerCommand))))
+	mux.Handle("POST /servers/{id}/packages", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.deployServerPackages))))
+	mux.Handle("POST /servers/{id}/revoke", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.revokeServer))))
 	mux.Handle("GET /events", s.requireAdmin(http.HandlerFunc(s.events)))
-	mux.Handle("GET /policies/new", s.requireAdmin(http.HandlerFunc(s.newPolicy)))
-	mux.Handle("POST /policies", s.requireAdmin(http.HandlerFunc(s.createPolicy)))
-	mux.Handle("GET /enrollments/new", s.requireAdmin(http.HandlerFunc(s.newEnrollment)))
-	mux.Handle("POST /enrollments", s.requireAdmin(http.HandlerFunc(s.createEnrollment)))
+	mux.Handle("GET /policies", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.policies))))
+	mux.Handle("GET /policies/new", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.newPolicy))))
+	mux.Handle("POST /policies", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.createPolicy))))
+	mux.Handle("GET /groups", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.groups))))
+	mux.Handle("POST /groups", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.createGroup))))
+	mux.Handle("POST /groups/{id}", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.updateGroup))))
+	mux.Handle("POST /groups/{id}/delete", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.deleteGroup))))
+	mux.Handle("GET /enrollments/new", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.newEnrollment))))
+	mux.Handle("POST /enrollments", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.createEnrollment))))
+	mux.Handle("GET /enterprises", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.enterprises))))
+	mux.Handle("POST /enterprises", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.createEnterprise))))
+	mux.Handle("GET /settings", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.systemSettings))))
+	mux.Handle("POST /settings", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.updateSystemSettings))))
+	mux.Handle("GET /users", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.users))))
+	mux.Handle("POST /users", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.createUser))))
+	mux.Handle("GET /users/{id}", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.editUser))))
+	mux.Handle("POST /users/{id}", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.updateUser))))
+	mux.Handle("POST /users/{id}/delete", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.deleteUser))))
 	mux.Handle("GET /api/v1/servers", s.requireAdmin(http.HandlerFunc(s.apiServers)))
 	mux.Handle("GET /api/v1/events", s.requireAdmin(http.HandlerFunc(s.apiEvents)))
-	mux.Handle("POST /api/v1/enrollment-tokens", s.requireAdmin(http.HandlerFunc(s.apiCreateEnrollment)))
+	mux.Handle("POST /api/v1/enrollment-tokens", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.apiCreateEnrollment))))
 	return s.securityHeaders(s.requestLog(mux))
 }
 
@@ -106,17 +131,22 @@ func (s *Server) AgentHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
-	mux.HandleFunc("GET /bootstrap/v1/install.sh", s.bootstrapInstaller)
-	mux.HandleFunc("POST /bootstrap/v1/packages/resolve", s.resolvePackages)
+	mux.Handle("GET /bootstrap/v1/install.sh", s.limitBootstrap(http.HandlerFunc(s.bootstrapInstaller)))
+	mux.Handle("POST /bootstrap/v1/packages/resolve", s.limitBootstrap(http.HandlerFunc(s.resolvePackages)))
 	mux.HandleFunc("GET /bootstrap/v1/packages/{id}", s.bootstrapPackage)
-	mux.HandleFunc("GET /packages/v1/keys", s.packagePublicKey)
-	mux.HandleFunc("POST /agent/v1/enroll", s.enroll)
+	mux.Handle("GET /packages/v1/keys", s.limitBootstrap(http.HandlerFunc(s.packagePublicKey)))
+	mux.Handle("POST /agent/v1/enroll", s.limitBootstrap(http.HandlerFunc(s.enroll)))
 	mux.Handle("POST /agent/v1/heartbeat", s.requireAgent(http.HandlerFunc(s.heartbeat)))
+	mux.Handle("POST /agent/v1/certificate/renew", s.requireAgent(http.HandlerFunc(s.renewCertificate)))
 	mux.Handle("GET /agent/v1/desired-state", s.requireAgent(http.HandlerFunc(s.desiredState)))
 	mux.Handle("GET /agent/v1/policy-key", s.requireAgent(http.HandlerFunc(s.policyPublicKey)))
 	mux.Handle("GET /agent/v1/artifacts/{id}", s.requireAgent(http.HandlerFunc(s.policyArtifact)))
 	mux.Handle("GET /agent/v1/packages/{id}", s.requireAgent(http.HandlerFunc(s.agentPackage)))
 	mux.Handle("POST /agent/v1/events/batch", s.requireAgent(http.HandlerFunc(s.eventBatch)))
+	mux.Handle("POST /agent/v1/policies/{id}/result", s.requireAgent(http.HandlerFunc(s.policyResult)))
+	mux.Handle("POST /agent/v1/package-deployments/{id}/result", s.requireAgent(http.HandlerFunc(s.packageDeploymentResult)))
+	mux.Handle("GET /agent/v1/commands/next", s.requireAgent(http.HandlerFunc(s.nextAgentCommand)))
+	mux.Handle("POST /agent/v1/commands/{id}/result", s.requireAgent(http.HandlerFunc(s.agentCommandResult)))
 	return s.securityHeaders(s.requestLog(mux))
 }
 
@@ -157,6 +187,15 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
+		hasUsers, err := s.store.HasAdminUsers(r.Context())
+		if err != nil {
+			http.Error(w, "load administrator configuration", http.StatusInternalServerError)
+			return
+		}
+		if !hasUsers {
+			http.Redirect(w, r, "/setup", http.StatusSeeOther)
+			return
+		}
 		_ = s.templates.ExecuteTemplate(w, "login.html", map[string]any{})
 		return
 	}
@@ -169,18 +208,25 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	if !secureEqual([]byte(r.FormValue("username")), []byte(s.cfg.AdminUsername)) || !secureEqual([]byte(r.FormValue("password")), s.cfg.AdminPassword) {
+	username := strings.TrimSpace(r.FormValue("username"))
+	user, err := s.store.UserByUsername(r.Context(), username)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "login unavailable", http.StatusInternalServerError)
+		return
+	}
+	if err != nil || !user.Active || !verifyPassword(r.FormValue("password"), user.PasswordHash) {
 		s.loginLimiter.fail(remote)
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = s.templates.ExecuteTemplate(w, "login.html", map[string]any{"Error": "로그인 정보가 올바르지 않습니다."})
 		return
 	}
 	s.loginLimiter.reset(remote)
-	token, data, err := s.sessions.create(s.cfg.AdminUsername)
+	token, data, err := s.sessions.create(user)
 	if err != nil {
 		http.Error(w, "session error", http.StatusInternalServerError)
 		return
 	}
+	s.store.RecordLogin(r.Context(), user.ID)
 	setSessionCookie(w, token, time.Unix(data.ExpiresAt, 0))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -195,12 +241,13 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
-	servers, err := s.store.ListServers(r.Context(), 10)
+	session := sessionFrom(r)
+	servers, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 10)
 	if err != nil {
 		http.Error(w, "load servers", http.StatusInternalServerError)
 		return
 	}
-	events, err := s.store.ListEvents(r.Context(), 10)
+	events, err := s.store.ListEvents(r.Context(), session.ScopeEnterpriseID(), 10)
 	if err != nil {
 		http.Error(w, "load events", http.StatusInternalServerError)
 		return
@@ -209,7 +256,7 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	if s.catalog != nil {
 		bundleVersion = s.catalog.Manifest().BundleVersion
 	}
-	data := map[string]any{"Servers": servers, "Events": events, "BundleVersion": bundleVersion, "Ready": s.catalog != nil, "CSRF": sessionFrom(r).CSRF}
+	data := s.viewData(r, "dashboard", map[string]any{"Servers": servers, "Events": events, "BundleVersion": bundleVersion, "Ready": s.catalog != nil})
 	if s.catalogErr != nil {
 		data["Notice"] = "Package bundle을 사용할 수 없습니다: " + s.catalogErr.Error()
 	}
@@ -217,30 +264,53 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) servers(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListServers(r.Context(), 500)
+	session := sessionFrom(r)
+	items, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 500)
 	if err != nil {
 		http.Error(w, "load servers", http.StatusInternalServerError)
 		return
 	}
-	_ = s.templates.ExecuteTemplate(w, "servers.html", map[string]any{"Servers": items})
+	if s.catalog != nil {
+		for i := range items {
+			_, _, rollbackErr := s.catalog.Rollback(items[i].AgentPackageID, items[i].ModulePackageID)
+			items[i].CanRollbackPackages = rollbackErr == nil
+		}
+	}
+	_ = s.templates.ExecuteTemplate(w, "servers.html", s.viewData(r, "servers", map[string]any{"Servers": items, "Notice": strings.TrimSpace(r.URL.Query().Get("notice"))}))
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListEvents(r.Context(), 500)
+	session := sessionFrom(r)
+	items, err := s.store.ListEvents(r.Context(), session.ScopeEnterpriseID(), 500)
 	if err != nil {
 		http.Error(w, "load events", http.StatusInternalServerError)
 		return
 	}
-	_ = s.templates.ExecuteTemplate(w, "events.html", map[string]any{"Events": items})
+	_ = s.templates.ExecuteTemplate(w, "events.html", s.viewData(r, "events", map[string]any{"Events": items}))
+}
+
+func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListPolicies(r.Context(), sessionFrom(r).ScopeEnterpriseID(), 200)
+	if err != nil {
+		http.Error(w, "load policies", http.StatusInternalServerError)
+		return
+	}
+	_ = s.templates.ExecuteTemplate(w, "policies.html", s.viewData(r, "policies", map[string]any{"Policies": items}))
 }
 
 func (s *Server) newPolicy(w http.ResponseWriter, r *http.Request) {
-	servers, err := s.store.ListServers(r.Context(), 500)
+	session := sessionFrom(r)
+	servers, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 500)
 	if err != nil {
 		http.Error(w, "load servers", http.StatusInternalServerError)
 		return
 	}
-	_ = s.templates.ExecuteTemplate(w, "policy.html", map[string]any{"Servers": servers, "CSRF": sessionFrom(r).CSRF})
+	groups, err := s.store.ListGroups(r.Context(), session.ScopeEnterpriseID())
+	if err != nil {
+		http.Error(w, "load server groups", http.StatusInternalServerError)
+		return
+	}
+	_ = s.templates.ExecuteTemplate(w, "policy.html", s.viewData(r, "policies", map[string]any{"Servers": servers, "Groups": groups}))
 }
 
 func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
@@ -248,14 +318,28 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid csrf token", http.StatusForbidden)
 		return
 	}
-	serverID := strings.TrimSpace(r.FormValue("server_id"))
+	name := truncate(strings.TrimSpace(r.FormValue("name")), 255)
+	description := truncate(strings.TrimSpace(r.FormValue("description")), 1024)
+	target := strings.TrimSpace(r.FormValue("target"))
 	mode := strings.TrimSpace(r.FormValue("mode"))
-	if serverID == "" || (mode != "DetectionOnly" && mode != "On") {
-		http.Error(w, "server_id and valid mode are required", http.StatusBadRequest)
+	paranoiaLevel, paranoiaErr := strconv.Atoi(strings.TrimSpace(r.FormValue("paranoia_level")))
+	inboundScore, scoreErr := strconv.Atoi(strings.TrimSpace(r.FormValue("inbound_score")))
+	if name == "" || target == "" || paranoiaErr != nil || scoreErr != nil {
+		http.Error(w, "정책 이름, 대상과 유효한 세부 설정이 필요합니다.", http.StatusBadRequest)
+		return
+	}
+	artifact, settingsJSON, err := buildPolicyArtifact(mode, paranoiaLevel, inboundScore, r.FormValue("request_body") == "on", r.FormValue("excluded_paths"), r.FormValue("excluded_ips"), r.FormValue("custom_rules"))
+	if err != nil {
+		http.Error(w, "정책 설정이 올바르지 않습니다: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	session := sessionFrom(r)
+	enterpriseID, serverIDs, err := s.store.ResolvePolicyTarget(r.Context(), session.ScopeEnterpriseID(), target)
+	if err != nil {
+		http.Error(w, "정책 대상을 찾을 수 없습니다: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	revisionID := randomID()
-	artifact := []byte("# Generated by M-WAF Manager.\nSecRuleEngine " + mode + "\n")
 	hash, signature := s.policySigner.Sign(artifact)
 	relativePath := filepath.Join("policies", revisionID+".conf")
 	fullPath := filepath.Join(s.cfg.ArtifactRoot, relativePath)
@@ -263,18 +347,30 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "write policy artifact", http.StatusInternalServerError)
 		return
 	}
-	name := mode + " " + time.Now().UTC().Format(time.RFC3339)
-	if err := s.store.AssignPolicy(r.Context(), serverID, revisionID, name, mode, filepath.ToSlash(relativePath), hash, signature); err != nil {
+	if err := s.store.AssignPolicyToServers(r.Context(), enterpriseID, serverIDs, revisionID, name, description, mode, settingsJSON, filepath.ToSlash(relativePath), hash, signature, session.UserID); err != nil {
 		_ = os.Remove(fullPath)
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "server not found", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "assign policy", http.StatusInternalServerError)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), sessionFrom(r).Username, "policy.assign", serverID+":"+revisionID, "success", remoteIP(r))
-	http.Redirect(w, r, "/servers", http.StatusSeeOther)
+	s.store.Audit(r.Context(), requestID(r), session.Username, "policy.assign", target+":"+revisionID, "success", remoteIP(r))
+	http.Redirect(w, r, "/servers?notice="+url.QueryEscape("정책이 "+strconv.Itoa(len(serverIDs))+"대 서버에 배포 대기 중입니다."), http.StatusSeeOther)
 }
 
 func (s *Server) newEnrollment(w http.ResponseWriter, r *http.Request) {
-	_ = s.templates.ExecuteTemplate(w, "enrollment.html", map[string]any{"CSRF": sessionFrom(r).CSRF})
+	data := map[string]any{}
+	if sessionFrom(r).IsSystemAdmin() {
+		enterprises, err := s.store.ListEnterprises(r.Context())
+		if err != nil {
+			http.Error(w, "load enterprises", http.StatusInternalServerError)
+			return
+		}
+		data["Enterprises"] = enterprises
+	}
+	_ = s.templates.ExecuteTemplate(w, "enrollment.html", s.viewData(r, "enrollments", data))
 }
 
 func (s *Server) createEnrollment(w http.ResponseWriter, r *http.Request) {
@@ -291,17 +387,22 @@ func (s *Server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "label is required", http.StatusBadRequest)
 		return
 	}
-	token, expires, err := s.store.CreateEnrollmentToken(r.Context(), label, s.cfg.EnrollmentTTL)
+	enterpriseID, ok := s.requestEnterpriseID(r)
+	if !ok {
+		http.Error(w, "valid enterprise is required", http.StatusBadRequest)
+		return
+	}
+	token, expires, err := s.store.CreateEnrollmentToken(r.Context(), enterpriseID, label, s.cfg.EnrollmentTTL)
 	if err != nil {
 		http.Error(w, "create enrollment", http.StatusInternalServerError)
 		return
 	}
 	s.store.Audit(r.Context(), requestID(r), sessionFrom(r).Username, "enrollment.create", label, "success", remoteIP(r))
-	_ = s.templates.ExecuteTemplate(w, "enrollment.html", map[string]any{"Token": token, "ExpiresAt": expires, "AgentURL": s.cfg.AgentPublicURL})
+	_ = s.templates.ExecuteTemplate(w, "enrollment.html", s.viewData(r, "enrollments", map[string]any{"Token": token, "ExpiresAt": expires, "AgentURL": s.cfg.AgentPublicURL}))
 }
 
 func (s *Server) apiServers(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListServers(r.Context(), 500)
+	items, err := s.store.ListServers(r.Context(), sessionFrom(r).ScopeEnterpriseID(), 500)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "load servers")
 		return
@@ -310,7 +411,7 @@ func (s *Server) apiServers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListEvents(r.Context(), 500)
+	items, err := s.store.ListEvents(r.Context(), sessionFrom(r).ScopeEnterpriseID(), 500)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "load events")
 		return
@@ -324,7 +425,8 @@ func (s *Server) apiCreateEnrollment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Label string `json:"label"`
+		EnterpriseID string `json:"enterprise_id"`
+		Label        string `json:"label"`
 	}
 	if err := decodeJSON(w, r, &request, 16<<10); err != nil {
 		return
@@ -334,7 +436,12 @@ func (s *Server) apiCreateEnrollment(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "label is required")
 		return
 	}
-	token, expires, err := s.store.CreateEnrollmentToken(r.Context(), request.Label, s.cfg.EnrollmentTTL)
+	enterpriseID, ok := s.enterpriseIDForSession(r.Context(), sessionFrom(r), strings.TrimSpace(request.EnterpriseID))
+	if !ok {
+		writeProblem(w, http.StatusBadRequest, "valid enterprise is required")
+		return
+	}
+	token, expires, err := s.store.CreateEnrollmentToken(r.Context(), enterpriseID, request.Label, s.cfg.EnrollmentTTL)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "create enrollment")
 		return
@@ -408,6 +515,11 @@ func (s *Server) bootstrapPackage(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusForbidden, "package is not allowed for this enrollment")
 		return
 	}
+	if !s.downloadLimiter.allow(fmt.Sprintf("%x", tokenHash(token))) {
+		w.Header().Set("Retry-After", "60")
+		writeProblem(w, http.StatusTooManyRequests, "package download limit exceeded")
+		return
+	}
 	s.servePackage(w, r, id)
 }
 
@@ -432,7 +544,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	serverID := randomID()
-	certificate, serial, err := s.ca.SignAgentCSR(request.CSRPEM, serverID)
+	certificate, serial, _, err := s.ca.SignAgentCSR(request.CSRPEM, serverID)
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "invalid agent certificate request")
 		return
@@ -450,6 +562,24 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, model.EnrollResponse{ServerID: serverID, CertificatePEM: certificate, CACertificate: s.ca.CertificatePEM(), PolicyPublicKey: s.policySigner.PublicPEM(), AgentAPI: s.cfg.AgentPublicURL})
+}
+
+func (s *Server) renewCertificate(w http.ResponseWriter, r *http.Request) {
+	var request model.CertificateRenewRequest
+	if err := decodeJSON(w, r, &request, 64<<10); err != nil {
+		return
+	}
+	serverID := agentIDFrom(r)
+	certificate, serial, expiresAt, err := s.ca.SignAgentCSR(request.CSRPEM, serverID)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid agent certificate request")
+		return
+	}
+	if err := s.store.UpdateCertificateSerial(r.Context(), serverID, serial); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "certificate renewal failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, model.CertificateRenewResponse{CertificatePEM: certificate, ExpiresAt: expiresAt})
 }
 
 func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
@@ -475,6 +605,20 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 	}
 	if state.RevisionID != "" {
 		state.ArtifactURL = "/agent/v1/artifacts/" + state.RevisionID
+	}
+	if state.PackageDeployment != nil {
+		if s.catalog == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "package bundle unavailable")
+			return
+		}
+		agentArtifact, agentOK := s.catalog.Artifact(state.AgentPackageID)
+		moduleArtifact, moduleOK := s.catalog.Artifact(state.ModulePackageID)
+		if !agentOK || !moduleOK {
+			writeProblem(w, http.StatusServiceUnavailable, "assigned package is unavailable")
+			return
+		}
+		state.PackageDeployment.Agent = agentPackageDownload(agentArtifact)
+		state.PackageDeployment.Module = agentPackageDownload(moduleArtifact)
 	}
 	writeJSON(w, http.StatusOK, state)
 }
@@ -590,7 +734,40 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		user, err := s.store.UserByID(r.Context(), data.UserID)
+		if err != nil || !user.Active {
+			clearSessionCookie(w)
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		data.Username = user.Username
+		data.DisplayName = user.DisplayName
+		data.Role = user.Role
+		data.EnterpriseID = user.EnterpriseID
+		data.EnterpriseName = user.EnterpriseName
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextSession, data)))
+	})
+}
+
+func (s *Server) limitBootstrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := remoteIP(r) + "|" + r.URL.Path
+		if !s.bootstrapLimiter.allow(key) {
+			w.Header().Set("Retry-After", "60")
+			writeProblem(w, http.StatusTooManyRequests, "bootstrap request limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) requireRole(required Role, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !roleAtLeast(sessionFrom(r).Role, required) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -603,6 +780,10 @@ func (s *Server) requireAgent(next http.Handler) http.Handler {
 		serverID := r.TLS.VerifiedChains[0][0].Subject.CommonName
 		if serverID == "" {
 			writeProblem(w, http.StatusUnauthorized, "agent certificate identity missing")
+			return
+		}
+		if err := s.store.AuthorizeAgent(r.Context(), serverID, r.TLS.VerifiedChains[0][0]); err != nil {
+			writeProblem(w, http.StatusUnauthorized, "agent certificate is unknown or revoked")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextAgentID, serverID)))
@@ -643,6 +824,10 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 
 func packageDownload(base string, artifact model.PackageArtifact) model.PackageDownload {
 	return model.PackageDownload{ID: artifact.ID, Name: artifact.Name, Version: artifact.Version, URL: base + "/bootstrap/v1/packages/" + artifact.ID, Size: artifact.Size, SHA256: artifact.SHA256, RollbackID: artifact.RollbackID}
+}
+
+func agentPackageDownload(artifact model.PackageArtifact) model.PackageDownload {
+	return model.PackageDownload{ID: artifact.ID, Name: artifact.Name, Version: artifact.Version, URL: "/agent/v1/packages/" + artifact.ID, Size: artifact.Size, SHA256: artifact.SHA256, RollbackID: artifact.RollbackID}
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any, limit int64) error {

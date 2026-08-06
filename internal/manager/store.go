@@ -24,25 +24,40 @@ type Store struct {
 }
 
 type ServerRecord struct {
-	ID              string
-	Name            string
-	Status          string
-	Inventory       model.Inventory
-	PolicyRevision  string
-	LastHeartbeatAt sql.NullTime
-	CreatedAt       time.Time
+	ID                      string
+	EnterpriseID            string
+	EnterpriseName          string
+	Name                    string
+	Status                  string
+	Inventory               model.Inventory
+	PolicyRevision          string
+	DesiredPolicyRevision   string
+	PolicyDeploymentStatus  string
+	PolicyDeploymentDetail  string
+	PackageDeploymentStatus string
+	PackageDeploymentDetail string
+	AgentPackageID          string
+	ModulePackageID         string
+	CanRollbackPackages     bool
+	LastCommand             string
+	LastCommandStatus       string
+	Revoked                 bool
+	LastHeartbeatAt         sql.NullTime
+	CreatedAt               time.Time
 }
 
 type EventRecord struct {
-	ID         uint64
-	AgentID    string
-	OccurredAt time.Time
-	Method     string
-	URI        string
-	RuleID     string
-	Message    string
-	Severity   string
-	Blocked    bool
+	ID             uint64
+	AgentID        string
+	ServerName     string
+	EnterpriseName string
+	OccurredAt     time.Time
+	Method         string
+	URI            string
+	RuleID         string
+	Message        string
+	Severity       string
+	Blocked        bool
 }
 
 type PolicyArtifact struct {
@@ -70,14 +85,17 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
-func (s *Store) CreateEnrollmentToken(ctx context.Context, label string, ttl time.Duration) (string, time.Time, error) {
+func (s *Store) CreateEnrollmentToken(ctx context.Context, enterpriseID, label string, ttl time.Duration) (string, time.Time, error) {
+	if enterpriseID == "" {
+		return "", time.Time{}, errors.New("enterprise is required")
+	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", time.Time{}, err
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	expires := time.Now().UTC().Add(ttl)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollment_tokens(id, token_hash, label, expires_at) VALUES (?, ?, ?, ?)`, randomID(), tokenHash(token), label, expires)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollment_tokens(id, enterprise_id, token_hash, label, expires_at) VALUES (?, ?, ?, ?, ?)`, randomID(), enterpriseID, tokenHash(token), label, expires)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -86,15 +104,16 @@ func (s *Store) CreateEnrollmentToken(ctx context.Context, label string, ttl tim
 
 func (s *Store) ValidateEnrollmentToken(ctx context.Context, token string) error {
 	var used sql.NullTime
+	var enterpriseID sql.NullString
 	var expires time.Time
-	err := s.db.QueryRowContext(ctx, `SELECT expires_at, used_at FROM enrollment_tokens WHERE token_hash = ?`, tokenHash(token)).Scan(&expires, &used)
+	err := s.db.QueryRowContext(ctx, `SELECT enterprise_id, expires_at, used_at FROM enrollment_tokens WHERE token_hash = ?`, tokenHash(token)).Scan(&enterpriseID, &expires, &used)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrInvalidEnrollmentToken
 		}
 		return err
 	}
-	if used.Valid || !expires.After(time.Now().UTC()) {
+	if !enterpriseID.Valid || enterpriseID.String == "" || used.Valid || !expires.After(time.Now().UTC()) {
 		return ErrInvalidEnrollmentToken
 	}
 	return nil
@@ -152,20 +171,21 @@ func (s *Store) ConsumeEnrollment(ctx context.Context, token, serverID, serverNa
 	var expires time.Time
 	var used sql.NullTime
 	var allowedJSON sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT expires_at, used_at, allowed_packages_json FROM enrollment_tokens WHERE token_hash = ? FOR UPDATE`, tokenHash(token)).Scan(&expires, &used, &allowedJSON); err != nil {
+	var enterpriseID sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT enterprise_id, expires_at, used_at, allowed_packages_json FROM enrollment_tokens WHERE token_hash = ? FOR UPDATE`, tokenHash(token)).Scan(&enterpriseID, &expires, &used, &allowedJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrInvalidEnrollmentToken
 		}
 		return err
 	}
-	if used.Valid || !expires.After(time.Now().UTC()) {
+	if !enterpriseID.Valid || enterpriseID.String == "" || used.Valid || !expires.After(time.Now().UTC()) {
 		return ErrInvalidEnrollmentToken
 	}
 	raw, err := json.Marshal(inventory)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO servers(id, name, certificate_serial, inventory_json, agent_version, module_version) VALUES (?, ?, ?, ?, ?, ?)`, serverID, serverName, certSerial, raw, inventory.AgentVersion, inventory.ModuleVersion); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO servers(id, enterprise_id, name, certificate_serial, inventory_json, agent_version, module_version) VALUES (?, ?, ?, ?, ?, ?, ?)`, serverID, enterpriseID.String, serverName, certSerial, raw, inventory.AgentVersion, inventory.ModuleVersion); err != nil {
 		return err
 	}
 	if allowedJSON.Valid {
@@ -201,17 +221,38 @@ func (s *Store) UpdateHeartbeat(ctx context.Context, serverID string, heartbeat 
 	if n != 1 {
 		return sql.ErrNoRows
 	}
+	if heartbeat.PolicyRevision != "" {
+		_, _ = s.db.ExecContext(ctx, `UPDATE policy_deployments SET status='APPLIED',detail='',updated_at=UTC_TIMESTAMP(6) WHERE server_id=? AND policy_revision_id=? AND status<>'APPLIED'`, serverID, heartbeat.PolicyRevision)
+	}
+	if heartbeat.LastCommandID != "" {
+		_, _ = s.db.ExecContext(ctx, `UPDATE agent_commands SET status='COMPLETED',completed_at=UTC_TIMESTAMP(6),updated_at=UTC_TIMESTAMP(6) WHERE id=? AND server_id=? AND status='ACCEPTED'`, heartbeat.LastCommandID, serverID)
+	}
+	return nil
+}
+
+func (s *Store) UpdateCertificateSerial(ctx context.Context, serverID, serial string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE servers SET certificate_serial=? WHERE id=?`, serial, serverID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return sql.ErrNoRows
+	}
 	return nil
 }
 
 func (s *Store) DesiredState(ctx context.Context, serverID string) (model.DesiredState, error) {
 	var state model.DesiredState
-	var revision, artifactPath, hash, signature, mode, agentPackage, modulePackage sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT pr.id, pr.artifact_path, pr.artifact_sha256, pr.artifact_signature, pr.mode, ds.agent_package_id, ds.module_package_id
+	var revision, artifactPath, hash, signature, mode, agentPackage, modulePackage, packageDeployment sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT pr.id, pr.artifact_path, pr.artifact_sha256, pr.artifact_signature, pr.mode, ds.agent_package_id, ds.module_package_id, ds.package_deployment_id
 FROM servers s
 LEFT JOIN desired_states ds ON ds.server_id=s.id
 LEFT JOIN policy_revisions pr ON pr.id=ds.policy_revision_id
-WHERE s.id=?`, serverID).Scan(&revision, &artifactPath, &hash, &signature, &mode, &agentPackage, &modulePackage)
+WHERE s.id=? AND s.revoked_at IS NULL`, serverID).Scan(&revision, &artifactPath, &hash, &signature, &mode, &agentPackage, &modulePackage, &packageDeployment)
 	if err != nil {
 		return state, err
 	}
@@ -223,31 +264,12 @@ WHERE s.id=?`, serverID).Scan(&revision, &artifactPath, &hash, &signature, &mode
 	if state.Mode == "" {
 		state.Mode = "DetectionOnly"
 	}
-	state.AgentPackage = agentPackage.String
-	state.ModulePackage = modulePackage.String
+	state.AgentPackageID = agentPackage.String
+	state.ModulePackageID = modulePackage.String
+	if packageDeployment.Valid {
+		state.PackageDeployment = &model.PackageDeployment{ID: packageDeployment.String}
+	}
 	return state, nil
-}
-
-func (s *Store) AssignPolicy(ctx context.Context, serverID, revisionID, name, mode, artifactPath, hash, signature string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO policy_revisions(id, revision_name, mode, artifact_path, artifact_sha256, artifact_signature) VALUES (?, ?, ?, ?, ?, ?)`, revisionID, name, mode, artifactPath, hash, signature); err != nil {
-		return err
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE desired_states SET policy_revision_id=? WHERE server_id=?`, revisionID, serverID)
-	if err != nil {
-		return err
-	}
-	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-		if err != nil {
-			return err
-		}
-		return sql.ErrNoRows
-	}
-	return tx.Commit()
 }
 
 func (s *Store) PolicyArtifactForServer(ctx context.Context, serverID, revisionID string) (PolicyArtifact, error) {
@@ -341,8 +363,24 @@ func (s *Store) SyncCatalog(ctx context.Context, catalog *packages.Catalog) erro
 	return tx.Commit()
 }
 
-func (s *Store) ListServers(ctx context.Context, limit int) ([]ServerRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,status,inventory_json,policy_revision,last_heartbeat_at,created_at FROM servers ORDER BY created_at DESC LIMIT ?`, limit)
+func (s *Store) ListServers(ctx context.Context, enterpriseID string, limit int) ([]ServerRecord, error) {
+	query := `SELECT s.id,COALESCE(s.enterprise_id,''),COALESCE(e.name,'미지정'),s.name,s.status,s.inventory_json,s.policy_revision,
+COALESCE(ds.policy_revision_id,''),COALESCE(pd.status,''),COALESCE(pd.detail,''),COALESCE(pkg.status,''),COALESCE(pkg.detail,''),
+COALESCE(ds.agent_package_id,''),COALESCE(ds.module_package_id,''),COALESCE(cmd.command,''),COALESCE(cmd.status,''),s.revoked_at IS NOT NULL,s.last_heartbeat_at,s.created_at
+FROM servers s
+LEFT JOIN enterprises e ON e.id=s.enterprise_id
+LEFT JOIN desired_states ds ON ds.server_id=s.id
+LEFT JOIN policy_deployments pd ON pd.server_id=s.id AND pd.policy_revision_id=ds.policy_revision_id
+LEFT JOIN package_deployments pkg ON pkg.id=ds.package_deployment_id
+LEFT JOIN agent_commands cmd ON cmd.id=(SELECT ac.id FROM agent_commands ac WHERE ac.server_id=s.id ORDER BY ac.created_at DESC LIMIT 1)`
+	args := make([]any, 0, 2)
+	if enterpriseID != "" {
+		query += ` WHERE s.enterprise_id=?`
+		args = append(args, enterpriseID)
+	}
+	query += ` ORDER BY s.created_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +389,7 @@ func (s *Store) ListServers(ctx context.Context, limit int) ([]ServerRecord, err
 	for rows.Next() {
 		var item ServerRecord
 		var inventory []byte
-		if err := rows.Scan(&item.ID, &item.Name, &item.Status, &inventory, &item.PolicyRevision, &item.LastHeartbeatAt, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.EnterpriseID, &item.EnterpriseName, &item.Name, &item.Status, &inventory, &item.PolicyRevision, &item.DesiredPolicyRevision, &item.PolicyDeploymentStatus, &item.PolicyDeploymentDetail, &item.PackageDeploymentStatus, &item.PackageDeploymentDetail, &item.AgentPackageID, &item.ModulePackageID, &item.LastCommand, &item.LastCommandStatus, &item.Revoked, &item.LastHeartbeatAt, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(inventory, &item.Inventory)
@@ -360,8 +398,17 @@ func (s *Store) ListServers(ctx context.Context, limit int) ([]ServerRecord, err
 	return result, rows.Err()
 }
 
-func (s *Store) ListEvents(ctx context.Context, limit int) ([]EventRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,agent_id,occurred_at,method,uri,rule_id,message,severity,blocked FROM security_events ORDER BY occurred_at DESC LIMIT ?`, limit)
+func (s *Store) ListEvents(ctx context.Context, enterpriseID string, limit int) ([]EventRecord, error) {
+	query := `SELECT se.id,se.agent_id,s.name,COALESCE(e.name,'미지정'),se.occurred_at,se.method,se.uri,se.rule_id,se.message,se.severity,se.blocked
+FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN enterprises e ON e.id=s.enterprise_id`
+	args := make([]any, 0, 2)
+	if enterpriseID != "" {
+		query += ` WHERE s.enterprise_id=?`
+		args = append(args, enterpriseID)
+	}
+	query += ` ORDER BY se.occurred_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +416,7 @@ func (s *Store) ListEvents(ctx context.Context, limit int) ([]EventRecord, error
 	result := make([]EventRecord, 0)
 	for rows.Next() {
 		var item EventRecord
-		if err := rows.Scan(&item.ID, &item.AgentID, &item.OccurredAt, &item.Method, &item.URI, &item.RuleID, &item.Message, &item.Severity, &item.Blocked); err != nil {
+		if err := rows.Scan(&item.ID, &item.AgentID, &item.ServerName, &item.EnterpriseName, &item.OccurredAt, &item.Method, &item.URI, &item.RuleID, &item.Message, &item.Severity, &item.Blocked); err != nil {
 			return nil, err
 		}
 		result = append(result, item)

@@ -2,7 +2,7 @@ schema_version: 1
 images:
   manager:
     repository: ghcr.io/fhwang0926/m-waf-manager
-    development_tag: dev
+    release_tag: latest
     digest: ""
   mariadb:
     repository: docker.io/library/mariadb

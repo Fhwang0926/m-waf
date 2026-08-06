@@ -1,0 +1,13 @@
+{{define "groups.html"}}
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 서버 그룹</title><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/policy.css"></head>
+<body>{{template "navigation" .}}
+<main class="container"><div class="page-head"><div><p class="eyebrow">SERVER GROUPS</p><h1>서버 그룹</h1></div><a class="button" href="/policies/new">그룹 정책 배포</a></div>
+{{if .Notice}}<div class="alert">{{.Notice}}</div>{{end}}
+<section class="panel"><h2>새 그룹</h2><form method="post" action="/groups"><input type="hidden" name="csrf" value="{{.CSRF}}">
+{{if .IsSystemAdmin}}<label>기업<select name="enterprise_id" required>{{range .Enterprises}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>{{end}}
+<label>그룹 이름<input name="name" maxlength="255" placeholder="운영 웹 서버" required></label><fieldset><legend>구성 서버</legend><div class="check-list">{{range .Servers}}{{if not .Revoked}}<label><input type="checkbox" name="server_ids" value="{{.ID}}">{{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}}</label>{{end}}{{end}}</div></fieldset><button type="submit">그룹 생성</button></form></section>
+{{range .Groups}}<section class="panel"><div class="panel-head"><h2>{{if $.IsSystemAdmin}}{{.Group.EnterpriseName}} · {{end}}{{.Group.Name}}</h2><span class="badge">{{len .Group.Members}}대</span></div>
+<form method="post" action="/groups/{{.Group.ID}}"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="enterprise_id" value="{{.Group.EnterpriseID}}"><label>그룹 이름<input name="name" maxlength="255" value="{{.Group.Name}}" required></label><fieldset><legend>구성 서버</legend><div class="check-list">{{range .Servers}}<label><input type="checkbox" name="server_ids" value="{{.Server.ID}}" {{if .Selected}}checked{{end}}>{{.Server.Name}}</label>{{end}}</div></fieldset><button type="submit">구성 저장</button></form>
+<form class="danger-zone" method="post" action="/groups/{{.Group.ID}}/delete"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="danger" type="submit">그룹 삭제</button></form></section>{{else}}<section class="panel"><div class="empty">등록된 서버 그룹이 없습니다.</div></section>{{end}}
+</main></body></html>
+{{end}}

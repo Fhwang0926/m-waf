@@ -56,7 +56,7 @@ func main() {
 	}
 	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
 	defer stopCleanup()
-	go runEventCleanup(cleanupCtx, cfg, store, logger)
+	go runLogCleanup(cleanupCtx, cfg, store, logger)
 	agentTLS, err := app.AgentTLSConfig()
 	if err != nil {
 		logger.Error("agent_tls_config", "error", err)
@@ -98,24 +98,61 @@ func main() {
 	_ = agentServer.Shutdown(shutdownCtx)
 }
 
-func runEventCleanup(ctx context.Context, cfg config.Manager, store *manager.Store, logger *slog.Logger) {
+func runLogCleanup(ctx context.Context, cfg config.Manager, store *manager.Store, logger *slog.Logger) {
 	ticker := time.NewTicker(cfg.CleanupInterval)
 	defer ticker.Stop()
+	cleanup := func() {
+		cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		fallback := manager.DefaultLogRetentionSettings(cfg.EventRetention)
+		settings, err := store.LogRetentionSettings(cleanupCtx, fallback)
+		if err != nil {
+			logger.Warn("log_retention_settings_unavailable", "error", err)
+			settings = fallback
+		}
+		now := time.Now().UTC()
+		eventDeleted, err := pruneInBatches(func() (int64, error) {
+			return store.PruneEvents(cleanupCtx, now.AddDate(0, 0, -settings.EventDays), 5000)
+		})
+		if err != nil {
+			logger.Warn("event_cleanup_failed", "error", err)
+			return
+		}
+		auditDeleted, err := pruneInBatches(func() (int64, error) {
+			return store.PruneAuditLogs(cleanupCtx, now.AddDate(0, 0, -settings.AuditDays), 5000)
+		})
+		if err != nil {
+			logger.Warn("audit_cleanup_failed", "error", err)
+			return
+		}
+		if eventDeleted != 0 || auditDeleted != 0 {
+			logger.Info("log_cleanup", "events_deleted", eventDeleted, "audit_logs_deleted", auditDeleted, "event_retention_days", settings.EventDays, "audit_retention_days", settings.AuditDays)
+		}
+	}
+	cleanup()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			deleted, err := store.PruneEvents(cleanupCtx, time.Now().UTC().Add(-cfg.EventRetention), 5000)
-			cancel()
-			if err != nil {
-				logger.Warn("event_cleanup_failed", "error", err)
-			} else if deleted != 0 {
-				logger.Info("event_cleanup", "deleted", deleted)
-			}
+			cleanup()
 		}
 	}
+}
+
+func pruneInBatches(prune func() (int64, error)) (int64, error) {
+	var total int64
+	for range 20 {
+		deleted, err := prune()
+		if err != nil {
+			return total, err
+		}
+		total += deleted
+		if deleted < 5000 {
+			break
+		}
+	}
+	return total, nil
 }
 
 func waitForDatabase(ctx context.Context, store *manager.Store) error {

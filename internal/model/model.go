@@ -74,6 +74,15 @@ type EnrollResponse struct {
 	AgentAPI        string `json:"agent_api"`
 }
 
+type CertificateRenewRequest struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
+type CertificateRenewResponse struct {
+	CertificatePEM string    `json:"certificate_pem"`
+	ExpiresAt      time.Time `json:"expires_at"`
+}
+
 type HeartbeatRequest struct {
 	Inventory      Inventory `json:"inventory"`
 	PolicyRevision string    `json:"policy_revision,omitempty"`
@@ -81,16 +90,34 @@ type HeartbeatRequest struct {
 	Status         string    `json:"status"`
 	SpoolBytes     int64     `json:"spool_bytes,omitempty"`
 	SpoolEvents    int       `json:"spool_events,omitempty"`
+	LastCommandID  string    `json:"last_command_id,omitempty"`
 }
 
 type DesiredState struct {
-	RevisionID    string `json:"revision_id"`
-	ArtifactURL   string `json:"artifact_url,omitempty"`
-	SHA256        string `json:"sha256,omitempty"`
-	Signature     string `json:"signature,omitempty"`
-	Mode          string `json:"mode"`
-	AgentPackage  string `json:"agent_package_id,omitempty"`
-	ModulePackage string `json:"module_package_id,omitempty"`
+	RevisionID        string             `json:"revision_id"`
+	ArtifactURL       string             `json:"artifact_url,omitempty"`
+	SHA256            string             `json:"sha256,omitempty"`
+	Signature         string             `json:"signature,omitempty"`
+	Mode              string             `json:"mode"`
+	AgentPackageID    string             `json:"agent_package_id,omitempty"`
+	ModulePackageID   string             `json:"module_package_id,omitempty"`
+	PackageDeployment *PackageDeployment `json:"package_deployment,omitempty"`
+}
+
+type PackageDeployment struct {
+	ID     string          `json:"id"`
+	Agent  PackageDownload `json:"agent"`
+	Module PackageDownload `json:"module"`
+}
+
+type DeploymentResult struct {
+	Status string `json:"status"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type AgentCommand struct {
+	ID      string `json:"id"`
+	Command string `json:"command"`
 }
 
 type SecurityEvent struct {

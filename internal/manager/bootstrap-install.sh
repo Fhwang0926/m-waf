@@ -81,8 +81,8 @@ module_sha=$(printf '%s\n' "$resolution" | sed -n '5p')
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT INT TERM
-agent_file="$tmp_dir/agent.pkg"
-module_file="$tmp_dir/module.pkg"
+agent_file="$tmp_dir/mwaf-agent.deb"
+module_file="$tmp_dir/mwaf-module.deb"
 curl --fail --silent --show-error --cacert "$ca_file" -H "Authorization: Bearer $token" -o "$agent_file" "$agent_url"
 curl --fail --silent --show-error --cacert "$ca_file" -H "Authorization: Bearer $token" -o "$module_file" "$module_url"
 
@@ -117,7 +117,12 @@ cat > /etc/mwaf-agent/agent.json <<EOF
   "state_directory": "/var/lib/mwaf-agent",
   "spool_directory": "/var/lib/mwaf-agent/spool",
   "audit_log": "/var/log/modsecurity/audit.jsonl",
-  "heartbeat_interval": "30s"
+  "heartbeat_interval": "30s",
+  "certificate_renew_before": "720h",
+  "event_flush_interval": "2s",
+  "event_retry_max": "1m",
+  "event_batch_size": 500,
+  "event_batches_per_flush": 20
 }
 EOF
 chmod 0640 /etc/mwaf-agent/agent.json

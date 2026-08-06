@@ -1,0 +1,10 @@
+{{define "enterprises.html"}}
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 기업 관리</title><link rel="stylesheet" href="/static/app.css"></head>
+<body>{{template "navigation" .}}
+<main class="container"><div class="page-head"><div><p class="eyebrow">TENANTS</p><h1>기업 관리</h1></div></div>
+{{if .Notice}}<div class="alert">{{.Notice}}</div>{{end}}
+<div class="admin-grid">
+  <section class="panel"><h2>기업 등록</h2><form method="post" action="/enterprises"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>기업명<input name="name" maxlength="255" required></label><button type="submit">기업 등록</button></form></section>
+  <section class="panel"><div class="panel-head"><h2>등록 기업</h2><span class="badge">{{len .Enterprises}}개</span></div>{{if .Enterprises}}<table><thead><tr><th>기업명</th><th>기업 ID</th><th>등록일</th></tr></thead><tbody>{{range .Enterprises}}<tr><td>{{.Name}}</td><td><span class="mono">{{.ID}}</span></td><td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td></tr>{{end}}</tbody></table>{{else}}<div class="empty">등록된 기업이 없습니다.</div>{{end}}</section>
+</div></main></body></html>
+{{end}}

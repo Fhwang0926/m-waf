@@ -40,25 +40,57 @@ func New(cfg config.Agent, logger *slog.Logger) (*Agent, error) {
 }
 
 func (a *Agent) Run(ctx context.Context) error {
-	if err := a.runCycle(ctx); err != nil {
+	if err := a.runControlCycle(ctx); err != nil {
 		a.logger.Warn("initial_cycle_failed", "error", err)
 	}
+	eventLoopDone := make(chan struct{})
+	go func() {
+		defer close(eventLoopDone)
+		a.runEventLoop(ctx)
+	}()
+	heartbeatTimer := time.NewTimer(a.nextHeartbeatDelay())
+	defer heartbeatTimer.Stop()
 	for {
-		jitter := time.Duration(rand.IntN(5000)) * time.Millisecond
-		timer := time.NewTimer(a.cfg.Heartbeat + jitter)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
+			<-eventLoopDone
 			return ctx.Err()
-		case <-timer.C:
-			if err := a.runCycle(ctx); err != nil {
+		case <-heartbeatTimer.C:
+			if err := a.runControlCycle(ctx); err != nil {
 				a.logger.Warn("agent_cycle_failed", "error", err)
 			}
+			heartbeatTimer.Reset(a.nextHeartbeatDelay())
 		}
 	}
 }
 
-func (a *Agent) runCycle(ctx context.Context) error {
+func (a *Agent) runEventLoop(ctx context.Context) {
+	eventDelay := a.cfg.EventFlushInterval
+	eventTimer := time.NewTimer(eventDelay)
+	defer eventTimer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-eventTimer.C:
+			if a.client.ServerID() != "" {
+				if err := a.flushAudit(ctx); err != nil {
+					eventDelay = min(eventDelay*2, a.cfg.EventRetryMax)
+					a.logger.Warn("event_flush_failed", "error", err, "retry_in", eventDelay)
+				} else {
+					eventDelay = a.cfg.EventFlushInterval
+				}
+			}
+			eventTimer.Reset(eventDelay)
+		}
+	}
+}
+
+func (a *Agent) nextHeartbeatDelay() time.Duration {
+	return a.cfg.Heartbeat + time.Duration(rand.IntN(5000))*time.Millisecond
+}
+
+func (a *Agent) runControlCycle(ctx context.Context) error {
 	inventory, err := CollectInventory(ctx, a.cfg)
 	if err != nil {
 		return err
@@ -69,12 +101,27 @@ func (a *Agent) runCycle(ctx context.Context) error {
 		}
 		a.logger.Info("agent_enrolled", "server_id", a.client.ServerID())
 	}
+	needsRenewal, expiresAt, err := a.client.CertificateExpiresWithin(a.cfg.CertificateRenewBefore)
+	if err != nil {
+		return fmt.Errorf("inspect agent certificate: %w", err)
+	}
+	if needsRenewal {
+		if renewedUntil, renewErr := a.client.RenewCertificate(ctx); renewErr != nil {
+			a.logger.Warn("certificate_renewal_failed", "error", renewErr, "current_expiry", expiresAt)
+		} else {
+			a.logger.Info("certificate_renewed", "expires_at", renewedUntil)
+		}
+	}
 	state := a.currentDesiredState()
 	spoolEvents, spoolBytes, err := a.spool.Stats()
 	if err != nil {
 		return err
 	}
-	heartbeat := model.HeartbeatRequest{Inventory: inventory, PolicyRevision: state.RevisionID, PolicyHash: state.SHA256, Status: "ONLINE", SpoolBytes: spoolBytes, SpoolEvents: spoolEvents}
+	lastCommandID, err := readStateValue(filepath.Join(a.cfg.StateDirectory, "last-command-id"))
+	if err != nil {
+		return err
+	}
+	heartbeat := model.HeartbeatRequest{Inventory: inventory, PolicyRevision: state.RevisionID, PolicyHash: state.SHA256, Status: "ONLINE", SpoolBytes: spoolBytes, SpoolEvents: spoolEvents, LastCommandID: lastCommandID}
 	if err := a.client.Heartbeat(ctx, heartbeat); err != nil {
 		return err
 	}
@@ -83,14 +130,21 @@ func (a *Agent) runCycle(ctx context.Context) error {
 		return err
 	}
 	if desired.RevisionID != "" && (desired.RevisionID != state.RevisionID || desired.SHA256 != state.SHA256) {
-		if err := a.client.EnsurePolicyPublicKey(ctx); err != nil {
-			return err
+		applyErr := func() error {
+			if err := a.client.EnsurePolicyPublicKey(ctx); err != nil {
+				return err
+			}
+			artifact, err := a.client.DownloadPolicy(ctx, desired.ArtifactURL)
+			if err != nil {
+				return err
+			}
+			return a.policy.Apply(ctx, inventory.WebServer, desired, artifact)
+		}()
+		if applyErr != nil {
+			_ = a.client.SendPolicyResult(ctx, desired.RevisionID, "FAILED", applyErr.Error())
+			return applyErr
 		}
-		artifact, err := a.client.DownloadPolicy(ctx, desired.ArtifactURL)
-		if err != nil {
-			return err
-		}
-		if err := a.policy.Apply(ctx, inventory.WebServer, desired, artifact); err != nil {
+		if err := a.client.SendPolicyResult(ctx, desired.RevisionID, "APPLIED", ""); err != nil {
 			return err
 		}
 		a.logger.Info("policy_applied", "revision", desired.RevisionID, "mode", desired.Mode)
@@ -98,7 +152,37 @@ func (a *Agent) runCycle(ctx context.Context) error {
 	if err := a.saveDesiredState(desired); err != nil {
 		return err
 	}
-	if err := a.flushAudit(ctx); err != nil {
+	if desired.PackageDeployment != nil {
+		lastPackageID, err := readStateValue(filepath.Join(a.cfg.StateDirectory, "last-package-deployment"))
+		if err != nil {
+			return err
+		}
+		if lastPackageID != desired.PackageDeployment.ID {
+			applyErr := a.applyPackageDeployment(ctx, *desired.PackageDeployment)
+			if applyErr != nil {
+				if err := a.client.SendPackageResult(ctx, desired.PackageDeployment.ID, "FAILED", applyErr.Error()); err != nil {
+					return err
+				}
+				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-package-deployment"), []byte(desired.PackageDeployment.ID+"\n"), 0o640); err != nil {
+					return err
+				}
+				return applyErr
+			}
+			if err := a.client.SendPackageResult(ctx, desired.PackageDeployment.ID, "APPLIED", ""); err != nil {
+				return err
+			}
+			if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-package-deployment"), []byte(desired.PackageDeployment.ID+"\n"), 0o640); err != nil {
+				return err
+			}
+			a.logger.Info("packages_applied", "deployment_id", desired.PackageDeployment.ID, "agent_package", desired.PackageDeployment.Agent.ID, "module_package", desired.PackageDeployment.Module.ID)
+			if err := restartUpdatedAgent(); err != nil {
+				a.logger.Warn("updated_agent_restart_failed", "error", err)
+			} else {
+				return nil
+			}
+		}
+	}
+	if err := a.executeNextCommand(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -109,39 +193,50 @@ func (a *Agent) flushAudit(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	sentBatches := 0
 	for _, item := range pending {
+		if sentBatches >= a.cfg.EventBatchesPerFlush {
+			return nil
+		}
 		if err := a.client.SendEvents(ctx, item.Batch); err != nil {
 			return err
 		}
-		if err := a.audit.Commit(item.NextOffset); err != nil {
+		if err := a.audit.Commit(item.NextPosition); err != nil {
 			return err
 		}
 		if err := a.spool.Remove(item); err != nil {
 			return err
 		}
+		sentBatches++
 	}
-	events, nextOffset, err := a.audit.ReadBatch(500)
-	if err != nil {
-		return err
-	}
-	if len(events) == 0 {
-		if nextOffset != 0 {
-			return a.audit.Commit(nextOffset)
+	for sentBatches < a.cfg.EventBatchesPerFlush {
+		events, nextPosition, err := a.audit.ReadBatch(a.cfg.EventBatchSize)
+		if err != nil {
+			return err
 		}
-		return nil
+		if len(events) == 0 {
+			if !nextPosition.Empty() {
+				return a.audit.Commit(nextPosition)
+			}
+			return nil
+		}
+		batch := model.EventBatch{BatchID: randomID(), Events: events}
+		item, err := a.spool.Put(batch, nextPosition)
+		if err != nil {
+			return err
+		}
+		if err := a.client.SendEvents(ctx, batch); err != nil {
+			return err
+		}
+		if err := a.audit.Commit(nextPosition); err != nil {
+			return err
+		}
+		if err := a.spool.Remove(item); err != nil {
+			return err
+		}
+		sentBatches++
 	}
-	batch := model.EventBatch{BatchID: randomID(), Events: events}
-	item, err := a.spool.Put(batch, nextOffset)
-	if err != nil {
-		return err
-	}
-	if err := a.client.SendEvents(ctx, batch); err != nil {
-		return err
-	}
-	if err := a.audit.Commit(nextOffset); err != nil {
-		return err
-	}
-	return a.spool.Remove(item)
+	return nil
 }
 
 func (a *Agent) saveDesiredState(state model.DesiredState) error {

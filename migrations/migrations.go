@@ -13,7 +13,20 @@ import (
 var files embed.FS
 
 func Apply(ctx context.Context, db *sql.DB) error {
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("reserve migration connection: %w", err)
+	}
+	defer conn.Close()
+	var lockAcquired int
+	if err := conn.QueryRowContext(ctx, `SELECT GET_LOCK('mwaf_schema_migrations', 30)`).Scan(&lockAcquired); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	if lockAcquired != 1 {
+		return fmt.Errorf("acquire migration lock: timed out")
+	}
+	defer conn.ExecContext(context.WithoutCancel(ctx), `SELECT RELEASE_LOCK('mwaf_schema_migrations')`)
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 version VARCHAR(255) PRIMARY KEY,
 applied_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`); err != nil {
@@ -32,7 +45,7 @@ applied_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
 	sort.Strings(names)
 	for _, name := range names {
 		var applied int
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, name).Scan(&applied); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, name).Scan(&applied); err != nil {
 			return fmt.Errorf("check migration %s: %w", name, err)
 		}
 		if applied != 0 {
@@ -42,10 +55,10 @@ applied_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
 		if err != nil {
 			return err
 		}
-		if _, err := db.ExecContext(ctx, string(script)); err != nil {
+		if _, err := conn.ExecContext(ctx, string(script)); err != nil {
 			return fmt.Errorf("apply migration %s: %w", name, err)
 		}
-		if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (?)`, name); err != nil {
+		if _, err := conn.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES (?)`, name); err != nil {
 			return fmt.Errorf("record migration %s: %w", name, err)
 		}
 	}

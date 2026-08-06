@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -21,8 +23,6 @@ type Manager struct {
 	BundlePublicKey     string
 	BundleRequired      bool
 	BundleAllowUnsigned bool
-	AdminUsername       string
-	AdminPassword       []byte
 	SessionKey          []byte
 	TLSCertificate      string
 	TLSPrivateKey       string
@@ -39,10 +39,6 @@ type Manager struct {
 
 func LoadManager() (Manager, error) {
 	dbPassword, err := secret("MWAF_DB_PASSWORD", "MWAF_DB_PASSWORD_FILE", "")
-	if err != nil {
-		return Manager{}, err
-	}
-	adminPassword, err := secret("MWAF_ADMIN_PASSWORD", "MWAF_ADMIN_PASSWORD_FILE", "")
 	if err != nil {
 		return Manager{}, err
 	}
@@ -70,16 +66,14 @@ func LoadManager() (Manager, error) {
 
 	cfg := Manager{
 		AdminAddr:           value("MWAF_ADMIN_ADDR", ":8443"),
-		AgentAddr:           value("MWAF_AGENT_ADDR", ":9443"),
-		AgentPublicURL:      strings.TrimRight(value("MWAF_AGENT_PUBLIC_URL", "https://127.0.0.1:9443"), "/"),
+		AgentAddr:           value("MWAF_AGENT_ADDR", ":10443"),
+		AgentPublicURL:      strings.TrimRight(value("MWAF_AGENT_PUBLIC_URL", "https://127.0.0.1:10443"), "/"),
 		DBDSN:               dbConfig.FormatDSN(),
 		DBMigrate:           boolean("MWAF_DB_MIGRATE", false),
 		BundleRoot:          value("MWAF_BUNDLE_ROOT", "/opt/mwaf/bundles/current"),
 		BundlePublicKey:     value("MWAF_BUNDLE_PUBLIC_KEY", "/etc/mwaf-manager/package-signing.pub"),
 		BundleRequired:      boolean("MWAF_BUNDLE_REQUIRED", true),
 		BundleAllowUnsigned: boolean("MWAF_BUNDLE_ALLOW_UNSIGNED", false),
-		AdminUsername:       value("MWAF_ADMIN_USERNAME", "admin"),
-		AdminPassword:       []byte(adminPassword),
 		SessionKey:          []byte(sessionKey),
 		TLSCertificate:      value("MWAF_TLS_CERT", "/etc/mwaf-manager/tls/server.crt"),
 		TLSPrivateKey:       value("MWAF_TLS_KEY", "/etc/mwaf-manager/tls/server.key"),
@@ -103,8 +97,11 @@ func LoadManager() (Manager, error) {
 }
 
 func (c Manager) Validate() error {
-	if c.AdminPassword == nil || len(c.AdminPassword) < 12 {
-		return errors.New("MWAF_ADMIN_PASSWORD_FILE must contain at least 12 characters")
+	if err := validateListenAddress("MWAF_ADMIN_ADDR", c.AdminAddr); err != nil {
+		return err
+	}
+	if err := validateListenAddress("MWAF_AGENT_ADDR", c.AgentAddr); err != nil {
+		return err
 	}
 	if len(c.SessionKey) < 32 {
 		return errors.New("MWAF_SESSION_KEY_FILE must contain at least 32 characters")
@@ -115,8 +112,24 @@ func (c Manager) Validate() error {
 	if c.AgentPublicURL == "" {
 		return errors.New("agent public URL is required")
 	}
+	publicURL, err := url.Parse(c.AgentPublicURL)
+	if err != nil || publicURL.Scheme != "https" || publicURL.Hostname() == "" {
+		return errors.New("MWAF_AGENT_PUBLIC_URL must be an https URL")
+	}
 	if c.EventRetention < 24*time.Hour || c.CleanupInterval < time.Minute {
 		return errors.New("event retention must be at least 24h and cleanup interval at least 1m")
+	}
+	return nil
+}
+
+func validateListenAddress(name, address string) error {
+	_, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("%s must be a host:port address: %w", name, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("%s port must be between 1 and 65535", name)
 	}
 	return nil
 }

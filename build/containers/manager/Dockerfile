@@ -31,5 +31,5 @@ COPY --chown=65532:65532 dist/package-signing.pub /etc/mwaf-manager/package-sign
 COPY --chown=65532:65532 dist/empty/ /var/lib/mwaf-manager/
 COPY --chown=65532:65532 dist/empty/ /var/log/mwaf-manager/
 USER 65532:65532
-EXPOSE 8443 9443
+EXPOSE 8443 10443
 ENTRYPOINT ["/usr/local/bin/mwaf-manager"]

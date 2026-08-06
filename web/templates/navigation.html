@@ -1,0 +1,14 @@
+{{define "navigation"}}
+<header class="topbar">
+  <a class="brand" href="/">M-WAF</a>
+  <nav>
+    <a class="{{if eq .Active "servers"}}active{{end}}" href="/servers">서버</a>
+    <a class="{{if eq .Active "events"}}active{{end}}" href="/events">이벤트</a>
+    {{if .CanOperate}}<a class="{{if eq .Active "policies"}}active{{end}}" href="/policies">정책 관리</a><a class="{{if eq .Active "groups"}}active{{end}}" href="/groups">서버 그룹</a><a class="{{if eq .Active "enrollments"}}active{{end}}" href="/enrollments/new">서버 등록</a>{{end}}
+    {{if .IsSystemAdmin}}<a class="{{if eq .Active "enterprises"}}active{{end}}" href="/enterprises">기업 관리</a><a class="{{if eq .Active "settings"}}active{{end}}" href="/settings">시스템 설정</a>{{end}}
+    {{if .CanManageUsers}}<a class="{{if eq .Active "users"}}active{{end}}" href="/users">사용자 관리</a>{{end}}
+    <span class="identity"><strong>{{.Session.DisplayName}}</strong><small>{{.Session.RoleLabel}}{{if .Session.EnterpriseName}} · {{.Session.EnterpriseName}}{{end}}</small></span>
+    <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link-button">로그아웃</button></form>
+  </nav>
+</header>
+{{end}}

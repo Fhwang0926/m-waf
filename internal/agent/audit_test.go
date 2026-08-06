@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,17 +17,17 @@ func TestAuditReaderLeavesPartialJSONUncommitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := NewAuditReader(logPath, state)
-	events, offset, err := reader.ReadBatch(500)
+	events, position, err := reader.ReadBatch(500)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(events) != 1 || events[0].TransactionID != "one" {
 		t.Fatalf("unexpected first batch: %#v", events)
 	}
-	if offset != int64(len(first)+1) {
-		t.Fatalf("partial line was committed: got %d", offset)
+	if position.Offset != int64(len(first)+1) {
+		t.Fatalf("partial line was committed: got %d", position.Offset)
 	}
-	if err := reader.Commit(offset); err != nil {
+	if err := reader.Commit(position); err != nil {
 		t.Fatal(err)
 	}
 	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
@@ -46,5 +47,76 @@ func TestAuditReaderLeavesPartialJSONUncommitted(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].TransactionID != "two" {
 		t.Fatalf("unexpected second batch: %#v", events)
+	}
+}
+
+func TestAuditReaderResetsCheckpointWhenLogIsReplaced(t *testing.T) {
+	state := t.TempDir()
+	logPath := filepath.Join(state, "audit.jsonl")
+	line := `{"transaction":{"unique_id":"first","time_stamp":"2026-08-06T01:02:03Z","request":{"method":"GET","uri":"/one"},"response":{"http_code":403},"messages":[{"message":"blocked","details":{"ruleId":"942100","severity":"2"}}]}}`
+	if err := os.WriteFile(logPath, []byte(line+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	reader := NewAuditReader(logPath, state)
+	_, firstPosition, err := reader.ReadBatch(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Commit(firstPosition); err != nil {
+		t.Fatal(err)
+	}
+	rotated := logPath + ".1"
+	if err := os.Rename(logPath, rotated); err != nil {
+		t.Fatal(err)
+	}
+	replacement := strings.Replace(line, "first", "second", 1)
+	if err := os.WriteFile(logPath, []byte(replacement+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	events, secondPosition, err := reader.ReadBatch(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].TransactionID != "second" {
+		t.Fatalf("replacement log was not read from the beginning: %#v", events)
+	}
+	if secondPosition.Inode == firstPosition.Inode && secondPosition.Device == firstPosition.Device {
+		t.Fatal("replacement log identity did not change")
+	}
+}
+
+func TestAuditReaderKeepsWholeLineAtBatchBoundary(t *testing.T) {
+	state := t.TempDir()
+	logPath := filepath.Join(state, "audit.jsonl")
+	first := `{"transaction":{"unique_id":"one","time_stamp":"2026-08-06T01:02:03Z","request":{"method":"GET","uri":"/one"},"response":{"http_code":403},"messages":[{"message":"first","details":{"ruleId":"942100","severity":"2"}}]}}`
+	second := `{"transaction":{"unique_id":"two","time_stamp":"2026-08-06T01:02:04Z","request":{"method":"GET","uri":"/two"},"response":{"http_code":403},"messages":[{"message":"second-a","details":{"ruleId":"942101","severity":"2"}},{"message":"second-b","details":{"ruleId":"942102","severity":"2"}}]}}`
+	if err := os.WriteFile(logPath, []byte(first+"\n"+second+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := NewAuditReader(logPath, state)
+	events, firstPosition, err := reader.ReadBatch(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Message != "first" {
+		t.Fatalf("unexpected first batch: %#v", events)
+	}
+	if firstPosition.Offset != int64(len(first)+1) {
+		t.Fatalf("second line was consumed at batch boundary: got %d", firstPosition.Offset)
+	}
+	if err := reader.Commit(firstPosition); err != nil {
+		t.Fatal(err)
+	}
+
+	events, secondPosition, err := reader.ReadBatch(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Message != "second-a" || events[1].Message != "second-b" {
+		t.Fatalf("unexpected second batch: %#v", events)
+	}
+	if secondPosition.Offset != int64(len(first)+len(second)+2) {
+		t.Fatalf("second line was not fully consumed: got %d", secondPosition.Offset)
 	}
 }

@@ -7,5 +7,5 @@ max-allowed-packet=16M
 innodb-buffer-pool-size=1G
 innodb-flush-log-at-trx-commit=1
 skip-name-resolve=ON
-slow-query-log=ON
-long-query-time=1
+# File-based slow logs require an external rotation policy; keep them disabled in the minimal Compose stack.
+slow-query-log=OFF

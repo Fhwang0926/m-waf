@@ -10,7 +10,8 @@ import (
 func TestEventSpoolRoundTrip(t *testing.T) {
 	spool := NewEventSpool(t.TempDir())
 	batch := model.EventBatch{BatchID: "batch-1", Events: []model.SecurityEvent{{EventID: "event-1", OccurredAt: time.Now().UTC()}}}
-	created, err := spool.Put(batch, 123)
+	position := AuditPosition{Device: 1, Inode: 2, Offset: 123}
+	created, err := spool.Put(batch, position)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,7 +19,7 @@ func TestEventSpoolRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].Batch.BatchID != batch.BatchID || items[0].NextOffset != 123 {
+	if len(items) != 1 || items[0].Batch.BatchID != batch.BatchID || items[0].NextPosition != position {
 		t.Fatalf("unexpected spool items: %#v", items)
 	}
 	count, size, err := spool.Stats()
