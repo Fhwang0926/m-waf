@@ -22,6 +22,44 @@ set +a
 
 umask 077
 mkdir -p "$secrets_dir"
+chmod 0700 "$secrets_dir"
+
+manager_host=${MWAF_MANAGER_HOST:-localhost}
+case "$manager_host" in
+  \[*\]) manager_host=${manager_host#\[}; manager_host=${manager_host%\]} ;;
+esac
+case "$manager_host" in
+  ""|*[!A-Za-z0-9._:-]*) echo "MWAF_MANAGER_HOST must be a DNS name or IP address" >&2; exit 1 ;;
+esac
+
+is_ipv4_address() {
+  address=$1
+  old_ifs=$IFS
+  IFS=.
+  set -- $address
+  IFS=$old_ifs
+  [ "$#" -eq 4 ] || return 1
+  for octet do
+    case "$octet" in ""|*[!0-9]*) return 1 ;; esac
+    [ "$octet" -le 255 ] || return 1
+  done
+}
+
+is_ip_address() {
+  is_ipv4_address "$1" || case "$1" in *:*) return 0 ;; *) return 1 ;; esac
+}
+
+case "$manager_host" in
+  *:*) case "$manager_host" in *[!A-Fa-f0-9:.]*) echo "MWAF_MANAGER_HOST contains an invalid IPv6 address" >&2; exit 1 ;; esac ;;
+  *[!0-9.]*) ;;
+  *.*) is_ipv4_address "$manager_host" || { echo "MWAF_MANAGER_HOST contains an invalid IPv4 address" >&2; exit 1; } ;;
+esac
+
+certificate_is_p256() {
+  certificate=$1
+  openssl x509 -in "$certificate" -noout -text | grep -q 'Public Key Algorithm: id-ecPublicKey' &&
+    openssl x509 -in "$certificate" -noout -text | grep -q 'ASN1 OID: prime256v1'
+}
 
 create_random_secret() {
   target=$1
@@ -43,8 +81,8 @@ fi
 
 if [ ! -e "$secrets_dir/mwaf_ca_key.pem" ] || [ ! -e "$secrets_dir/mwaf_ca_cert.pem" ]; then
   [ ! -e "$secrets_dir/mwaf_ca_key.pem" ] && [ ! -e "$secrets_dir/mwaf_ca_cert.pem" ] || { echo "CA key/cert pair is incomplete; restore the missing file" >&2; exit 1; }
-  openssl genpkey -algorithm ED25519 -out "$secrets_dir/mwaf_ca_key.pem"
-  openssl req -x509 -new -key "$secrets_dir/mwaf_ca_key.pem" -out "$secrets_dir/mwaf_ca_cert.pem" -days 3650 -subj "/O=M-WAF/CN=M-WAF Agent CA"
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$secrets_dir/mwaf_ca_key.pem"
+  openssl req -x509 -new -sha256 -key "$secrets_dir/mwaf_ca_key.pem" -out "$secrets_dir/mwaf_ca_cert.pem" -days 3650 -subj "/O=M-WAF/CN=M-WAF Agent CA"
 fi
 
 if [ ! -e "$secrets_dir/mwaf_tls_key.pem" ] || [ ! -e "$secrets_dir/mwaf_tls_cert.pem" ]; then
@@ -58,20 +96,43 @@ req_extensions=req_ext
 prompt=no
 [dn]
 O=M-WAF
-CN=${MWAF_MANAGER_HOST:-localhost}
+CN=M-WAF Manager
 [req_ext]
 subjectAltName=@alt_names
 [alt_names]
-DNS.1=${MWAF_MANAGER_HOST:-localhost}
-DNS.2=localhost
+DNS.1=localhost
 IP.1=127.0.0.1
 EOF
-  openssl genpkey -algorithm ED25519 -out "$secrets_dir/mwaf_tls_key.pem"
-  openssl req -new -key "$secrets_dir/mwaf_tls_key.pem" -out "$secrets_dir/mwaf_tls.csr" -config "$tls_config"
-  openssl x509 -req -in "$secrets_dir/mwaf_tls.csr" -CA "$secrets_dir/mwaf_ca_cert.pem" -CAkey "$secrets_dir/mwaf_ca_key.pem" -CAcreateserial -out "$secrets_dir/mwaf_tls_cert.pem" -days 825 -extfile "$tls_config" -extensions req_ext
+  if is_ip_address "$manager_host"; then
+    printf 'IP.2=%s\n' "$manager_host" >> "$tls_config"
+  elif [ "$manager_host" != "localhost" ]; then
+    printf 'DNS.2=%s\n' "$manager_host" >> "$tls_config"
+  fi
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$secrets_dir/mwaf_tls_key.pem"
+  openssl req -new -sha256 -key "$secrets_dir/mwaf_tls_key.pem" -out "$secrets_dir/mwaf_tls.csr" -config "$tls_config"
+  openssl x509 -req -sha256 -in "$secrets_dir/mwaf_tls.csr" -CA "$secrets_dir/mwaf_ca_cert.pem" -CAkey "$secrets_dir/mwaf_ca_key.pem" -CAcreateserial -out "$secrets_dir/mwaf_tls_cert.pem" -days 825 -extfile "$tls_config" -extensions req_ext
   rm -f "$secrets_dir/mwaf_tls.csr" "$secrets_dir/mwaf_ca_cert.srl"
 fi
 
-chmod 0600 "$secrets_dir"/*
-echo "Prepared M-WAF deployment secrets without overwriting existing files."
+openssl verify -CAfile "$secrets_dir/mwaf_ca_cert.pem" "$secrets_dir/mwaf_tls_cert.pem" >/dev/null || { echo "TLS certificate is not signed by the configured M-WAF CA" >&2; exit 1; }
+if is_ip_address "$manager_host"; then
+  openssl x509 -in "$secrets_dir/mwaf_tls_cert.pem" -noout -checkip "$manager_host" >/dev/null || echo "WARNING: existing TLS certificate does not include IP SAN $manager_host; it was not replaced" >&2
+else
+  openssl x509 -in "$secrets_dir/mwaf_tls_cert.pem" -noout -checkhost "$manager_host" >/dev/null || echo "WARNING: existing TLS certificate does not include DNS SAN $manager_host; it was not replaced" >&2
+fi
+if ! certificate_is_p256 "$secrets_dir/mwaf_ca_cert.pem"; then
+  echo "WARNING: existing M-WAF CA is not ECDSA P-256 and may be incompatible with some browsers; it was not replaced" >&2
+fi
+if ! certificate_is_p256 "$secrets_dir/mwaf_tls_cert.pem"; then
+  echo "WARNING: existing TLS certificate is not ECDSA P-256 and may be incompatible with some browsers; it was not replaced" >&2
+fi
+
+for compose_secret in \
+  mariadb_app_password mariadb_root_password mwaf_session_key \
+  mwaf_policy_signing_key.pem mwaf_policy_signing_public.pem \
+  mwaf_ca_key.pem mwaf_ca_cert.pem mwaf_tls_key.pem mwaf_tls_cert.pem
+do
+  chmod 0644 "$secrets_dir/$compose_secret"
+done
+echo "Prepared M-WAF deployment secrets for the non-root Manager without overwriting existing files."
 echo "Open the Admin UI to create the first system administrator."

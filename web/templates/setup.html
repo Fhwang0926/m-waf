@@ -10,8 +10,8 @@
     {{if .Error}}<div class="alert error">{{.Error}}</div>{{end}}
     <form method="post" action="/setup">
       <input type="hidden" name="csrf" value="{{.CSRF}}">
-      <label>사용자명<input name="username" minlength="3" maxlength="128" pattern="[A-Za-z0-9._-]+" autocomplete="username" required></label>
-      <label>표시 이름<input name="display_name" maxlength="255" autocomplete="name" required></label>
+      <label>사용자명<input name="username" minlength="3" maxlength="128" pattern="[A-Za-z0-9._-]+" autocomplete="username" value="{{.Username}}" required></label>
+      <label>표시 이름<input name="display_name" maxlength="255" autocomplete="name" value="{{.DisplayName}}" required></label>
       <label>비밀번호<input type="password" name="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
       <label>비밀번호 확인<input type="password" name="password_confirm" minlength="12" maxlength="256" autocomplete="new-password" required></label>
       <button type="submit">시스템 관리자 생성</button>

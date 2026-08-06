@@ -70,6 +70,27 @@ func (s *sessionManager) validSetupCSRF(token string) bool {
 	return err == nil && hmac.Equal(actual, mac.Sum(nil))
 }
 
+func (s *sessionManager) setupCSRFForRequest(w http.ResponseWriter, r *http.Request) (string, error) {
+	if cookie, err := r.Cookie(setupCSRFCookieName); err == nil && s.validSetupCSRF(cookie.Value) {
+		setSetupCSRFCookie(w, cookie.Value)
+		return cookie.Value, nil
+	}
+	token, err := s.setupCSRF()
+	if err != nil {
+		return "", err
+	}
+	setSetupCSRFCookie(w, token)
+	return token, nil
+}
+
+func (s *sessionManager) validSetupCSRFRequest(r *http.Request) bool {
+	cookie, err := r.Cookie(setupCSRFCookieName)
+	if err != nil || !s.validSetupCSRF(cookie.Value) {
+		return false
+	}
+	return secureEqual([]byte(cookie.Value), []byte(r.FormValue("csrf")))
+}
+
 func (s *sessionManager) create(user UserRecord) (string, sessionData, error) {
 	random := make([]byte, 24)
 	if _, err := rand.Read(random); err != nil {

@@ -20,29 +20,22 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		token, err := s.sessions.setupCSRF()
-		if err != nil {
-			http.Error(w, "setup unavailable", http.StatusInternalServerError)
-			return
-		}
-		setSetupCSRFCookie(w, token)
-		_ = s.templates.ExecuteTemplate(w, "setup.html", map[string]any{"CSRF": token})
+		s.renderSetup(w, r, http.StatusOK, "")
 		return
 	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
 	}
-	cookie, err := r.Cookie(setupCSRFCookieName)
-	if err != nil || !secureEqual([]byte(cookie.Value), []byte(r.FormValue("csrf"))) || !s.sessions.validSetupCSRF(cookie.Value) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+	if !s.sessions.validSetupCSRFRequest(r) {
+		s.renderSetup(w, r, http.StatusForbidden, "설정 보안 정보가 만료되었거나 브라우저 쿠키가 차단되었습니다. 새 보안 정보로 갱신했습니다. 비밀번호를 다시 입력해 시도하세요. 인증서 경고가 계속 표시되면 M-WAF CA 인증서를 신뢰 저장소에 등록하세요.")
 		return
 	}
 	username := strings.TrimSpace(r.FormValue("username"))
 	displayName := truncate(strings.TrimSpace(r.FormValue("display_name")), 255)
 	password := r.FormValue("password")
 	if !validUsername(username) || displayName == "" || len([]rune(password)) < 12 || len([]rune(password)) > 256 || password != r.FormValue("password_confirm") {
-		s.renderSetupError(w, "사용자명, 표시 이름과 12자 이상의 동일한 비밀번호를 확인하세요.")
+		s.renderSetup(w, r, http.StatusBadRequest, "사용자명, 표시 이름과 12자 이상의 동일한 비밀번호를 확인하세요.")
 		return
 	}
 	passwordHash, err := hashPassword(password)
@@ -56,7 +49,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
-		s.renderSetupError(w, "시스템 관리자 생성에 실패했습니다. 사용자명 중복 여부를 확인하세요.")
+		s.renderSetup(w, r, http.StatusBadRequest, "시스템 관리자 생성에 실패했습니다. 사용자명 중복 여부를 확인하세요.")
 		return
 	}
 	token, session, err := s.sessions.create(user)
@@ -70,15 +63,22 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func (s *Server) renderSetupError(w http.ResponseWriter, message string) {
-	token, err := s.sessions.setupCSRF()
+func (s *Server) renderSetup(w http.ResponseWriter, r *http.Request, status int, message string) {
+	w.Header().Set("Cache-Control", "no-store")
+	token, err := s.sessions.setupCSRFForRequest(w, r)
 	if err != nil {
 		http.Error(w, "setup unavailable", http.StatusInternalServerError)
 		return
 	}
-	setSetupCSRFCookie(w, token)
-	w.WriteHeader(http.StatusBadRequest)
-	_ = s.templates.ExecuteTemplate(w, "setup.html", map[string]any{"CSRF": token, "Error": message})
+	data := map[string]any{"CSRF": token, "Error": message, "Username": "", "DisplayName": ""}
+	if r.Method == http.MethodPost {
+		data["Username"] = truncate(strings.TrimSpace(r.FormValue("username")), 128)
+		data["DisplayName"] = truncate(strings.TrimSpace(r.FormValue("display_name")), 255)
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	_ = s.templates.ExecuteTemplate(w, "setup.html", data)
 }
 
 func (s *Server) enterprises(w http.ResponseWriter, r *http.Request) {

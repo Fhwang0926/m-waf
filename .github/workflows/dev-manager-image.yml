@@ -68,6 +68,8 @@ jobs:
           sh -n packaging/module/deb/build.sh
           sh -n packaging/module/external/configure.sh
           sh -n deploy/compose/prepare.sh
+          sh -n deploy/compose/test-prepare.sh
+          sh deploy/compose/test-prepare.sh
           grep -F 'agent_file="$tmp_dir/mwaf-agent.deb"' internal/manager/bootstrap-install.sh
           grep -F 'module_file="$tmp_dir/mwaf-module.deb"' internal/manager/bootstrap-install.sh
           docker compose --env-file deploy/compose/.env.example -f deploy/compose/compose.yaml config --quiet

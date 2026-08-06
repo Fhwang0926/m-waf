@@ -135,7 +135,7 @@ cd m-waf
 cp deploy/compose/.env.example deploy/compose/.env
 ```
 
-Before the first start, edit these two values in `deploy/compose/.env`:
+Before the first start, set the final DNS name or IP address in `deploy/compose/.env`. The generated certificate is preserved on later runs, so do not deploy once with `localhost` and change the address afterward without a reviewed certificate rotation:
 
 ```dotenv
 MWAF_MANAGER_HOST=manager.example.com
@@ -153,6 +153,10 @@ make deploy
 
 `prepare.sh` only creates missing secret files and certificates. It never overwrites existing secrets or volumes. The database port is internal to Compose and is not published on the host.
 
+New installations use an ECDSA P-256 CA and server certificate. A DNS `MWAF_MANAGER_HOST` is written as a DNS SAN and an IPv4/IPv6 address is written as an IP SAN, while `localhost` and `127.0.0.1` remain available for host-local diagnosis. Existing certificates are validated but never replaced automatically; a host mismatch or legacy certificate algorithm is reported as a warning so an enrolled Agent trust chain cannot be silently broken.
+
+For local Docker Compose, file-backed secrets are bind-mounted with their host ownership. `prepare.sh` therefore keeps `deploy/compose/secrets` at mode `0700` and only the files explicitly mounted into containers at `0644`. The directory prevents other host users from traversing or reading those files, while the file mode allows the distroless Manager running as UID/GID `65532` to read its read-only mounts. Do not change the mounted files to `0600`; that prevents the non-root Manager from starting.
+
 Manager and MariaDB container output uses Docker's size-bounded `local` logging driver (`10 MB` per file, up to `5` compressed files per container). MariaDB's file-based slow-query log is disabled in the minimal stack because it requires a separate host log-rotation policy.
 
 Check that the services are running and open the administrator UI:
@@ -167,7 +171,7 @@ docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml ps
 
 On the first visit, `/setup` asks for the system administrator username, display name, and password. The setup route closes after the first account is created. The system administrator then creates each enterprise and its first enterprise administrator from **기업 관리** and **사용자 관리**.
 
-The generated TLS certificate is signed by the local M-WAF CA. For public browser trust, terminate Admin HTTPS at an existing reverse proxy with an approved certificate while leaving the Agent API mTLS path intact.
+The generated TLS certificate is signed by the local M-WAF CA. Its DNS/IP identity is valid for the configured Manager host, but browsers still require that CA to be explicitly trusted. For public browser trust, terminate Admin HTTPS at an existing reverse proxy with an approved certificate while leaving the Agent API mTLS path intact.
 
 ## Install a customer web server
 
