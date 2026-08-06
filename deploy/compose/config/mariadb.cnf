@@ -1,0 +1,11 @@
+[mariadb]
+character-set-server=utf8mb4
+collation-server=utf8mb4_unicode_ci
+default-time-zone=+00:00
+max-connections=100
+max-allowed-packet=16M
+innodb-buffer-pool-size=1G
+innodb-flush-log-at-trx-commit=1
+skip-name-resolve=ON
+slow-query-log=ON
+long-query-time=1

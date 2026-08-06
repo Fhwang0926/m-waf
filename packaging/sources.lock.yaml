@@ -1,0 +1,17 @@
+schema_version: 1
+crs:
+  repository: https://github.com/coreruleset/coreruleset
+  version: v4.28.0
+  commit: 55b09f5
+  archive: https://github.com/coreruleset/coreruleset/archive/refs/tags/v4.28.0.tar.gz
+  sha256: d8acc96f25ad07c8e3a595a23c797324f6d77e59ddf9e26e90dd95ebd2e676ce
+ubuntu_24_04:
+  apache_module:
+    package: libapache2-mod-security2
+    minimum_version: 2.9.7-1build3
+    upstream: https://github.com/owasp-modsecurity/ModSecurity/tree/v2/master
+  nginx_module:
+    package: libnginx-mod-http-modsecurity
+    minimum_version: 1.0.3-1build3
+    connector: https://github.com/owasp-modsecurity/ModSecurity-nginx
+    engine_package: libmodsecurity3

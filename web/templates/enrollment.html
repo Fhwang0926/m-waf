@@ -1,0 +1,9 @@
+{{define "enrollment.html"}}
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 서버 등록</title><link rel="stylesheet" href="/static/app.css"></head>
+<body><header class="topbar"><a class="brand" href="/">M-WAF</a><nav><a href="/servers">서버</a><a href="/events">이벤트</a><a class="active" href="/enrollments/new">서버 등록</a></nav></header>
+<main class="container narrow"><div class="page-head"><div><p class="eyebrow">BOOTSTRAP</p><h1>보호 서버 등록</h1></div></div>
+{{if .Token}}<section class="panel"><div class="alert warn">이 토큰은 한 번만 표시되며 {{.ExpiresAt.Format "2006-01-02 15:04:05"}} UTC에 만료됩니다.</div><h2>등록 토큰</h2><pre>{{.Token}}</pre><h2>Bootstrap 예시</h2><pre>curl --fail --cacert /path/to/manager-ca.crt {{.AgentURL}}/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
+sudo sh /tmp/mwaf-install.sh --manager {{.AgentURL}} --token {{.Token}} --ca /path/to/manager-ca.crt</pre><p class="muted">설치 전 script 내용을 검토하세요. 대상 inventory에 맞는 Agent와 모듈 두 패키지만 Manager에서 내려받습니다.</p><a class="button" href="/servers">서버 목록</a></section>
+{{else}}<section class="panel"><form method="post" action="/enrollments"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>서버 식별 이름<input name="label" maxlength="255" placeholder="web-prod-01" required></label><button type="submit">일회용 등록 토큰 생성</button></form></section>{{end}}
+</main></body></html>
+{{end}}

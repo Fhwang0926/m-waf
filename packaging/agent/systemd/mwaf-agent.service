@@ -1,0 +1,15 @@
+[Unit]
+Description=M-WAF policy and audit agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/mwaf-agent -config /etc/mwaf-agent/agent.json
+Restart=on-failure
+RestartSec=5s
+UMask=0027
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

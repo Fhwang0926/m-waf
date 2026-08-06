@@ -1,0 +1,17 @@
+schema_version: 1
+images:
+  manager:
+    repository: ghcr.io/fhwang0926/m-waf-manager
+    development_tag: dev
+    digest: ""
+  mariadb:
+    repository: docker.io/library/mariadb
+    version: 11.8.6
+    digest: sha256:78a5047d3ba33975f183f183c2464cc7f1eab13ec8667e57cc9a5821d6da7577
+build_images:
+  golang:
+    version: 1.26.4-bookworm
+    digest: sha256:b305420a68d0f229d91eb3b3ed9e519fcf2cf5461da4bef997bf927e8c0bfd2b
+  distroless:
+    version: static-debian12-nonroot
+    digest: sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35

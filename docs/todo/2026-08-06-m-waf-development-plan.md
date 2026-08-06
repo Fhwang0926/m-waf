@@ -7,11 +7,13 @@
 | 문서명 | M-WAF 통합 웹방화벽 개발 계획서 |
 | 문서 버전 | v0.5 |
 | 작성일 | 2026-08-06 |
-| 문서 상태 | 개발 착수 전 계획(TODO) |
+| 문서 상태 | 기본 수직 MVP 구현 완료, 확장 항목 TODO |
 | 대상 독자 | 제품 책임자, 보안 담당자, 백엔드 개발자, 시스템 개발자, 운영 담당자, QA 담당자 |
 | 대상 저장소 | `m-waf` |
 | 1차 지원 환경 | Linux, Apache HTTP Server, Nginx, ModSecurity, OWASP CRS 4.x |
 | 배포 형태 | 보호 서버 설치형 에이전트 및 모듈 + 별도 중앙 관리자 서버 Docker Compose 배포 |
+
+> 구현 상태(2026-08-06): Manager, MariaDB schema, Agent, 정책 모드 적용/롤백, 감사 로그 spool/배치 전송, Ubuntu 24.04 amd64 Apache/Nginx DEB, Manager 내장 서명 bundle, Compose 및 `dev` GHCR workflow까지 구현했다. 실제 MVP 지원 범위와 검증 결과는 [`../complete/2026-08-06-m-waf-mvp-implementation.md`](../complete/2026-08-06-m-waf-mvp-implementation.md)에 기록한다. 이 문서의 Rocky/RPM, 서버 그룹, 예외, RBAC, 승인, 원격 upgrade와 HA 항목은 후속 계획으로 유지한다.
 
 ## 1. 문서 목적
 

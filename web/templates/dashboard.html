@@ -1,0 +1,26 @@
+{{define "dashboard.html"}}
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>M-WAF 대시보드</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/">M-WAF</a><nav><a href="/servers">서버</a><a href="/events">이벤트</a><a href="/policies/new">정책 배포</a><a href="/enrollments/new">서버 등록</a><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link-button">로그아웃</button></form></nav></header>
+  <main class="container">
+    <div class="page-head"><div><p class="eyebrow">CONTROL PLANE</p><h1>운영 현황</h1></div><span class="badge {{if .Ready}}ok{{else}}warn{{end}}">{{if .Ready}}정상{{else}}점검 필요{{end}}</span></div>
+    {{if .Notice}}<div class="alert">{{.Notice}}</div>{{end}}
+    <section class="stats">
+      <article><span>등록 서버</span><strong>{{len .Servers}}</strong></article>
+      <article><span>최근 이벤트</span><strong>{{len .Events}}</strong></article>
+      <article><span>Package bundle</span><strong class="small">{{.BundleVersion}}</strong></article>
+    </section>
+    <section class="panel"><div class="panel-head"><h2>보호 서버</h2><a href="/servers">전체 보기</a></div>
+      {{if .Servers}}<table><thead><tr><th>서버</th><th>웹서버</th><th>상태</th><th>마지막 연결</th></tr></thead><tbody>{{range .Servers}}<tr><td>{{.Name}}</td><td>{{.Inventory.WebServer}} {{.Inventory.WebServerVersion}}</td><td><span class="badge">{{.Status}}</span></td><td>{{if .LastHeartbeatAt.Valid}}{{.LastHeartbeatAt.Time.Format "2006-01-02 15:04:05"}}{{else}}대기 중{{end}}</td></tr>{{end}}</tbody></table>{{else}}<div class="empty">등록된 서버가 없습니다. <a href="/enrollments/new">첫 서버를 등록하세요.</a></div>{{end}}
+    </section>
+  </main>
+</body>
+</html>
+{{end}}

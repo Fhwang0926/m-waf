@@ -1,0 +1,120 @@
+package manager
+
+import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+const sessionCookieName = "mwaf_session"
+
+type sessionData struct {
+	Username  string `json:"username"`
+	ExpiresAt int64  `json:"expires_at"`
+	CSRF      string `json:"csrf"`
+}
+
+type sessionManager struct {
+	key []byte
+}
+
+func newSessionManager(key []byte) *sessionManager { return &sessionManager{key: key} }
+
+func (s *sessionManager) create(username string) (string, sessionData, error) {
+	random := make([]byte, 24)
+	if _, err := rand.Read(random); err != nil {
+		return "", sessionData{}, err
+	}
+	data := sessionData{Username: username, ExpiresAt: time.Now().UTC().Add(8 * time.Hour).Unix(), CSRF: base64.RawURLEncoding.EncodeToString(random)}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return "", sessionData{}, err
+	}
+	payload := base64.RawURLEncoding.EncodeToString(raw)
+	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte(payload))
+	signature := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return payload + "." + signature, data, nil
+}
+
+func (s *sessionManager) parse(token string) (sessionData, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return sessionData{}, errors.New("invalid session")
+	}
+	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte(parts[0]))
+	expected := mac.Sum(nil)
+	actual, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || !hmac.Equal(actual, expected) {
+		return sessionData{}, errors.New("invalid session signature")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return sessionData{}, err
+	}
+	var data sessionData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return sessionData{}, err
+	}
+	if data.Username == "" || data.CSRF == "" || time.Now().UTC().Unix() >= data.ExpiresAt {
+		return sessionData{}, errors.New("expired session")
+	}
+	return data, nil
+}
+
+func setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: token, Path: "/", Expires: expires, MaxAge: int(time.Until(expires).Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+}
+
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+}
+
+func secureEqual(a, b []byte) bool {
+	ah := sha256.Sum256(a)
+	bh := sha256.Sum256(b)
+	return subtle.ConstantTimeCompare(ah[:], bh[:]) == 1
+}
+
+type loginLimiter struct {
+	mu       sync.Mutex
+	attempts map[string][]time.Time
+}
+
+func newLoginLimiter() *loginLimiter { return &loginLimiter{attempts: make(map[string][]time.Time)} }
+
+func (l *loginLimiter) allow(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cutoff := time.Now().Add(-15 * time.Minute)
+	old := l.attempts[key]
+	current := old[:0]
+	for _, attempt := range old {
+		if attempt.After(cutoff) {
+			current = append(current, attempt)
+		}
+	}
+	l.attempts[key] = current
+	return len(current) < 5
+}
+
+func (l *loginLimiter) fail(key string) {
+	l.mu.Lock()
+	l.attempts[key] = append(l.attempts[key], time.Now())
+	l.mu.Unlock()
+}
+
+func (l *loginLimiter) reset(key string) {
+	l.mu.Lock()
+	delete(l.attempts, key)
+	l.mu.Unlock()
+}

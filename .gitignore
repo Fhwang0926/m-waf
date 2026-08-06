@@ -1,0 +1,11 @@
+.DS_Store
+.env
+deploy/compose/.env
+deploy/compose/secrets/*
+!deploy/compose/secrets/README.md
+bin/
+dist/
+coverage.out
+*.log
+*.pid
+*.tmp

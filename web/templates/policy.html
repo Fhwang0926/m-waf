@@ -1,0 +1,8 @@
+{{define "policy.html"}}
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 정책 배포</title><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/policy.css"></head>
+<body><header class="topbar"><a class="brand" href="/">M-WAF</a><nav><a href="/servers">서버</a><a href="/events">이벤트</a><a class="active" href="/policies/new">정책 배포</a><a href="/enrollments/new">서버 등록</a></nav></header>
+<main class="container narrow"><div class="page-head"><div><p class="eyebrow">POLICY DEPLOYMENT</p><h1>정책 모드 배포</h1></div></div>
+<section class="panel"><p class="muted">MVP는 OWASP CRS 원본을 수정하지 않고 서버별 ModSecurity 동작 모드만 서명하여 배포합니다.</p>
+{{if .Servers}}<form method="post" action="/policies"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>보호 서버<select name="server_id" required>{{range .Servers}}<option value="{{.ID}}">{{.Name}} · {{.Inventory.WebServer}} {{.Inventory.WebServerVersion}}</option>{{end}}</select></label><label>동작 모드<select name="mode" required><option value="DetectionOnly">DetectionOnly (권장 시작값)</option><option value="On">On (차단)</option></select></label><button type="submit">서명 후 배포</button></form>{{else}}<div class="empty">먼저 보호 서버를 등록하세요.</div>{{end}}
+</section></main></body></html>
+{{end}}

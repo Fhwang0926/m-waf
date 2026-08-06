@@ -1,0 +1,9 @@
+.git
+.github
+bin
+deploy/compose/.env
+deploy/compose/secrets/*
+docs
+dist/metadata
+dist/packages
+README.md

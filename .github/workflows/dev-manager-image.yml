@@ -1,0 +1,121 @@
+name: Build and publish dev Manager image
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: mwaf-dev-manager
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install distro build inputs
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y apache2 libapache2-mod-security2 nginx libnginx-mod-http-modsecurity jq
+
+      - name: Verify Go code
+        run: go test ./...
+
+      - name: Build Agent and module packages
+        env:
+          COMMIT: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -eu
+          package_version="0.1.0~dev.${RUN_NUMBER}"
+          mkdir -p dist/packages dist/metadata dist/empty
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X github.com/Fhwang0926/m-waf/internal/version.Version=${package_version} -X github.com/Fhwang0926/m-waf/internal/version.Commit=${COMMIT}" -o dist/mwaf-agent ./cmd/mwaf-agent
+          VERSION="$package_version" COMMIT="$COMMIT" AGENT_BINARY=dist/mwaf-agent OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/agent/deb/build.sh
+          curl -fL https://github.com/coreruleset/coreruleset/archive/refs/tags/v4.28.0.tar.gz -o dist/coreruleset.tar.gz
+          echo "d8acc96f25ad07c8e3a595a23c797324f6d77e59ddf9e26e90dd95ebd2e676ce  dist/coreruleset.tar.gz" | sha256sum --check
+          apache_version=$(apachectl -v 2>&1 | sed -n 's#.*Apache/\([^ ]*\).*#\1#p' | head -n 1)
+          apache_hash=$(apachectl -V 2>&1 | sed '/^AH[0-9][0-9]*:/d; /^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//' | sha256sum | awk '{print $1}')
+          WEBSERVER=apache VERSION="$package_version" WEB_VERSION="$apache_version" WEB_BUILD_HASH="$apache_hash" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          nginx_version=$(nginx -v 2>&1 | sed -n 's#.*nginx/##p')
+          nginx_hash=$(nginx -V 2>&1 | sed '/^AH[0-9][0-9]*:/d; /^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//' | sha256sum | awk '{print $1}')
+          WEBSERVER=nginx VERSION="$package_version" WEB_VERSION="$nginx_version" WEB_BUILD_HASH="$nginx_hash" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          for package in dist/packages/*.deb; do
+            dpkg-deb --info "$package"
+          done
+
+      - name: Sign embedded package bundle
+        env:
+          BUNDLE_SIGNING_KEY_B64: ${{ secrets.DEV_BUNDLE_SIGNING_KEY_B64 }}
+          COMMIT: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -eu
+          if [ -n "$BUNDLE_SIGNING_KEY_B64" ]; then
+            printf '%s' "$BUNDLE_SIGNING_KEY_B64" | base64 --decode > dist/bundle-signing.key
+          else
+            echo "DEV_BUNDLE_SIGNING_KEY_B64 is unset; generating an image-local dev signing key"
+            openssl genpkey -algorithm ED25519 -out dist/bundle-signing.key
+          fi
+          go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/bundle-signing.key -public-key-output dist/package-signing.pub -version "dev-${COMMIT}" -commit "$COMMIT"
+          test "$(find dist/bundle/packages -type f | wc -l)" -eq 3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
+        with:
+          images: ghcr.io/fhwang0926/m-waf-manager
+          tags: |
+            type=raw,value=dev
+            type=sha,prefix=dev-,format=long
+
+      - name: Build and push Manager image with embedded packages
+        id: push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          file: build/containers/manager/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=dev
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.repository.updated_at }}
+            BUNDLE_VERSION=dev-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest published image
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-name: ghcr.io/fhwang0926/m-waf-manager
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
