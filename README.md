@@ -256,6 +256,54 @@ make down
 
 Do not use `docker compose down -v` on an environment whose MariaDB data must be retained.
 
+## Container deployment E2E
+
+The repository includes a Linux-only deployment test that starts an isolated Manager/MariaDB stack plus Ubuntu 24.04 Apache and Nginx customer containers. It uses the real HTTPS setup, enrollment, mTLS heartbeat, signed policy, ModSecurity audit, and event APIs. It never seeds or resets MariaDB directly.
+
+Run it on a dedicated Linux amd64 test host with Docker Engine, the Compose plugin, OpenSSL, curl, and jq:
+
+```sh
+git clone --branch dev https://github.com/Fhwang0926/m-waf.git
+cd m-waf
+./deploy/e2e/run.sh all \
+  --manager-image ghcr.io/fhwang0926/m-waf-manager:0.1.0
+```
+
+Use an immutable release tag or digest when the result must be reproducible. `latest` is accepted for convenience but produces a warning. The host ports can be changed independently:
+
+```sh
+./deploy/e2e/run.sh all \
+  --manager-image ghcr.io/fhwang0926/m-waf-manager:0.1.0 \
+  --admin-port 18443 \
+  --agent-port 20443 \
+  --apache-port 18080 \
+  --nginx-port 18081
+```
+
+The default host endpoints are:
+
+- Admin UI: `https://localhost:8443`
+- Agent API: `https://localhost:10443` (loopback only; customer containers use the internal `manager` DNS name)
+- Apache customer: `http://localhost:18080`
+- Nginx customer: `http://localhost:18081`
+
+The first run creates a random system-administrator password under `.local/mwaf-e2e/admin.password` with mode `0600`; it is not printed or copied into Compose. Set `MWAF_E2E_ADMIN_PASSWORD` before the first run if a chosen password is required. Runtime certificates, cookies, and evidence are also kept under the ignored `.local/mwaf-e2e` directory and are separate from `deploy/compose` production material.
+
+The `all` command verifies that both Agents become online, one enterprise-scoped group policy reaches `APPLIED` on both servers, normal and excluded requests return 200, a restricted custom test rule returns 403, and both blocked events arrive at Manager. Evidence and size-bounded diagnostic logs are written under `.local/mwaf-e2e/results/<run-id>` without enrollment tokens or passwords.
+
+Operational commands are also exposed through Make:
+
+```sh
+make e2e-status
+make e2e-verify
+make e2e-logs
+make e2e-down
+```
+
+`make e2e-down` removes the E2E containers and networks but deliberately keeps named volumes, generated credentials, certificates, and evidence. It never passes `-v`. Restore the same `.local/mwaf-e2e` directory when reusing those database volumes; otherwise the stored system-administrator password cannot be recovered.
+
+The two customer fixtures run systemd because the production installer and Agent restart behavior use `systemctl`. Docker therefore runs only those two test containers with `privileged: true` and a cgroup mount. Manager and MariaDB are not privileged, and no container receives the Docker socket or the Manager CA private key. Run this on an isolated test host; server reboot, poweroff, Agent stop, package rollback, and other intentionally disruptive controls are not part of the automatic test.
+
 ## System policy and CRS lifecycle
 
 `packaging/sources.lock.yaml` is the repository source of truth for the approved CRS tag, commit, archive, and SHA-256. `internal/systempolicy/catalog.json` records the current immutable policy version and each version's `PUBLISHED`, `DEPRECATED`, or `WITHDRAWN` lifecycle status. Matching JSON files under `internal/systempolicy/templates/` define the immutable version contents. Enterprise-policy revisions copy both the system-policy and CRS versions, so a deployed revision remains auditable after the repository moves forward.
@@ -287,7 +335,7 @@ Pull requests, `dev` pushes, and manual workflow runs stop after verification. T
 3. immutable `sha-<full-commit-sha>`;
 4. build provenance using GitHub OIDC.
 
-The workflow does not initialize MariaDB or run browser/frontend tests. External-mode CI validates the M-WAF integration contract against pre-installed connectors, not every possible customer compiler/ABI combination. Full Manager-to-Agent enrollment, mTLS, policy, event-ingest, and database integration remains a separate disposable-environment test stage.
+The workflow does not initialize MariaDB or run browser/frontend tests. External-mode CI validates the M-WAF integration contract against pre-installed connectors, not every possible customer compiler/ABI combination. Full Manager-to-Agent enrollment, mTLS, policy, event-ingest, and database integration stays outside CI and is available through `deploy/e2e/run.sh` on a dedicated disposable Linux host.
 
 The workflow publishes the package but cannot perform GitHub's irreversible first-time visibility choice. After making the package public once, confirm anonymous access before distributing the Compose stack:
 

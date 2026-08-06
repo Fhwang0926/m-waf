@@ -1,0 +1,122 @@
+services:
+  manager:
+    environment:
+      MWAF_AGENT_PUBLIC_URL: "https://manager:${MWAF_AGENT_PORT:-10443}"
+
+  customer-apache:
+    build:
+      context: ../e2e/customer
+      args:
+        WEB_SERVER: apache
+    platform: linux/amd64
+    hostname: mwaf-e2e-apache
+    privileged: true
+    cgroup: host
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 30s
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    tmpfs:
+      - /run
+      - /run/lock
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - customer_apache_agent_config:/etc/mwaf-agent
+      - customer_apache_agent_state:/var/lib/mwaf-agent
+      - customer_apache_policy:/etc/mwaf
+      - customer_apache_audit:/var/log/modsecurity
+    secrets:
+      - source: mwaf_e2e_ca_public
+        target: mwaf_manager_ca
+        mode: 0444
+    ports:
+      - "${MWAF_E2E_WEB_BIND:-127.0.0.1}:${MWAF_E2E_APACHE_PORT:-18080}:80"
+    networks:
+      - manager_net
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1/"]
+      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  customer-nginx:
+    build:
+      context: ../e2e/customer
+      args:
+        WEB_SERVER: nginx
+    platform: linux/amd64
+    hostname: mwaf-e2e-nginx
+    privileged: true
+    cgroup: host
+    stop_signal: SIGRTMIN+3
+    stop_grace_period: 30s
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    tmpfs:
+      - /run
+      - /run/lock
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - customer_nginx_agent_config:/etc/mwaf-agent
+      - customer_nginx_agent_state:/var/lib/mwaf-agent
+      - customer_nginx_policy:/etc/mwaf
+      - customer_nginx_audit:/var/log/modsecurity
+    secrets:
+      - source: mwaf_e2e_ca_public
+        target: mwaf_manager_ca
+        mode: 0444
+    ports:
+      - "${MWAF_E2E_WEB_BIND:-127.0.0.1}:${MWAF_E2E_NGINX_PORT:-18081}:80"
+    networks:
+      - manager_net
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1/"]
+      start_period: 30s
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+secrets:
+  mariadb_app_password:
+    file: ${MWAF_E2E_RUNTIME_DIR}/secrets/mariadb_app_password
+  mariadb_root_password:
+    file: ${MWAF_E2E_RUNTIME_DIR}/secrets/mariadb_root_password
+  mwaf_session_key:
+    file: ${MWAF_E2E_RUNTIME_DIR}/secrets/mwaf_session_key
+  mwaf_tls_cert:
+    file: ${MWAF_E2E_RUNTIME_DIR}/secrets/mwaf_tls_cert.pem
+  mwaf_tls_key:
+    file: ${MWAF_E2E_RUNTIME_DIR}/secrets/mwaf_tls_key.pem
+  mwaf_ca_cert:
+    file: ${MWAF_E2E_RUNTIME_DIR}/secrets/mwaf_ca_cert.pem
+  mwaf_ca_key:
+    file: ${MWAF_E2E_RUNTIME_DIR}/secrets/mwaf_ca_key.pem
+  mwaf_policy_signing_key:
+    file: ${MWAF_E2E_RUNTIME_DIR}/secrets/mwaf_policy_signing_key.pem
+  mwaf_policy_signing_public:
+    file: ${MWAF_E2E_RUNTIME_DIR}/secrets/mwaf_policy_signing_public.pem
+  mwaf_e2e_ca_public:
+    file: ${MWAF_E2E_RUNTIME_DIR}/secrets/mwaf_ca_cert.pem
+
+volumes:
+  customer_apache_agent_config:
+  customer_apache_agent_state:
+  customer_apache_policy:
+  customer_apache_audit:
+  customer_nginx_agent_config:
+  customer_nginx_agent_state:
+  customer_nginx_policy:
+  customer_nginx_audit:
