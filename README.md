@@ -7,6 +7,17 @@ M-WAF is a lightweight hosting-provider WAF control plane. Customer web servers 
 
 The separate Manager server runs MariaDB and one Manager container. That Manager image embeds the exact Agent package and both web-server module packages produced from the same `dev` commit.
 
+## Project introduction page
+
+The no-build static introduction page is published with GitHub Pages:
+
+- Public URL: <https://fhwang0926.github.io/m-waf/>
+- Page source: `site/`
+- Deployment workflow: `.github/workflows/pages.yml`
+- Trigger: a `dev` push that changes `site/**` or the Pages workflow, and manual workflow dispatch
+
+Before the first publication, set **Repository Settings → Pages → Build and deployment → Source** to **GitHub Actions**. The workflow uploads only the `site/` directory and uses the minimum Pages deployment permissions. Until the workflow has been pushed and completed successfully, the public URL may return 404.
+
 ## MVP support scope
 
 | Item | Supported now |
@@ -203,6 +214,7 @@ packaging/                   Agent/module DEB builders and source locks
 build/containers/manager/    Manager multi-stage Dockerfile
 deploy/compose/              Clone-to-deploy Manager stack
 .github/workflows/           dev branch build and GHCR publication
+site/                        No-build GitHub Pages introduction site
 docs/                        Detailed design and completion records
 ```
 

@@ -68,6 +68,16 @@ Manager 배포 스택은 `mariadb`와 `manager` 두 컨테이너만 사용한다
 - 최소 GitHub permission: `contents: read`, `packages: write`, provenance용 OIDC/attestation
 - public fork에서는 image-local dev signing key 생성 가능, 저장소 secret이 있으면 지속 signing key 사용
 
+### GitHub Pages 소개 페이지
+
+- 별도 프론트엔드 프레임워크나 JavaScript 없이 `site/index.html`과 `site/assets/styles.css`로 정적 소개 페이지 구성
+- 고객 웹 서버의 요청 처리 흐름, Manager/Agent/Module 역할, 지원 Apache/Nginx exact version, Compose 배포 방법을 한 페이지에 정리
+- 프로젝트 Pages 하위 경로에서도 동작하도록 모든 내부 asset을 상대 경로로 연결
+- `.github/workflows/pages.yml`에서 `dev`의 `site/**` 변경 또는 수동 실행 시 `site/`만 Pages artifact로 배포
+- GitHub Pages에 필요한 `contents: read`, `pages: write`, `id-token: write` permission과 `github-pages` environment만 사용
+- 사용한 GitHub 공식 Action은 commit SHA로 고정
+- 예상 공개 주소: `https://fhwang0926.github.io/m-waf/`
+
 ## 실제 검증 결과
 
 ### 성공
@@ -93,7 +103,9 @@ Manager 배포 스택은 `mariadb`와 `manager` 두 컨테이너만 사용한다
 - 사용자 작업 규칙에 따라 실제 MariaDB를 초기화하거나 migration을 실행하지 않았다.
 - 실행 중인 Manager가 없으므로 Admin UI browser 확인과 Manager-Agent-MariaDB 전체 runtime 통합은 수행하지 않았다.
 - 프론트엔드 build/test는 수행하지 않았다. UI는 별도 프론트 빌드가 없는 서버 렌더링 template이다.
+- 프로젝트 규칙에 따라 GitHub Pages 소개 페이지의 프론트엔드 build, browser render 및 UI test는 수행하지 않았다. 소개 페이지는 build 과정이 없는 정적 HTML/CSS이다.
 - 외부 상태를 변경하는 Git push, GHCR publish는 수행하지 않았다. `dev` 브랜치에 push되면 workflow가 이를 수행한다.
+- GitHub Pages publish도 수행하지 않았다. workflow push 후 저장소 Pages source를 GitHub Actions로 한 번 설정하고 workflow가 성공해야 공개 주소가 활성화된다.
 - 현재 `ghcr.io/fhwang0926/m-waf-manager:dev` 익명 조회는 403이다. 첫 workflow 게시 후 저장소 소유자가 GitHub Package settings에서 한 번 `Public`으로 전환해야 clone-to-deploy 익명 pull이 가능하다.
 - 실제 호스팅 서버의 운영 트래픽 성능과 장시간 audit log rotation은 파일럿에서 별도 측정해야 한다.
 
@@ -110,6 +122,9 @@ Manager 배포 스택은 `mariadb`와 `manager` 두 컨테이너만 사용한다
 
 - `README.md`
 - `.github/workflows/dev-manager-image.yml`
+- `.github/workflows/pages.yml`
+- `site/index.html`
+- `site/assets/styles.css`
 - `deploy/compose/compose.yaml`
 - `build/containers/manager/Dockerfile`
 - `cmd/mwaf-manager/main.go`

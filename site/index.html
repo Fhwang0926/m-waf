@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="M-WAF는 기존 Apache와 Nginx에 ModSecurity와 OWASP CRS를 연결하고 여러 서버를 한 대의 Manager에서 관리하는 경량 웹방화벽입니다.">
+  <meta name="theme-color" content="#07111f">
+  <meta property="og:title" content="M-WAF — 호스팅사를 위한 경량 웹방화벽">
+  <meta property="og:description" content="기존 웹서버는 그대로 유지하고 Agent와 ModSecurity 모듈 두 패키지만 설치하세요.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://fhwang0926.github.io/m-waf/">
+  <title>M-WAF — 호스팅사를 위한 경량 웹방화벽</title>
+  <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./assets/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">본문으로 이동</a>
+
+  <header class="site-header">
+    <div class="shell header-inner">
+      <a class="brand" href="#top" aria-label="M-WAF 홈">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <span>M-WAF</span>
+      </a>
+      <nav aria-label="주요 메뉴">
+        <a href="#architecture">구조</a>
+        <a href="#features">기능</a>
+        <a href="#support">지원 환경</a>
+        <a href="#deploy">배포</a>
+      </nav>
+      <a class="header-cta" href="https://github.com/Fhwang0926/m-waf">GitHub</a>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <div class="shell hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow"><span></span> MODSECURITY CONTROL PLANE</p>
+          <h1>기존 웹서버는 그대로.<br><strong>WAF 운영은 한곳에서.</strong></h1>
+          <p class="hero-lead">M-WAF는 호스팅사가 여러 Apache·Nginx 서버의 ModSecurity 정책과 보안 이벤트를 한 대의 Manager에서 관리할 수 있게 하는 경량 웹방화벽입니다.</p>
+          <div class="hero-actions">
+            <a class="button primary" href="https://github.com/Fhwang0926/m-waf#deploy-the-manager-from-a-clone">배포 방법 보기</a>
+            <a class="button secondary" href="#architecture">구조 살펴보기</a>
+          </div>
+          <ul class="trust-list" aria-label="핵심 원칙">
+            <li>Apache·Nginx 유지</li>
+            <li>고객 서버 설치 2개</li>
+            <li>오픈소스 WAF 그대로 활용</li>
+          </ul>
+        </div>
+
+        <div class="hero-console" aria-label="M-WAF 운영 흐름 요약">
+          <div class="console-head">
+            <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span>m-waf / overview</span>
+            <span class="live"><i></i> READY</span>
+          </div>
+          <div class="console-body">
+            <div class="traffic-flow">
+              <div class="flow-node public"><small>PUBLIC</small><strong>Web traffic</strong><span>80 / 443</span></div>
+              <div class="flow-arrow" aria-hidden="true">→</div>
+              <div class="flow-node protected"><small>DATA PLANE</small><strong>Apache · Nginx</strong><span>ModSecurity + CRS</span></div>
+            </div>
+            <div class="divider"><span>관리 트래픽과 웹 요청 경로 분리</span></div>
+            <div class="control-flow">
+              <div class="server-card">
+                <span class="server-icon" aria-hidden="true"></span>
+                <div><small>CUSTOMER SERVER</small><strong>mwaf-agent</strong></div>
+                <span class="status">mTLS</span>
+              </div>
+              <div class="connection" aria-hidden="true"><i></i><i></i><i></i></div>
+              <div class="server-card manager">
+                <span class="server-icon" aria-hidden="true"></span>
+                <div><small>CONTROL PLANE</small><strong>Manager</strong></div>
+                <span class="status">MariaDB</span>
+              </div>
+            </div>
+          </div>
+          <div class="metric-row">
+            <div><strong>2</strong><span>고객 설치 패키지</span></div>
+            <div><strong>1</strong><span>중앙 Manager</span></div>
+            <div><strong>0</strong><span>고객 서버 추가 인바운드</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="principles section">
+      <div class="shell">
+        <div class="section-heading compact">
+          <p class="eyebrow"><span></span> BUILT FOR OPERATORS</p>
+          <h2>새 WAF를 만드는 대신,<br>검증된 구성요소를 연결합니다.</h2>
+        </div>
+        <div class="principle-grid">
+          <article>
+            <span class="number">01</span>
+            <h3>기존 웹서버 유지</h3>
+            <p>고객의 Apache 또는 Nginx 프로세스와 80/443 트래픽 경로를 바꾸지 않습니다.</p>
+          </article>
+          <article>
+            <span class="number">02</span>
+            <h3>설치는 정확히 두 개</h3>
+            <p>공통 Agent 하나와 해당 웹서버용 ModSecurity 모듈 패키지 하나만 설치합니다.</p>
+          </article>
+          <article>
+            <span class="number">03</span>
+            <h3>Upstream 우선</h3>
+            <p>ModSecurity와 OWASP CRS를 그대로 사용합니다. Nginx는 libmodsecurity를 요청 처리 단계에 연결하는 배포판 연동 모듈을 함께 사용합니다.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="architecture section" id="architecture">
+      <div class="shell">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow"><span></span> ARCHITECTURE</p>
+            <h2>차단은 서버에서,<br>관리는 중앙에서.</h2>
+          </div>
+          <p>Manager 장애가 발생해도 웹 요청은 Manager를 거치지 않습니다. 각 서버는 마지막으로 검증된 정책으로 계속 보호됩니다.</p>
+        </div>
+
+        <div class="architecture-board">
+          <div class="plane data-plane">
+            <div class="plane-label"><span>01</span><div><strong>Customer data plane</strong><small>실제 웹 요청 처리</small></div></div>
+            <div class="machine-list">
+              <article class="machine">
+                <div class="machine-title"><span class="apache-dot"></span><strong>Apache Server</strong><em>PROTECTED</em></div>
+                <ul><li>mwaf-agent</li><li>ModSecurity v2</li><li>OWASP CRS 4.28.0</li></ul>
+              </article>
+              <article class="machine">
+                <div class="machine-title"><span class="nginx-dot"></span><strong>Nginx Server</strong><em>PROTECTED</em></div>
+                <ul><li>mwaf-agent</li><li>libmodsecurity v3</li><li>OWASP CRS 4.28.0</li></ul>
+              </article>
+            </div>
+          </div>
+
+          <div class="board-link" aria-hidden="true"><span>mTLS · outbound only</span></div>
+
+          <div class="plane manager-plane">
+            <div class="plane-label"><span>02</span><div><strong>Manager control plane</strong><small>별도 관리자 서버</small></div></div>
+            <div class="manager-stack">
+              <div><small>CONTAINER</small><strong>mwaf-manager</strong><span>Admin UI · Agent API · Package bundle</span></div>
+              <div><small>CONTAINER</small><strong>MariaDB 11.8.6</strong><span>서버 · 정책 · 이벤트 · 감사 기록</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="features section" id="features">
+      <div class="shell">
+        <div class="section-heading">
+          <div><p class="eyebrow"><span></span> MVP CAPABILITIES</p><h2>운영에 필요한 핵심만.</h2></div>
+          <p>별도 메시지 브로커나 검색 클러스터 없이 Go, MariaDB, Docker Compose로 단순하게 구성했습니다.</p>
+        </div>
+        <div class="feature-grid">
+          <article><span class="feature-icon">01</span><h3>정확한 패키지 선택</h3><p>OS, CPU, 웹서버 버전과 정규화된 빌드 해시가 모두 일치하는 Agent·모듈만 Manager가 제공합니다.</p></article>
+          <article><span class="feature-icon">02</span><h3>서명된 정책 배포</h3><p>Ed25519 서명과 SHA-256을 검증하고 설정 검사 성공 후에만 Apache 또는 Nginx를 reload합니다.</p></article>
+          <article><span class="feature-icon">03</span><h3>자동 롤백</h3><p>정책 검증이나 reload가 실패하면 이전 정책 파일을 복원하고 다시 검증합니다.</p></article>
+          <article><span class="feature-icon">04</span><h3>안전한 Agent 통신</h3><p>일회용 등록 토큰과 Agent별 인증서를 사용하며 모든 운영 통신은 mTLS로 보호합니다.</p></article>
+          <article><span class="feature-icon">05</span><h3>감사 로그 수집</h3><p>ModSecurity JSON 이벤트를 디스크에 spool하고 최대 500건씩 멱등 batch로 전송합니다.</p></article>
+          <article><span class="feature-icon">06</span><h3>한 번에 배포</h3><p>Manager와 MariaDB는 Compose로, 고객 서버 패키지는 동일 Manager 이미지에서 내려받습니다.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="support section" id="support">
+      <div class="shell">
+        <div class="section-heading">
+          <div><p class="eyebrow"><span></span> SUPPORT MATRIX</p><h2>지원 범위를 명확하게.</h2></div>
+          <p>현재 MVP는 Ubuntu 24.04 LTS amd64의 배포판 기본 웹서버만 지원합니다.</p>
+        </div>
+        <div class="support-table-wrap">
+          <table>
+            <thead><tr><th>웹서버</th><th>지원 버전</th><th>Ubuntu 패키지 기준</th><th>WAF 구성</th></tr></thead>
+            <tbody>
+              <tr><td><strong><span class="apache-dot"></span>Apache HTTP Server</strong></td><td><code>2.4.58</code></td><td><code>2.4.58-1ubuntu8.15</code></td><td>ModSecurity 2.9.7 + CRS 4.28.0</td></tr>
+              <tr><td><strong><span class="nginx-dot"></span>Nginx</strong></td><td><code>1.24.0</code></td><td><code>1.24.0-2ubuntu7.15</code></td><td>Connector 1.0.3 + libmodsecurity 3.0.12 + CRS 4.28.0</td></tr>
+            </tbody>
+          </table>
+          <div class="support-note"><strong>Exact match required</strong><span>표시 버전이 같아도 <code>apachectl -V</code> 또는 <code>nginx -V</code> 빌드 해시가 Manager 내장 catalog와 다르면 설치하지 않습니다.</span></div>
+        </div>
+        <div class="unsupported"><strong>현재 미지원</strong><span>ARM64</span><span>Rocky·RHEL·Debian</span><span>OpenResty</span><span>nginx.org·PPA</span><span>직접 컴파일 빌드</span></div>
+      </div>
+    </section>
+
+    <section class="deploy section" id="deploy">
+      <div class="shell deploy-card">
+        <div class="deploy-copy">
+          <p class="eyebrow"><span></span> CLONE TO DEPLOY</p>
+          <h2>Manager는 Compose로<br>바로 시작합니다.</h2>
+          <p>공개 GHCR 이미지에는 같은 commit에서 만든 Agent와 Apache·Nginx 모듈 bundle이 함께 들어갑니다.</p>
+          <a class="button primary" href="https://github.com/Fhwang0926/m-waf">저장소에서 시작하기</a>
+        </div>
+        <div class="terminal" aria-label="M-WAF 배포 명령">
+          <div class="terminal-head"><span></span><span></span><span></span><em>terminal</em></div>
+          <pre><code><b>$</b> git clone https://github.com/Fhwang0926/m-waf.git
+<b>$</b> cd m-waf &amp;&amp; git switch dev
+<b>$</b> cp deploy/compose/.env.example \
+      deploy/compose/.env
+<b>$</b> make deploy-dev
+
+<i># Manager UI</i>
+https://manager.example.com:8443</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="opensource section">
+      <div class="shell opensource-inner">
+        <div><p class="eyebrow"><span></span> OPEN SOURCE FIRST</p><h2>검증된 생태계 위에<br>최소한의 관리 계층만.</h2></div>
+        <div class="project-list">
+          <a href="https://github.com/owasp-modsecurity/ModSecurity"><strong>ModSecurity</strong><span>WAF engine</span></a>
+          <a href="https://github.com/owasp-modsecurity/ModSecurity-nginx"><strong>ModSecurity-nginx</strong><span>Official connector</span></a>
+          <a href="https://github.com/coreruleset/coreruleset"><strong>OWASP CRS</strong><span>Core rule set</span></a>
+          <a href="https://mariadb.org/"><strong>MariaDB</strong><span>Manager database</span></a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell footer-inner">
+      <div><a class="brand" href="#top"><span class="brand-mark" aria-hidden="true">M</span><span>M-WAF</span></a><p>ModSecurity control plane for hosting providers.</p></div>
+      <div class="footer-links"><a href="https://github.com/Fhwang0926/m-waf">GitHub</a><a href="https://github.com/Fhwang0926/m-waf/blob/dev/README.md">README</a><a href="https://github.com/Fhwang0926/m-waf/blob/dev/THIRD_PARTY_NOTICES.md">Open-source notices</a></div>
+    </div>
+  </footer>
+</body>
+</html>
