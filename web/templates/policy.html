@@ -8,7 +8,7 @@
 	<label>기업 정책 이름<input name="name" maxlength="255" placeholder="운영 기본 정책" required></label>
   <label>설명<textarea name="description" maxlength="1024" rows="2" placeholder="적용 목적과 변경 사유"></textarea></label>
   <label>배포 대상<select name="target" required><option value="">선택하세요</option>{{range .Groups}}<option value="group:{{.ID}}">그룹 · {{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}} ({{len .Members}}대)</option>{{end}}{{range .Servers}}{{if not .Revoked}}<option value="server:{{.ID}}">서버 · {{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}}</option>{{end}}{{end}}</select></label>
-  <label>업데이트 전략<select name="update_strategy" required><option value="MANUAL" selected>수동 승인 · 새 버전 확인 후 기업 관리자 승인</option><option value="AUTOMATIC">자동 채택 · 새 버전을 카나리부터 단계 배포</option><option value="PINNED">버전 고정 · 정보만 표시하고 적용하지 않음</option></select></label>
+  <label>업데이트 전략<select name="update_strategy" required><option value="MANUAL" selected>수동 승인 · 새 버전 확인 후 기업 사용자 승인</option><option value="AUTOMATIC">자동 채택 · 새 버전을 카나리부터 단계 배포</option><option value="PINNED">버전 고정 · 정보만 표시하고 적용하지 않음</option></select></label>
   <div class="form-grid"><label>동작 모드<select name="mode" required><option value="DetectionOnly">탐지만</option><option value="On">탐지 및 차단</option></select></label>
   <label>CRS 민감도<select name="paranoia_level" required><option value="1">1 · 기본</option><option value="2">2 · 강화</option><option value="3">3 · 높음</option><option value="4">4 · 최고</option></select></label>
   <label>차단 임계점수<input type="number" name="inbound_score" min="1" max="100" value="5" required><small>낮을수록 더 민감하게 차단합니다.</small></label></div>

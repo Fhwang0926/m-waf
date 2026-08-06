@@ -217,8 +217,8 @@ The current MVP has no supported `tar.gz`, manual-copy, or RPM installation path
 ## Operate the MVP
 
 - **시스템 관리자** can view all enterprises, create enterprises, create enterprise administrators/users, and operate every server.
-- **기업 관리자** can view and operate only its enterprise, and can add read-only enterprise users.
-- **기업 사용자** can view only its enterprise's servers and WAF events.
+- **기업 사용자** can monitor and operate only its enterprise, including server enrollment/control, groups, enterprise policies, staged rollout approval/retry, and rollback.
+- **기업 관리자** has the same enterprise-scoped operating permissions and additionally manages enterprise users and administrator roles. Self-demotion/deactivation/deletion and removal of the last active enterprise administrator are blocked.
 - **시스템 설정** controls WAF event retention (default 30 days) and administrator audit retention (default 365 days). Cleanup runs at startup and then on the configured cleanup interval in bounded batches.
 - **서버** shows inventory, Agent/module versions, heartbeat, policy/package deployment results, and the latest fixed control command.
 - A server is displayed as `OFFLINE` when no heartbeat has arrived for two minutes.
@@ -230,15 +230,15 @@ The current MVP has no supported `tar.gz`, manual-copy, or RPM installation path
 - **시스템 정책** is a system-administrator read-only catalog of immutable GitHub-managed versions, CRS compatibility, lifecycle status, source commit, migration notes, and adoption counts. Manager does not provide create, edit, or publish controls for this catalog.
 - **기업 정책** adopts one published system-policy version and owns the enterprise target, detection/blocking mode, CRS sensitivity, anomaly threshold, request-body inspection, URL/IP exclusions, restricted custom `SecRule` lines, and update strategy. New standalone policies are blocked; untraceable existing revisions remain `LEGACY_LOCKED` until an administrator explicitly converts them.
 - Manager creates one enterprise-wide `DetectionOnly` baseline when an enterprise first enrolls an unprotected server. The signed seed is attributed to the M-WAF system and starts with the `MANUAL` update strategy.
-- Enterprise administrators choose `MANUAL` (approve each update), `AUTOMATIC` (start a staged rollout), or `PINNED` (show updates without applying them). Regular enterprise users cannot operate policies.
+- Enterprise users choose `MANUAL` (approve each update), `AUTOMATIC` (start a staged rollout), or `PINNED` (show updates without applying them).
 - The policy controller runs at startup, after enrollment and Agent state changes, and every `MWAF_POLICY_SYNC_INTERVAL` (default `15m`). Target resolution keeps `server > group > enterprise` precedence.
 - Every update uses one online canary and then batches of at most 25. Offline servers remain deferred without blocking online servers; the first failure pauses the remaining rollout.
 - When CRS changes, Manager first applies a minimum signed `DetectionOnly` transition, deploys the compatible signed Agent/module pair, waits for heartbeat to confirm the target CRS, and then applies the migrated immutable enterprise revision. The migration preserves enterprise settings and validated custom rules.
-- Enterprise administrators can retry a failed rollout or roll back only to the immediately previous successful revision. Rollback restores the compatible Agent/CRS package pair as well as the policy and is blocked when the signed bundle is missing or the target system-policy version is withdrawn.
+- Enterprise users can retry a failed rollout or roll back only to the immediately previous successful revision. Rollback restores the compatible Agent/CRS package pair as well as the policy and is blocked when the signed bundle is missing or the target system-policy version is withdrawn.
 - **서버 제어** queues only four fixed polling commands: Agent restart/stop and server restart/poweroff. Arbitrary shell input is not accepted.
 - **패키지 제어** force-installs the current compatible signed bundle or its explicit rollback pair; success is recorded only after the restarted Agent reports matching installed versions.
 - **등록 해제** preserves server/event history but blocks the enrolled Agent certificate immediately.
-- **사용자 관리** supports display-name/role/password updates, activation changes, and audit-preserving soft deletion within the administrator's enterprise scope. **내 계정** lets every administrator rotate their own password and invalidates existing sessions.
+- **사용자 관리** is limited to enterprise/system administrators and supports administrator creation, display-name/role/password updates, activation changes, and audit-preserving soft deletion within scope. **내 계정** lets every signed-in user rotate their own password and invalidates existing sessions.
 - Agent verifies the Ed25519 signature and SHA-256, writes `/etc/mwaf/active/main.conf`, runs `apachectl configtest` or `nginx -t`, and reloads only on a change.
 - If validation or reload fails, Agent restores the prior policy and reloads it.
 - Each Agent uses a Manager-issued client certificate so the mTLS API can bind heartbeat, policy, package, command, and event traffic to one enrolled server without storing a reusable API password.

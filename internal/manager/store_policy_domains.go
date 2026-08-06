@@ -290,7 +290,7 @@ func (s *Store) UpdateEnterprisePolicyStrategy(ctx context.Context, scopeEnterpr
 		}
 	}
 	if strategy == PolicyStrategyPinned {
-		if _, err := tx.ExecContext(ctx, `UPDATE policy_rollouts SET status='CANCELLED',detail='기업 관리자가 버전 고정 전략으로 변경함',completed_at=UTC_TIMESTAMP(6) WHERE enterprise_policy_id=? AND status='AWAITING_APPROVAL'`, policyID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE policy_rollouts SET status='CANCELLED',detail='기업 사용자가 버전 고정 전략으로 변경함',completed_at=UTC_TIMESTAMP(6) WHERE enterprise_policy_id=? AND status='AWAITING_APPROVAL'`, policyID); err != nil {
 			return err
 		}
 	}

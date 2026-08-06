@@ -27,6 +27,8 @@ type UserRecord struct {
 	CreatedAt      time.Time
 }
 
+var ErrLastEnterpriseAdmin = errors.New("at least one active enterprise administrator is required")
+
 func (u UserRecord) RoleLabel() string { return u.Role.Label() }
 
 func (s *Store) HasAdminUsers(ctx context.Context) (bool, error) {
@@ -168,12 +170,25 @@ func (s *Store) UpdateEnterpriseUser(ctx context.Context, enterpriseID, userID, 
 	if enterpriseID == "" || !validEnterpriseRole(role) {
 		return errors.New("valid enterprise and role are required")
 	}
-	var accessible int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_users WHERE id=? AND enterprise_id=? AND role<>'system_admin' AND deleted_at IS NULL`, userID, enterpriseID).Scan(&accessible); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	if accessible != 1 {
-		return sql.ErrNoRows
+	defer func() { _ = tx.Rollback() }()
+
+	var currentRole Role
+	var currentActive bool
+	if err := tx.QueryRowContext(ctx, `SELECT role,is_active FROM admin_users WHERE id=? AND enterprise_id=? AND role<>'system_admin' AND deleted_at IS NULL FOR UPDATE`, userID, enterpriseID).Scan(&currentRole, &currentActive); err != nil {
+		return err
+	}
+	if currentRole == RoleEnterpriseAdmin && currentActive && (role != RoleEnterpriseAdmin || !active) {
+		hasOther, err := lockOtherActiveEnterpriseAdmin(ctx, tx, enterpriseID, userID)
+		if err != nil {
+			return err
+		}
+		if !hasOther {
+			return ErrLastEnterpriseAdmin
+		}
 	}
 	query := `UPDATE admin_users SET display_name=?,role=?,is_active=?`
 	args := []any{displayName, role, active}
@@ -183,12 +198,37 @@ func (s *Store) UpdateEnterpriseUser(ctx context.Context, enterpriseID, userID, 
 	}
 	query += ` WHERE id=? AND enterprise_id=? AND role<>'system_admin' AND deleted_at IS NULL`
 	args = append(args, userID, enterpriseID)
-	_, err := s.db.ExecContext(ctx, query, args...)
-	return err
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteEnterpriseUser(ctx context.Context, enterpriseID, userID string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE admin_users SET is_active=FALSE,deleted_at=UTC_TIMESTAMP(6) WHERE id=? AND enterprise_id=? AND role<>'system_admin' AND deleted_at IS NULL`, userID, enterpriseID)
+	if enterpriseID == "" {
+		return errors.New("valid enterprise is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var currentRole Role
+	var currentActive bool
+	if err := tx.QueryRowContext(ctx, `SELECT role,is_active FROM admin_users WHERE id=? AND enterprise_id=? AND role<>'system_admin' AND deleted_at IS NULL FOR UPDATE`, userID, enterpriseID).Scan(&currentRole, &currentActive); err != nil {
+		return err
+	}
+	if currentRole == RoleEnterpriseAdmin && currentActive {
+		hasOther, err := lockOtherActiveEnterpriseAdmin(ctx, tx, enterpriseID, userID)
+		if err != nil {
+			return err
+		}
+		if !hasOther {
+			return ErrLastEnterpriseAdmin
+		}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE admin_users SET is_active=FALSE,deleted_at=UTC_TIMESTAMP(6) WHERE id=? AND enterprise_id=? AND role<>'system_admin' AND deleted_at IS NULL`, userID, enterpriseID)
 	if err != nil {
 		return err
 	}
@@ -199,5 +239,22 @@ func (s *Store) DeleteEnterpriseUser(ctx context.Context, enterpriseID, userID s
 	if changed != 1 {
 		return sql.ErrNoRows
 	}
-	return nil
+	return tx.Commit()
+}
+
+func lockOtherActiveEnterpriseAdmin(ctx context.Context, tx *sql.Tx, enterpriseID, excludedUserID string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM admin_users WHERE enterprise_id=? AND role='enterprise_admin' AND is_active=TRUE AND deleted_at IS NULL AND id<>? FOR UPDATE`, enterpriseID, excludedUserID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	hasOther := false
+	for rows.Next() {
+		hasOther = true
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return false, err
+		}
+	}
+	return hasOther, rows.Err()
 }

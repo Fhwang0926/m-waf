@@ -33,8 +33,8 @@ type sessionData struct {
 
 func (s sessionData) RoleLabel() string    { return s.Role.Label() }
 func (s sessionData) IsSystemAdmin() bool  { return s.Role == RoleSystemAdmin }
-func (s sessionData) CanOperate() bool     { return roleAtLeast(s.Role, RoleEnterpriseAdmin) }
-func (s sessionData) CanManageUsers() bool { return s.CanOperate() }
+func (s sessionData) CanOperate() bool     { return roleAtLeast(s.Role, RoleEnterpriseUser) }
+func (s sessionData) CanManageUsers() bool { return roleAtLeast(s.Role, RoleEnterpriseAdmin) }
 func (s sessionData) ScopeEnterpriseID() string {
 	if s.IsSystemAdmin() {
 		return ""

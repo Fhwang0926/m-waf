@@ -4,9 +4,9 @@
 <main class="container"><div class="page-head"><div><p class="eyebrow">ACCESS CONTROL</p><h1>사용자 관리</h1></div></div>
 {{if .Notice}}<div class="alert">{{.Notice}}</div>{{end}}{{if .Error}}<div class="alert error">{{.Error}}</div>{{end}}
 <div class="admin-grid">
-  <section class="panel"><h2>사용자 추가</h2><p class="muted">{{if .IsSystemAdmin}}기업 관리자 또는 기업 사용자를 추가합니다.{{else}}소속 기업의 조회 전용 사용자를 추가합니다.{{end}}</p>
+  <section class="panel"><h2>사용자 추가</h2><p class="muted">기업 사용자는 모니터링과 운영을 수행하고, 기업 관리자는 사용자와 권한도 관리합니다.</p>
     {{if and .IsSystemAdmin (not .Enterprises)}}<div class="empty">먼저 <a href="/enterprises">기업을 등록하세요.</a></div>{{else}}<form method="post" action="/users"><input type="hidden" name="csrf" value="{{.CSRF}}">
-      {{if .IsSystemAdmin}}<label>기업<select name="enterprise_id" required>{{range .Enterprises}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label><label>권한<select name="role" required><option value="enterprise_user">기업 사용자</option><option value="enterprise_admin">기업 관리자</option></select></label>{{end}}
+      {{if .IsSystemAdmin}}<label>기업<select name="enterprise_id" required>{{range .Enterprises}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>{{end}}<label>권한<select name="role" required><option value="enterprise_user">기업 사용자 · 모니터링 및 운영</option><option value="enterprise_admin">기업 관리자 · 사용자 및 권한 관리 포함</option></select></label>
       <label>사용자명<input name="username" minlength="3" maxlength="128" pattern="[A-Za-z0-9._-]+" autocomplete="off" required></label>
       <label>표시 이름<input name="display_name" maxlength="255" autocomplete="off" required></label>
       <label>임시 비밀번호<input type="password" name="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>

@@ -188,7 +188,7 @@ func (s *Server) editUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
-	_ = s.templates.ExecuteTemplate(w, "user-edit.html", s.viewData(r, "users", map[string]any{"User": user}))
+	_ = s.templates.ExecuteTemplate(w, "user-edit.html", s.viewData(r, "users", map[string]any{"User": user, "IsSelf": user.ID == session.UserID}))
 }
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
@@ -204,13 +204,15 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	displayName := truncate(strings.TrimSpace(r.FormValue("display_name")), 255)
 	role := Role(strings.TrimSpace(r.FormValue("role")))
-	if !session.IsSystemAdmin() {
-		role = RoleEnterpriseUser
-	}
+	active := r.FormValue("active") == "on"
 	password := r.FormValue("password")
 	passwordHash := ""
 	if displayName == "" || !validEnterpriseRole(role) {
 		http.Error(w, "표시 이름과 권한을 확인하세요.", http.StatusBadRequest)
+		return
+	}
+	if user.ID == session.UserID && (role != RoleEnterpriseAdmin || !active) {
+		http.Error(w, "자기 자신의 기업 관리자 권한이나 로그인 상태는 해제할 수 없습니다.", http.StatusConflict)
 		return
 	}
 	if password != "" {
@@ -224,8 +226,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	active := r.FormValue("active") == "on"
 	if err := s.store.UpdateEnterpriseUser(r.Context(), user.EnterpriseID, user.ID, displayName, passwordHash, role, active); err != nil {
+		if errors.Is(err, ErrLastEnterpriseAdmin) {
+			http.Error(w, "기업에는 활성 기업 관리자가 한 명 이상 필요합니다.", http.StatusConflict)
+			return
+		}
 		http.Error(w, "사용자를 수정할 수 없습니다.", http.StatusConflict)
 		return
 	}
@@ -248,7 +253,15 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
+	if user.ID == session.UserID {
+		http.Error(w, "자기 자신의 기업 관리자 계정은 삭제할 수 없습니다.", http.StatusConflict)
+		return
+	}
 	if err := s.store.DeleteEnterpriseUser(r.Context(), user.EnterpriseID, user.ID); err != nil {
+		if errors.Is(err, ErrLastEnterpriseAdmin) {
+			http.Error(w, "기업에는 활성 기업 관리자가 한 명 이상 필요합니다.", http.StatusConflict)
+			return
+		}
 		http.Error(w, "사용자를 삭제할 수 없습니다.", http.StatusConflict)
 		return
 	}
@@ -257,13 +270,13 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func sessionCanManageUser(session sessionData, user UserRecord) bool {
-	if user.Role == RoleSystemAdmin || user.EnterpriseID == "" {
+	if !session.CanManageUsers() || user.Role == RoleSystemAdmin || user.EnterpriseID == "" {
 		return false
 	}
 	if session.IsSystemAdmin() {
 		return true
 	}
-	return session.EnterpriseID == user.EnterpriseID && user.Role == RoleEnterpriseUser
+	return session.EnterpriseID == user.EnterpriseID
 }
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
@@ -279,7 +292,6 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	enterpriseID := strings.TrimSpace(r.FormValue("enterprise_id"))
 	if !session.IsSystemAdmin() {
 		enterpriseID = session.EnterpriseID
-		role = RoleEnterpriseUser
 	}
 	if !validUsername(username) || displayName == "" || len([]rune(password)) < 12 || len([]rune(password)) > 256 || password != r.FormValue("password_confirm") || !validEnterpriseRole(role) {
 		s.renderUsers(w, r, "사용자명, 표시 이름, 역할과 12자 이상의 동일한 비밀번호를 확인하세요.")
