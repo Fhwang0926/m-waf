@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -14,6 +15,8 @@ type Agent struct {
 	ManagerURL                 string        `json:"manager_url"`
 	ServerName                 string        `json:"server_name"`
 	WebServer                  string        `json:"web_server,omitempty"`
+	WebServerBinary            string        `json:"web_server_binary,omitempty"`
+	IntegrationMode            string        `json:"integration_mode,omitempty"`
 	EnrollmentToken            string        `json:"enrollment_token,omitempty"`
 	EnrollmentFile             string        `json:"enrollment_token_file,omitempty"`
 	CACertificate              string        `json:"ca_certificate"`
@@ -34,6 +37,7 @@ type Agent struct {
 	EventRetryMaxText          string        `json:"event_retry_max,omitempty"`
 	EventBatchSize             int           `json:"event_batch_size,omitempty"`
 	EventBatchesPerFlush       int           `json:"event_batches_per_flush,omitempty"`
+	SpoolMaxBytes              int64         `json:"spool_max_bytes,omitempty"`
 }
 
 func LoadAgent(path string) (Agent, error) {
@@ -76,6 +80,9 @@ func LoadAgent(path string) (Agent, error) {
 	if cfg.EventBatchesPerFlush == 0 {
 		cfg.EventBatchesPerFlush = 20
 	}
+	if cfg.SpoolMaxBytes == 0 {
+		cfg.SpoolMaxBytes = 512 << 20
+	}
 	if cfg.StateDirectory == "" {
 		cfg.StateDirectory = "/var/lib/mwaf-agent"
 	}
@@ -87,6 +94,9 @@ func LoadAgent(path string) (Agent, error) {
 	}
 	if cfg.PolicyPath == "" {
 		cfg.PolicyPath = "/etc/mwaf/active/main.conf"
+	}
+	if cfg.IntegrationMode == "" {
+		cfg.IntegrationMode = "distro"
 	}
 	if err := cfg.Validate(); err != nil {
 		return Agent{}, err
@@ -114,6 +124,18 @@ func (c Agent) Validate() error {
 	if c.Heartbeat < 5*time.Second {
 		return errors.New("heartbeat_interval must be at least 5s")
 	}
+	if c.WebServer != "" && c.WebServer != "apache" && c.WebServer != "nginx" {
+		return errors.New("web_server must be apache or nginx")
+	}
+	if c.IntegrationMode != "distro" && c.IntegrationMode != "external" {
+		return errors.New("integration_mode must be distro or external")
+	}
+	if c.WebServerBinary != "" && !filepath.IsAbs(c.WebServerBinary) {
+		return errors.New("web_server_binary must be an absolute path")
+	}
+	if c.IntegrationMode == "external" && c.WebServerBinary == "" {
+		return errors.New("external integration requires web_server_binary")
+	}
 	if c.CertificateRenewBefore < 24*time.Hour || c.CertificateRenewBefore > 60*24*time.Hour {
 		return errors.New("certificate_renew_before must be between 24h and 1440h")
 	}
@@ -122,6 +144,9 @@ func (c Agent) Validate() error {
 	}
 	if c.EventBatchSize < 1 || c.EventBatchSize > 500 || c.EventBatchesPerFlush < 1 || c.EventBatchesPerFlush > 100 {
 		return errors.New("event batch size must be 1..500 and batches per flush must be 1..100")
+	}
+	if c.SpoolMaxBytes < 16<<20 || c.SpoolMaxBytes > 10<<30 {
+		return errors.New("spool_max_bytes must be between 16 MiB and 10 GiB")
 	}
 	return nil
 }

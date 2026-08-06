@@ -11,12 +11,36 @@ import (
 )
 
 type PolicySettings struct {
+	SchemaVersion   int      `json:"schema_version,omitempty"`
+	TemplateKey     string   `json:"template_key,omitempty"`
+	TemplateVersion string   `json:"template_version,omitempty"`
+	CRSTrack        string   `json:"crs_track,omitempty"`
+	CRSVersion      string   `json:"crs_version,omitempty"`
+	Target          string   `json:"target,omitempty"`
+	AutoUpdate      bool     `json:"auto_update,omitempty"`
+	PolicyOrigin    string   `json:"policy_origin,omitempty"`
+	MigrationStatus string   `json:"migration_status,omitempty"`
+	MigratedFrom    string   `json:"migrated_from,omitempty"`
 	ParanoiaLevel   int      `json:"paranoia_level"`
 	InboundScore    int      `json:"inbound_anomaly_score"`
 	RequestBody     bool     `json:"request_body_access"`
 	ExcludedPaths   []string `json:"excluded_paths,omitempty"`
 	ExcludedIPs     []string `json:"excluded_ips,omitempty"`
+	CustomRules     string   `json:"custom_rules,omitempty"`
 	CustomRuleCount int      `json:"custom_rule_count"`
+}
+
+type ManagedPolicyMetadata struct {
+	SchemaVersion   int
+	TemplateKey     string
+	TemplateVersion string
+	CRSTrack        string
+	CRSVersion      string
+	Target          string
+	AutoUpdate      bool
+	PolicyOrigin    string
+	MigrationStatus string
+	MigratedFrom    string
 }
 
 var (
@@ -25,6 +49,10 @@ var (
 )
 
 func buildPolicyArtifact(mode string, paranoiaLevel, inboundScore int, requestBody bool, pathsText, ipsText, customRules string) ([]byte, string, error) {
+	return buildManagedPolicyArtifact(mode, paranoiaLevel, inboundScore, requestBody, pathsText, ipsText, customRules, ManagedPolicyMetadata{})
+}
+
+func buildManagedPolicyArtifact(mode string, paranoiaLevel, inboundScore int, requestBody bool, pathsText, ipsText, customRules string, metadata ManagedPolicyMetadata) ([]byte, string, error) {
 	if mode != "DetectionOnly" && mode != "On" {
 		return nil, "", errors.New("invalid WAF mode")
 	}
@@ -46,7 +74,13 @@ func buildPolicyArtifact(mode string, paranoiaLevel, inboundScore int, requestBo
 	if err != nil {
 		return nil, "", err
 	}
-	settings := PolicySettings{ParanoiaLevel: paranoiaLevel, InboundScore: inboundScore, RequestBody: requestBody, ExcludedPaths: paths, ExcludedIPs: ips, CustomRuleCount: ruleCount}
+	settings := PolicySettings{
+		SchemaVersion: metadata.SchemaVersion, TemplateKey: metadata.TemplateKey, TemplateVersion: metadata.TemplateVersion,
+		CRSTrack: metadata.CRSTrack, CRSVersion: metadata.CRSVersion, Target: metadata.Target, AutoUpdate: metadata.AutoUpdate,
+		PolicyOrigin: metadata.PolicyOrigin, MigrationStatus: metadata.MigrationStatus, MigratedFrom: metadata.MigratedFrom,
+		ParanoiaLevel: paranoiaLevel, InboundScore: inboundScore, RequestBody: requestBody,
+		ExcludedPaths: paths, ExcludedIPs: ips, CustomRules: rules, CustomRuleCount: ruleCount,
+	}
 	settingsJSON, err := json.Marshal(settings)
 	if err != nil {
 		return nil, "", err
@@ -57,7 +91,7 @@ func buildPolicyArtifact(mode string, paranoiaLevel, inboundScore int, requestBo
 	}
 	var artifact strings.Builder
 	fmt.Fprintf(&artifact, "# Generated and signed by M-WAF Manager.\nSecRuleEngine %s\nSecRequestBodyAccess %s\n", mode, requestBodyMode)
-	fmt.Fprintf(&artifact, "SecAction \"id:210000,phase:1,nolog,pass,t:none,setvar:tx.paranoia_level=%d\"\n", paranoiaLevel)
+	fmt.Fprintf(&artifact, "SecAction \"id:210000,phase:1,nolog,pass,t:none,setvar:tx.blocking_paranoia_level=%d,setvar:tx.detection_paranoia_level=%d\"\n", paranoiaLevel, paranoiaLevel)
 	fmt.Fprintf(&artifact, "SecAction \"id:210001,phase:1,nolog,pass,t:none,setvar:tx.inbound_anomaly_score_threshold=%d\"\n", inboundScore)
 	for i, ip := range ips {
 		fmt.Fprintf(&artifact, "SecRule REMOTE_ADDR \"@ipMatch %s\" \"id:%d,phase:1,pass,nolog,ctl:ruleEngine=Off\"\n", ip, 220000+i)

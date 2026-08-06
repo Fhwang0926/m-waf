@@ -8,7 +8,7 @@ import (
 )
 
 func TestEventSpoolRoundTrip(t *testing.T) {
-	spool := NewEventSpool(t.TempDir())
+	spool := NewEventSpool(t.TempDir(), 16<<20)
 	batch := model.EventBatch{BatchID: "batch-1", Events: []model.SecurityEvent{{EventID: "event-1", OccurredAt: time.Now().UTC()}}}
 	position := AuditPosition{Device: 1, Inode: 2, Offset: 123}
 	created, err := spool.Put(batch, position)

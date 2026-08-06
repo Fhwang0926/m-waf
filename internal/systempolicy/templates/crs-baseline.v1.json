@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "key": "crs-baseline",
+  "version": "1.0.0",
+  "name": "CRS 기본 보호 정책",
+  "description": "OWASP CRS 안정 릴리스를 탐지 모드로 시작하고 검증된 설정을 지속 반영합니다.",
+  "crs_track": "stable",
+  "crs_version": "4.28.0",
+  "defaults": {
+    "mode": "DetectionOnly",
+    "paranoia_level": 1,
+    "inbound_anomaly_score": 5,
+    "request_body_access": true
+  }
+}

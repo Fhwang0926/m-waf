@@ -100,13 +100,20 @@ func (p *PolicyApplier) testAndReload(ctx context.Context, webServer string) err
 	var commands [][]string
 	switch webServer {
 	case "apache":
-		binary := "apachectl"
-		if _, err := exec.LookPath(binary); err != nil {
-			binary = "httpd"
+		binary := p.cfg.WebServerBinary
+		if binary == "" {
+			binary = "apachectl"
+			if _, err := exec.LookPath(binary); err != nil {
+				binary = "httpd"
+			}
 		}
 		commands = [][]string{{binary, "configtest"}, {binary, "graceful"}}
 	case "nginx":
-		commands = [][]string{{"nginx", "-t"}, {"nginx", "-s", "reload"}}
+		binary := p.cfg.WebServerBinary
+		if binary == "" {
+			binary = "nginx"
+		}
+		commands = [][]string{{binary, "-t"}, {binary, "-s", "reload"}}
 	default:
 		return errors.New("unsupported web server")
 	}

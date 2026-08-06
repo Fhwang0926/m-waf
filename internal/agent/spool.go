@@ -22,15 +22,25 @@ type SpoolItem struct {
 
 type EventSpool struct {
 	directory string
+	maxBytes  int64
 }
 
-func NewEventSpool(directory string) *EventSpool { return &EventSpool{directory: directory} }
+func NewEventSpool(directory string, maxBytes int64) *EventSpool {
+	return &EventSpool{directory: directory, maxBytes: maxBytes}
+}
 
 func (s *EventSpool) Put(batch model.EventBatch, nextPosition AuditPosition) (SpoolItem, error) {
 	item := SpoolItem{Batch: batch, NextPosition: nextPosition, path: filepath.Join(s.directory, batch.BatchID+".json")}
 	raw, err := json.Marshal(item)
 	if err != nil {
 		return SpoolItem{}, err
+	}
+	_, currentBytes, err := s.Stats()
+	if err != nil {
+		return SpoolItem{}, err
+	}
+	if s.maxBytes > 0 && currentBytes+int64(len(raw)+1) > s.maxBytes {
+		return SpoolItem{}, fmt.Errorf("event spool limit exceeded: %d bytes", s.maxBytes)
 	}
 	if err := atomicWrite(item.path, append(raw, '\n'), 0o600); err != nil {
 		return SpoolItem{}, err
@@ -67,7 +77,7 @@ func (s *EventSpool) Pending() ([]SpoolItem, error) {
 			item.NextPosition.Offset = item.NextOffset
 		}
 		item.NextOffset = 0
-		if item.Batch.BatchID == "" || item.NextPosition.Offset < 0 || entry.Name() != item.Batch.BatchID+".json" {
+		if item.Batch.BatchID == "" || item.NextPosition.Offset < 0 || item.NextPosition.MessageOffset < 0 || entry.Name() != item.Batch.BatchID+".json" {
 			return nil, fmt.Errorf("invalid event spool %s", entry.Name())
 		}
 		item.path = path

@@ -30,14 +30,17 @@ func CollectInventory(ctx context.Context, cfg config.Agent) (model.Inventory, e
 			return model.Inventory{}, err
 		}
 	}
-	webVersion, webBuild, err := webServerInfo(ctx, webServer)
+	webVersion, webBuild, err := webServerInfo(ctx, webServer, cfg.WebServerBinary)
 	if err != nil {
 		return model.Inventory{}, err
 	}
 	moduleName := "mwaf-modsecurity-" + webServer
+	if cfg.IntegrationMode == "external" {
+		moduleName += "-external"
+	}
 	return model.Inventory{
 		Hostname: hostname, OSID: osRelease["ID"], OSVersion: osRelease["VERSION_ID"], Architecture: runtime.GOARCH,
-		WebServer: webServer, WebServerVersion: webVersion, WebServerBuild: webBuild,
+		WebServer: webServer, WebServerVersion: webVersion, WebServerBuild: webBuild, IntegrationMode: cfg.IntegrationMode,
 		AgentVersion: version.Version, ModuleVersion: installedPackageVersion(ctx, moduleName), CRSVersion: readFirst("/etc/mwaf/crs.version"),
 	}, nil
 }
@@ -88,18 +91,24 @@ func detectWebServer() (string, error) {
 	return "", errors.New("Apache or Nginx is required")
 }
 
-func webServerInfo(parent context.Context, kind string) (string, string, error) {
+func webServerInfo(parent context.Context, kind, configuredBinary string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	var command string
 	var versionArgs, buildArgs []string
 	switch kind {
 	case "nginx":
-		command, versionArgs, buildArgs = "nginx", []string{"-v"}, []string{"-V"}
+		command, versionArgs, buildArgs = configuredBinary, []string{"-v"}, []string{"-V"}
+		if command == "" {
+			command = "nginx"
+		}
 	case "apache":
-		command = "apachectl"
-		if _, err := exec.LookPath(command); err != nil {
-			command = "httpd"
+		command = configuredBinary
+		if command == "" {
+			command = "apachectl"
+			if _, err := exec.LookPath(command); err != nil {
+				command = "httpd"
+			}
 		}
 		versionArgs, buildArgs = []string{"-v"}, []string{"-V"}
 	default:

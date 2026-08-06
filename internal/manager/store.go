@@ -19,6 +19,8 @@ import (
 
 var ErrInvalidEnrollmentToken = errors.New("invalid or expired enrollment token")
 
+const serverOfflineAfter = 2 * time.Minute
+
 type Store struct {
 	db *sql.DB
 }
@@ -58,6 +60,14 @@ type EventRecord struct {
 	Message        string
 	Severity       string
 	Blocked        bool
+}
+
+func (e EventRecord) SeverityLabel() string {
+	labels := map[string]string{"0": "EMERGENCY", "1": "ALERT", "2": "CRITICAL", "3": "ERROR", "4": "WARNING", "5": "NOTICE", "6": "INFO", "7": "DEBUG"}
+	if label := labels[e.Severity]; label != "" {
+		return label
+	}
+	return e.Severity
 }
 
 type PolicyArtifact struct {
@@ -230,21 +240,6 @@ func (s *Store) UpdateHeartbeat(ctx context.Context, serverID string, heartbeat 
 	return nil
 }
 
-func (s *Store) UpdateCertificateSerial(ctx context.Context, serverID, serial string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE servers SET certificate_serial=? WHERE id=?`, serial, serverID)
-	if err != nil {
-		return err
-	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if changed != 1 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
 func (s *Store) DesiredState(ctx context.Context, serverID string) (model.DesiredState, error) {
 	var state model.DesiredState
 	var revision, artifactPath, hash, signature, mode, agentPackage, modulePackage, packageDeployment sql.NullString
@@ -334,8 +329,18 @@ func (s *Store) PruneEvents(ctx context.Context, before time.Time, limit int) (i
 	if err != nil {
 		return 0, err
 	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM event_ingest_batches WHERE committed_at < ? ORDER BY committed_at LIMIT ?`, before.UTC(), limit)
-	return deleted, err
+	return deleted, nil
+}
+
+func (s *Store) PruneEventBatches(ctx context.Context, before time.Time, limit int) (int64, error) {
+	if limit < 1 || limit > 10000 {
+		return 0, errors.New("prune limit must be between 1 and 10000")
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM event_ingest_batches WHERE committed_at < ? ORDER BY committed_at LIMIT ?`, before.UTC(), limit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *Store) SyncCatalog(ctx context.Context, catalog *packages.Catalog) error {
@@ -349,10 +354,14 @@ func (s *Store) SyncCatalog(ctx context.Context, catalog *packages.Catalog) erro
 		return err
 	}
 	for _, artifact := range manifest.Artifacts {
-		target, err := json.Marshal(map[string]string{
+		targetFields := map[string]string{
 			"os_id": artifact.OSID, "os_version": artifact.OSVersion, "architecture": artifact.Architecture,
 			"web_server": artifact.WebServer, "web_server_version": artifact.WebServerVersion, "web_server_build_hash": artifact.WebServerBuild,
-		})
+		}
+		if artifact.Kind == "module" {
+			targetFields["integration_mode"] = model.NormalizeIntegrationMode(artifact.IntegrationMode)
+		}
+		target, err := json.Marshal(targetFields)
 		if err != nil {
 			return err
 		}
@@ -393,21 +402,64 @@ LEFT JOIN agent_commands cmd ON cmd.id=(SELECT ac.id FROM agent_commands ac WHER
 			return nil, err
 		}
 		_ = json.Unmarshal(inventory, &item.Inventory)
+		markServerOffline(&item, time.Now().UTC())
 		result = append(result, item)
 	}
 	return result, rows.Err()
 }
 
+func markServerOffline(item *ServerRecord, now time.Time) {
+	if item == nil || item.Revoked || !item.LastHeartbeatAt.Valid {
+		return
+	}
+	if now.Sub(item.LastHeartbeatAt.Time) > serverOfflineAfter {
+		item.Status = "OFFLINE"
+	}
+}
+
+type EventFilter struct {
+	ServerID string
+	Severity string
+	Query    string
+	Blocked  *bool
+	Offset   int
+}
+
 func (s *Store) ListEvents(ctx context.Context, enterpriseID string, limit int) ([]EventRecord, error) {
+	return s.ListEventsFiltered(ctx, enterpriseID, EventFilter{}, limit)
+}
+
+func (s *Store) ListEventsFiltered(ctx context.Context, enterpriseID string, filter EventFilter, limit int) ([]EventRecord, error) {
 	query := `SELECT se.id,se.agent_id,s.name,COALESCE(e.name,'미지정'),se.occurred_at,se.method,se.uri,se.rule_id,se.message,se.severity,se.blocked
 FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN enterprises e ON e.id=s.enterprise_id`
-	args := make([]any, 0, 2)
+	conditions := make([]string, 0, 5)
+	args := make([]any, 0, 8)
 	if enterpriseID != "" {
-		query += ` WHERE s.enterprise_id=?`
+		conditions = append(conditions, `s.enterprise_id=?`)
 		args = append(args, enterpriseID)
 	}
-	query += ` ORDER BY se.occurred_at DESC LIMIT ?`
-	args = append(args, limit)
+	if filter.ServerID != "" {
+		conditions = append(conditions, `se.agent_id=?`)
+		args = append(args, filter.ServerID)
+	}
+	if filter.Severity != "" {
+		conditions = append(conditions, `se.severity=?`)
+		args = append(args, filter.Severity)
+	}
+	if filter.Blocked != nil {
+		conditions = append(conditions, `se.blocked=?`)
+		args = append(args, *filter.Blocked)
+	}
+	if filter.Query != "" {
+		conditions = append(conditions, `(se.uri LIKE ? OR se.rule_id LIKE ? OR se.message LIKE ?)`)
+		value := "%" + filter.Query + "%"
+		args = append(args, value, value, value)
+	}
+	if len(conditions) != 0 {
+		query += ` WHERE ` + strings.Join(conditions, ` AND `)
+	}
+	query += ` ORDER BY se.occurred_at DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, max(filter.Offset, 0))
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -424,8 +476,9 @@ FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN enterprises
 	return result, rows.Err()
 }
 
-func (s *Store) Audit(ctx context.Context, requestID, actor, action, target, result, remote string) {
-	_, _ = s.db.ExecContext(ctx, `INSERT INTO admin_audit_logs(request_id,actor,action,target,result,remote_addr) VALUES (?,?,?,?,?,?)`, requestID, actor, action, target, result, remote)
+func (s *Store) Audit(ctx context.Context, requestID, actor, action, target, result, remote string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO admin_audit_logs(request_id,actor,action,target,result,remote_addr) VALUES (?,?,?,?,?,?)`, requestID, actor, action, target, result, remote)
+	return err
 }
 
 func tokenHash(token string) []byte {

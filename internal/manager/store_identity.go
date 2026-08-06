@@ -76,6 +76,21 @@ func (s *Store) RecordLogin(ctx context.Context, userID string) {
 	_, _ = s.db.ExecContext(ctx, `UPDATE admin_users SET last_login_at=UTC_TIMESTAMP(6) WHERE id=?`, userID)
 }
 
+func (s *Store) UpdateOwnPassword(ctx context.Context, userID, passwordHash string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE admin_users SET password_hash=? WHERE id=? AND is_active=TRUE AND deleted_at IS NULL`, passwordHash, userID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) ListEnterprises(ctx context.Context) ([]EnterpriseRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,created_at FROM enterprises ORDER BY name`)
 	if err != nil {

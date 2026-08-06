@@ -18,7 +18,7 @@
       <article><span>Package bundle</span><strong class="small">{{.BundleVersion}}</strong></article>
     </section>
     <section class="panel"><div class="panel-head"><h2>보호 서버</h2><a href="/servers">전체 보기</a></div>
-      {{if .Servers}}<table><thead><tr>{{if .IsSystemAdmin}}<th>기업</th>{{end}}<th>서버</th><th>웹서버</th><th>상태</th><th>마지막 연결</th></tr></thead><tbody>{{range .Servers}}<tr>{{if $.IsSystemAdmin}}<td>{{.EnterpriseName}}</td>{{end}}<td>{{.Name}}</td><td>{{.Inventory.WebServer}} {{.Inventory.WebServerVersion}}</td><td><span class="badge">{{.Status}}</span></td><td>{{if .LastHeartbeatAt.Valid}}{{.LastHeartbeatAt.Time.Format "2006-01-02 15:04:05"}}{{else}}대기 중{{end}}</td></tr>{{end}}</tbody></table>{{else}}<div class="empty">등록된 서버가 없습니다. {{if .CanOperate}}<a href="/enrollments/new">첫 서버를 등록하세요.</a>{{end}}</div>{{end}}
+      {{if .Servers}}<table><thead><tr>{{if .IsSystemAdmin}}<th>기업</th>{{end}}<th>서버</th><th>웹서버</th><th>상태</th><th>마지막 연결</th></tr></thead><tbody>{{range .Servers}}<tr>{{if $.IsSystemAdmin}}<td>{{.EnterpriseName}}</td>{{end}}<td>{{.Name}}</td><td>{{.Inventory.WebServer}} {{.Inventory.WebServerVersion}} / {{if .Inventory.IntegrationMode}}{{.Inventory.IntegrationMode}}{{else}}distro{{end}}</td><td><span class="badge {{if eq .Status "ONLINE"}}ok{{else}}warn{{end}}">{{.Status}}</span></td><td>{{if .LastHeartbeatAt.Valid}}{{.LastHeartbeatAt.Time.Format "2006-01-02 15:04:05"}}{{else}}대기 중{{end}}</td></tr>{{end}}</tbody></table>{{else}}<div class="empty">등록된 서버가 없습니다. {{if .CanOperate}}<a href="/enrollments/new">첫 서버를 등록하세요.</a>{{end}}</div>{{end}}
     </section>
   </main>
 </body>

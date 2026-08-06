@@ -81,7 +81,7 @@ func (s *Server) saveGroup(w http.ResponseWriter, r *http.Request, groupID strin
 	if groupID != "" {
 		action = "group.update"
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, action, savedID, "success", remoteIP(r))
+	s.audit(r, session.Username, action, savedID, "success")
 	http.Redirect(w, r, "/groups?notice="+url.QueryEscape("서버 그룹이 저장되었습니다."), http.StatusSeeOther)
 }
 
@@ -96,6 +96,6 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server group not found", http.StatusNotFound)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, "group.delete", groupID, "success", remoteIP(r))
+	s.audit(r, session.Username, "group.delete", groupID, "success")
 	http.Redirect(w, r, "/groups?notice="+url.QueryEscape("서버 그룹이 삭제되었습니다."), http.StatusSeeOther)
 }

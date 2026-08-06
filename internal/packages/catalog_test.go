@@ -17,12 +17,14 @@ import (
 	"github.com/Fhwang0926/m-waf/internal/model"
 )
 
-func TestLoadAndResolveExactModule(t *testing.T) {
+func TestLoadAndResolveCompatibleModule(t *testing.T) {
 	root := t.TempDir()
 	artifacts := []model.PackageArtifact{
 		{ID: "agent", Kind: "agent", Name: "mwaf-agent", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", Path: "packages/agent.deb"},
-		{ID: "apache", Kind: "module", Name: "mwaf-modsecurity-apache", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "apache", WebServerVersion: "2.4.58", WebServerBuild: "apache-hash", Path: "packages/apache.deb"},
-		{ID: "nginx", Kind: "module", Name: "mwaf-modsecurity-nginx", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", WebServerVersion: "1.24.0", WebServerBuild: "nginx-hash", Path: "packages/nginx.deb"},
+		{ID: "apache", Kind: "module", Name: "mwaf-modsecurity-apache", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "apache", Path: "packages/apache.deb"},
+		{ID: "nginx", Kind: "module", Name: "mwaf-modsecurity-nginx", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", Path: "packages/nginx.deb"},
+		{ID: "apache-external", Kind: "module", Name: "mwaf-modsecurity-apache-external", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "apache", IntegrationMode: model.IntegrationModeExternal, Path: "packages/apache-external.deb"},
+		{ID: "nginx-external", Kind: "module", Name: "mwaf-modsecurity-nginx-external", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", IntegrationMode: model.IntegrationModeExternal, Path: "packages/nginx-external.deb"},
 	}
 	if err := os.MkdirAll(filepath.Join(root, "packages"), 0o755); err != nil {
 		t.Fatal(err)
@@ -71,7 +73,10 @@ func TestLoadAndResolveExactModule(t *testing.T) {
 	if agent.ID != "agent" || module.ID != "nginx" {
 		t.Fatalf("unexpected resolution: %s %s", agent.ID, module.ID)
 	}
-	if _, _, err := catalog.Resolve(model.Inventory{OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", WebServerVersion: "1.24.0", WebServerBuild: "different"}); err == nil {
-		t.Fatal("expected exact build hash mismatch")
+	if _, module, err := catalog.Resolve(model.Inventory{OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", WebServerVersion: "1.24.1", WebServerBuild: "different"}); err != nil || module.ID != "nginx" {
+		t.Fatalf("expected compatible Ubuntu package, module=%s err=%v", module.ID, err)
+	}
+	if _, module, err := catalog.Resolve(model.Inventory{OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", WebServerVersion: "1.30.4", WebServerBuild: "custom", IntegrationMode: model.IntegrationModeExternal}); err != nil || module.ID != "nginx-external" {
+		t.Fatalf("expected external integration package, module=%s err=%v", module.ID, err)
 	}
 }

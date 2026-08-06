@@ -66,7 +66,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	}
 	clearSetupCSRFCookie(w)
 	setSessionCookie(w, token, time.Unix(session.ExpiresAt, 0))
-	s.store.Audit(r.Context(), requestID(r), user.Username, "system_admin.setup", user.ID, "success", remoteIP(r))
+	s.audit(r, user.Username, "system_admin.setup", user.ID, "success")
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -110,7 +110,7 @@ func (s *Server) createEnterprise(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "기업 생성에 실패했습니다. 같은 이름이 등록되어 있는지 확인하세요.", http.StatusConflict)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, "enterprise.create", item.ID, "success", remoteIP(r))
+	s.audit(r, session.Username, "enterprise.create", item.ID, "success")
 	http.Redirect(w, r, "/enterprises?created=1", http.StatusSeeOther)
 }
 
@@ -144,7 +144,7 @@ func (s *Server) updateSystemSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save system settings", http.StatusInternalServerError)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, "system_settings.update", "log_retention", "success", remoteIP(r))
+	s.audit(r, session.Username, "system_settings.update", "log_retention", "success")
 	http.Redirect(w, r, "/settings?saved=1", http.StatusSeeOther)
 }
 
@@ -229,7 +229,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "사용자를 수정할 수 없습니다.", http.StatusConflict)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, "user.update", user.ID+":"+string(role), "success", remoteIP(r))
+	s.audit(r, session.Username, "user.update", user.ID+":"+string(role), "success")
 	http.Redirect(w, r, "/users?updated=1", http.StatusSeeOther)
 }
 
@@ -252,7 +252,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "사용자를 삭제할 수 없습니다.", http.StatusConflict)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, "user.delete", user.ID, "success", remoteIP(r))
+	s.audit(r, session.Username, "user.delete", user.ID, "success")
 	http.Redirect(w, r, "/users?deleted=1", http.StatusSeeOther)
 }
 
@@ -299,7 +299,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		s.renderUsers(w, r, "사용자 생성에 실패했습니다. 같은 사용자명이 등록되어 있는지 확인하세요.")
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, "user.create", user.ID+":"+string(user.Role), "success", remoteIP(r))
+	s.audit(r, session.Username, "user.create", user.ID+":"+string(user.Role), "success")
 	http.Redirect(w, r, "/users?created=1", http.StatusSeeOther)
 }
 

@@ -21,12 +21,15 @@ type AuditReader struct {
 }
 
 type AuditPosition struct {
-	Device uint64 `json:"device,omitempty"`
-	Inode  uint64 `json:"inode,omitempty"`
-	Offset int64  `json:"offset"`
+	Device        uint64 `json:"device,omitempty"`
+	Inode         uint64 `json:"inode,omitempty"`
+	Offset        int64  `json:"offset"`
+	MessageOffset int    `json:"message_offset,omitempty"`
 }
 
-func (p AuditPosition) Empty() bool { return p.Device == 0 && p.Inode == 0 && p.Offset == 0 }
+func (p AuditPosition) Empty() bool {
+	return p.Device == 0 && p.Inode == 0 && p.Offset == 0 && p.MessageOffset == 0
+}
 
 func NewAuditReader(path, stateDirectory string) *AuditReader {
 	return &AuditReader{path: path, checkpointPath: stateDirectory + "/audit.offset"}
@@ -52,9 +55,11 @@ func (a *AuditReader) ReadBatch(limit int) ([]model.SecurityEvent, AuditPosition
 	position := a.checkpoint()
 	if (position.Device != 0 || position.Inode != 0) && (position.Device != device || position.Inode != inode) {
 		position.Offset = 0
+		position.MessageOffset = 0
 	}
 	if info.Size() < position.Offset {
 		position.Offset = 0
+		position.MessageOffset = 0
 	}
 	position.Device = device
 	position.Inode = inode
@@ -77,13 +82,27 @@ func (a *AuditReader) ReadBatch(limit int) ([]model.SecurityEvent, AuditPosition
 		lineEnd := next.Offset + int64(len(line))
 		line = line[:len(line)-1]
 		parsed := parseAuditLine(line)
+		if next.MessageOffset > 0 {
+			if next.MessageOffset >= len(parsed) {
+				next.Offset = lineEnd
+				next.MessageOffset = 0
+				continue
+			}
+			parsed = parsed[next.MessageOffset:]
+		}
 		remaining := limit - len(events)
-		if len(events) > 0 && len(parsed) > remaining {
+		if len(parsed) > remaining {
 			// A JSON line is the checkpoint unit. Retry the whole line in the
-			// next batch instead of advancing past messages that did not fit.
+			// next batch unless this one line itself exceeds the batch size.
+			if len(events) > 0 {
+				break
+			}
+			events = append(events, parsed[:remaining]...)
+			next.MessageOffset += remaining
 			break
 		}
 		next.Offset = lineEnd
+		next.MessageOffset = 0
 		events = append(events, parsed...)
 		if len(events) >= limit {
 			break
@@ -106,7 +125,7 @@ func (a *AuditReader) checkpoint() AuditPosition {
 		return AuditPosition{}
 	}
 	var position AuditPosition
-	if json.Unmarshal(raw, &position) == nil && position.Offset >= 0 {
+	if json.Unmarshal(raw, &position) == nil && position.Offset >= 0 && position.MessageOffset >= 0 {
 		return position
 	}
 	var legacyOffset int64
@@ -145,6 +164,15 @@ func parseAuditLine(line []byte) []model.SecurityEvent {
 		when = parsed.UTC()
 	}
 	base := sha256.Sum256(line)
+	blocked := entry.Transaction.Response.HTTPCode == httpForbidden
+	for _, message := range entry.Transaction.Messages {
+		ruleID := strings.Trim(string(message.Details.RuleID), `"`)
+		text := strings.ToLower(message.Message)
+		if strings.Contains(text, "access denied with code") || ((ruleID == "949110" || ruleID == "959100") && entry.Transaction.Response.HTTPCode >= 400) {
+			blocked = true
+			break
+		}
+	}
 	result := make([]model.SecurityEvent, 0, len(entry.Transaction.Messages))
 	for i, message := range entry.Transaction.Messages {
 		ruleID := strings.Trim(string(message.Details.RuleID), `"`)
@@ -152,7 +180,7 @@ func parseAuditLine(line []byte) []model.SecurityEvent {
 			EventID: fmt.Sprintf("%s-%d", hex.EncodeToString(base[:]), i), OccurredAt: when,
 			TransactionID: entry.Transaction.UniqueID, Method: entry.Transaction.Request.Method, URI: entry.Transaction.Request.URI,
 			StatusCode: entry.Transaction.Response.HTTPCode, RuleID: ruleID, Message: message.Message,
-			Severity: message.Details.Severity, Blocked: entry.Transaction.Response.HTTPCode == httpForbidden,
+			Severity: message.Details.Severity, Blocked: blocked,
 		})
 	}
 	return result

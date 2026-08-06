@@ -3,9 +3,9 @@
 M-WAF is a lightweight hosting-provider WAF control plane. Customer web servers keep their existing Apache or Nginx process and install exactly two M-WAF packages:
 
 1. `mwaf-agent`
-2. `mwaf-modsecurity-apache` or `mwaf-modsecurity-nginx`
+2. the matching Apache/Nginx `distro` or `external` M-WAF integration package
 
-The separate Manager server runs MariaDB and one Manager container. A tagged release image embeds the exact Agent package and both web-server module packages produced from the same release commit.
+The separate Manager server runs MariaDB and one Manager container. A tagged release image embeds the exact Agent package plus distro and pre-installed-connector integration packages for both web servers from the same release commit.
 
 ## Project introduction page
 
@@ -26,46 +26,49 @@ Before the first publication, set **Repository Settings → Pages → Build and 
 | Manager | Linux amd64 host with Docker Engine and Docker Compose |
 | Database | MariaDB 11.8.6 container |
 | Customer OS | Ubuntu Server 24.04 LTS, amd64 |
-| Web server | Ubuntu 24.04 distro-default Apache or Nginx build matching the embedded catalog |
-| WAF | Apache ModSecurity v2 distro module or Nginx libmodsecurity v3 connector package |
-| Rules | OWASP CRS v4.28.0 with managed sensitivity, threshold, URL/IP exclusions, and restricted custom `SecRule` additions |
-| Policy | Per-server or server-group policy revisions, signed, status-tracked, and rollback-safe |
+| Web server | Ubuntu 24.04 distribution packages, or an operator-managed Apache/Nginx custom build using `external` integration |
+| WAF | Distro connector package, or a compatible ModSecurity connector already built and loaded by the hosting operator |
+| Rules | OWASP CRS v4.28.0 from the repository source lock, with managed sensitivity, threshold, URL/IP exclusions, and restricted custom `SecRule` additions |
+| Policy | Versioned templates, an enterprise DetectionOnly seed, per-server/group overrides, signed revisions, migration metadata, and deployment status |
 | Events | ModSecurity JSON audit log batch forwarding and Manager event list |
 | Access | Enterprise-isolated users, enterprise administrators, and one first-setup system administrator |
 
-Rocky Linux/RPM, ARM64, custom-built web servers, custom permission sets, HA, and unattended scheduled upgrades are outside this first executable MVP. A manager can force a compatible signed-bundle Agent/module update or manifest-declared rollback. Unsupported inventory is rejected before the installer changes the web-server configuration.
+Rocky Linux/RPM, ARM64, OpenResty, automatic connector compilation, HA, and unreviewed direct-to-production upstream releases are outside this executable MVP. CRS discovery is automated, but a changed source lock still goes through a pull request and the normal signed-bundle verification and approval flow. A manager can force a compatible signed-bundle Agent/integration update or manifest-declared rollback. Unsupported inventory is rejected before the installer changes the web-server configuration.
 
 ## Supported customer web servers and versions
 
-The MVP supports only the following Ubuntu 24.04 LTS amd64 web-server builds. The package revisions below are the versions confirmed from the Ubuntu repository on 2026-08-06; the signed bundle manifest embedded in each Manager image is the final compatibility source of truth.
+The MVP supports two explicit modes on Ubuntu 24.04 LTS amd64. `distro` uses Ubuntu packages. `external` keeps an operator-managed web-server binary and pre-installed ModSecurity connector, then installs only M-WAF CRS/configuration integration and the Agent. The following distro versions are the release baseline confirmed from the Ubuntu repository on 2026-08-06.
 
 | Web server | Supported server version | Confirmed Ubuntu package revision | M-WAF package | Open-source WAF components |
 |---|---:|---:|---|---|
 | Apache HTTP Server | `2.4.58` | `apache2 2.4.58-1ubuntu8.15` | `mwaf-modsecurity-apache` | `libapache2-mod-security2 2.9.7-1build3` + OWASP CRS `4.28.0` |
 | Nginx | `1.24.0` | `nginx 1.24.0-2ubuntu7.15` | `mwaf-modsecurity-nginx` | `libnginx-mod-http-modsecurity 1.0.3-1build3` + libmodsecurity `3.0.12` + OWASP CRS `4.28.0` |
 
-“Same version” alone is not sufficient. Before downloading a module, Manager requires all of these inventory fields to match one embedded catalog entry:
+| External mode | Required customer-side condition | M-WAF package |
+|---|---|---|
+| Apache 2.4 custom build | Absolute `apachectl` path, loaded `security2_module`, and a dedicated config path already covered by an Apache `Include`/`IncludeOptional` | `mwaf-modsecurity-apache-external` |
+| Nginx custom build | Absolute Nginx path, ModSecurity-nginx Connector compiled for that build and loaded, and a dedicated config path under an existing `http` include | `mwaf-modsecurity-nginx-external` |
+
+Before downloading a module, Manager requires these inventory fields to match an embedded catalog entry:
 
 | Compatibility field | Required value |
 |---|---|
 | Operating system | `/etc/os-release`: `ID=ubuntu`, `VERSION_ID=24.04` |
 | Architecture | `amd64` (`x86_64`) |
 | Web-server type | Exactly `apache` or `nginx` |
-| Server version | Apache `2.4.58` or Nginx `1.24.0` for the current baseline |
-| Build identity | SHA-256 of normalized `apachectl -V`/`httpd -V` or `nginx -V` output must exactly match the Manager bundle manifest |
+| Integration mode | Exactly `distro` or `external`; an empty legacy value means `distro` |
+| Server version and build | Collected for visibility; distribution package dependencies and CI configuration tests determine compatibility |
 
-This exact build check prevents installing an ABI-incompatible Nginx dynamic module or an Apache module built for a different distro configuration. If any field differs, package resolution returns an unsupported-inventory error and the installer exits before modifying Apache or Nginx.
-
-Ubuntu security updates may change a package revision or build identity while retaining the same visible server version. In that case, manually run the workflow on the `dev` branch or push a new `dev` commit to build a new Manager image and matching package catalog before enrolling the updated server. Do not reuse a module from an older Manager image merely because `apachectl -v` or `nginx -v` looks unchanged.
+The distro DEBs depend on Ubuntu's ModSecurity packages. External DEBs depend only on `logrotate`; they do not install or replace Apache, Nginx, libmodsecurity, or a Connector. External compatibility is fail-closed through module/load inspection, dedicated-include verification, web-server configuration testing, and managed-file rollback. It cannot certify every possible compiler/ABI combination.
 
 ### Explicitly unsupported in this MVP
 
 - Ubuntu 22.04, Ubuntu 26.04, Debian, Rocky Linux, AlmaLinux, RHEL, and CentOS
 - ARM64 and other non-amd64 architectures
-- Apache or Nginx compiled directly from source
-- Nginx from `nginx.org`, a PPA, third-party repositories, or a custom build
+- Custom builds where the matching ModSecurity connector is not already compiled and loaded
+- Custom layouts without an absolute control binary and a dedicated included M-WAF configuration file
 - OpenResty, LiteSpeed, Caddy, IIS, and other web servers
-- An Apache/Nginx version or normalized build hash absent from the current Manager image
+- Apache or Nginx packages whose dependencies cannot be satisfied from the configured Ubuntu repositories
 
 If Apache and Nginx are both installed, the operator must explicitly select one with `--webserver apache` or `--webserver nginx`. One Agent manages one active web-server type in the MVP.
 
@@ -186,13 +189,30 @@ sudo sh /tmp/mwaf-install.sh \
 If both Apache and Nginx are installed, add `--webserver apache` or `--webserver nginx`. The installer:
 
 - reads OS, architecture, web-server version, and build hash;
-- asks Manager for one exact Agent package and one exact module package;
+- asks Manager for the compatible Agent package and selected web-server integration package;
 - downloads only those two embedded files;
 - verifies both SHA-256 values;
 - installs dependencies through Ubuntu APT without installing the distro CRS recommendation;
 - enables the Agent, which completes certificate enrollment over TLS.
 
-No compiler, Go toolchain, Docker runtime, or source checkout is required on the customer server.
+For a hosting-provider custom build, use `--integration external`, `--webserver-bin`, and `--integration-config`. The connector must already be built and loaded by the operator; M-WAF does not compile it on the customer server. Apache/Nginx, the Connector, and their existing main configuration are not replaced. See [Custom Apache/Nginx installation](docs/custom-webserver-installation.md) for prerequisites, examples, verification, and rollback behavior.
+
+No compiler, Go toolchain, Docker runtime, or source checkout is required by M-WAF on the customer server.
+
+### If DEB installation fails
+
+The installer stops on the first package download, checksum, APT/DPKG, Connector, include, configuration-test, or service-start error. It does not silently copy binaries or switch to an unsigned archive. A failed APT transaction can leave one M-WAF package unpacked or installed, so inspect the package state before retrying:
+
+```sh
+sudo dpkg --audit
+dpkg-query -W -f='${binary:Package}\t${db:Status-Abbrev}\t${Version}\n' \
+  mwaf-agent mwaf-modsecurity-apache mwaf-modsecurity-apache-external \
+  mwaf-modsecurity-nginx mwaf-modsecurity-nginx-external 2>/dev/null || true
+```
+
+Resolve the reported lock, disk-space, repository, dependency, or interrupted-DPKG problem first, then rerun the same reviewed installer command. An enrollment token is consumed only when Agent enrollment succeeds; if it has expired or was already consumed, create a new one in Manager. Do not purge Apache/Nginx, delete `/etc/mwaf`, or force-install an incompatible package as a recovery shortcut.
+
+The current MVP has no supported `tar.gz`, manual-copy, RPM, or automatic package rollback path. Systems that cannot use Ubuntu 24.04 amd64 DEBs remain unsupported. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation — DEB installation failure](docs/custom-webserver-installation.md#deb-설치가-실패한-경우).
 
 ## Operate the MVP
 
@@ -201,21 +221,26 @@ No compiler, Go toolchain, Docker runtime, or source checkout is required on the
 - **기업 사용자** can view only its enterprise's servers and WAF events.
 - **시스템 설정** controls WAF event retention (default 30 days) and administrator audit retention (default 365 days). Cleanup runs at startup and then on the configured cleanup interval in bounded batches.
 - **서버** shows inventory, Agent/module versions, heartbeat, policy/package deployment results, and the latest fixed control command.
+- A server is displayed as `OFFLINE` when no heartbeat has arrived for two minutes.
+- **이벤트** filters by server, block/detect result, severity, URL, Rule ID, or message and pages through 100 records at a time.
 - Agent control uses authenticated HTTPS polling during the normal heartbeat loop. It does not open a WebSocket or arbitrary command port, and arbitrary shell execution is not provided.
 - `Agent 중지` and `서버 종료` cannot be reversed through Manager after connectivity is lost; use the host console, service manager, hypervisor, or power controller to recover them.
-- Package rollback is enabled only when the signed bundle manifest names valid previous Agent and module artifacts.
+- Starting with the second tagged release, the release workflow verifies the previous signed image and embeds its Agent and module packages as explicit rollback targets.
 - **서버 그룹** manages enterprise-scoped groups and deploys one immutable policy revision to every active member.
-- **정책 관리** configures detection/blocking mode, CRS sensitivity, anomaly threshold, request-body inspection, URL/IP exclusions, and restricted custom `SecRule` lines. It also shows per-revision pending, success, and failure counts.
+- **정책 관리** configures detection/blocking mode, CRS sensitivity, anomaly threshold, request-body inspection, URL/IP exclusions, and restricted custom `SecRule` lines. Each revision records its template, template version, CRS track/version, migration origin, update mode, and deployment counts.
+- Manager creates one enterprise-wide `DetectionOnly` baseline when an enterprise first has an enrolled server without a policy. It is attributed to the M-WAF system, signed like every other revision, and set to automatic template updates.
+- The system-policy controller runs at startup, after enrollment, and every `MWAF_POLICY_SYNC_INTERVAL` (default `15m`). Managed bindings use `server > group > enterprise` precedence; an explicitly assigned non-template policy locks that server and is not overwritten.
+- A template CRS change first queues the compatible signed Agent/module bundle. Only after heartbeat inventory reports the target CRS does Manager create and assign the migrated immutable policy revision.
 - **서버 제어** queues only four fixed polling commands: Agent restart/stop and server restart/poweroff. Arbitrary shell input is not accepted.
-- **패키지 제어** force-installs the current compatible signed bundle or the bundle manifest's explicit rollback pair and records the Agent result.
+- **패키지 제어** force-installs the current compatible signed bundle or its explicit rollback pair; success is recorded only after the restarted Agent reports matching installed versions.
 - **등록 해제** preserves server/event history but blocks the enrolled Agent certificate immediately.
-- **사용자 관리** supports display-name/role/password updates, activation changes, and audit-preserving soft deletion within the administrator's enterprise scope.
+- **사용자 관리** supports display-name/role/password updates, activation changes, and audit-preserving soft deletion within the administrator's enterprise scope. **내 계정** lets every administrator rotate their own password and invalidates existing sessions.
 - Agent verifies the Ed25519 signature and SHA-256, writes `/etc/mwaf/active/main.conf`, runs `apachectl configtest` or `nginx -t`, and reloads only on a change.
 - If validation or reload fails, Agent restores the prior policy and reloads it.
 - Each Agent uses a Manager-issued client certificate so the mTLS API can bind heartbeat, policy, package, command, and event traffic to one enrolled server without storing a reusable API password.
-- Agent renews its 90-day mTLS certificate with the existing private key beginning 30 days before expiration.
+- Agent renews its 90-day mTLS certificate with the existing private key beginning 30 days before expiration. A renewed certificate replaces the stored serial on its first authenticated request; the prior serial is then rejected.
 - ModSecurity writes JSON lines to `/var/log/modsecurity/audit.jsonl`; distro `logrotate` bounds the file and Agent tracks device, inode, and offset across truncation or replacement.
-- Agent drains up to 20 idempotent batches of 500 events every 2 seconds and applies exponential retry backoff up to one minute when Manager is unavailable.
+- Agent drains up to 20 idempotent batches of 500 events every 2 seconds, applies exponential retry backoff up to one minute, and limits its on-disk event spool to 512 MiB by default.
 
 Useful Manager commands:
 
@@ -227,19 +252,29 @@ make down
 
 Do not use `docker compose down -v` on an environment whose MariaDB data must be retained.
 
+## System policy and CRS lifecycle
+
+`packaging/sources.lock.yaml` is the repository source of truth for the approved CRS tag, commit, archive, and SHA-256. The matching JSON files under `internal/systempolicy/templates/` define policy defaults and carry independent template versions. Policy revisions copy both versions into `settings_json`, so a deployed revision remains auditable after the repository moves forward.
+
+`.github/workflows/crs-updates.yml` checks the official `coreruleset/coreruleset` GitHub releases each day. It accepts only non-draft stable CRS v4 releases, requires GitHub to report the annotated tag signature as verified, calculates the archive digest, adds a new immutable template version, updates the source lock, and opens or refreshes a review pull request. It does not merge, publish a bundle, or update customer servers directly.
+
+After that pull request passes the standard package and installation checks and an approved Manager bundle is deployed, the runtime controller reconciles only policies marked for automatic updates. Custom values and validated custom rules are preserved across revisions. The CRS package and policy revision are separate rollout stages, so each server keeps its prior revision until heartbeat reports the approved CRS version and can progress independently of slower servers in the same binding.
+
 ## Verification and tag-only image publication
 
 Relevant pull requests, every push to `dev`, and `vMAJOR.MINOR.PATCH` tags run `.github/workflows/dev-manager-image.yml`. The read-only verification job:
 
 1. tests the Go code;
 2. builds the Linux amd64 Agent;
-3. builds `mwaf-agent`, Apache, and Nginx DEB packages;
-4. downloads official CRS v4.28.0 and verifies its locked SHA-256;
-5. records exact Apache/Nginx version and build hashes in the bundle catalog;
+3. builds `mwaf-agent` and four Apache/Nginx distro/external integration DEB packages;
+4. reads the CRS version/archive/hash from `packaging/sources.lock.yaml`, downloads that official archive, and verifies its locked SHA-256;
+5. records the supported Ubuntu, architecture, and web-server type in the bundle catalog;
 6. installs the Agent and Apache module on a clean pinned Ubuntu 24.04 amd64 container and runs `apachectl configtest`;
 7. installs the Agent and Nginx module on a separate clean container and runs `nginx -t`;
-8. verifies both clean environments match the catalog's exact server version/build hash, load ModSecurity and CRS, and create the protected audit log;
-9. signs a temporary verification bundle without creating a Manager Docker image.
+8. verifies both clean environments load ModSecurity and CRS and create the protected audit log;
+9. installs the external packages against pre-installed Apache/Nginx connectors through non-default absolute binary paths and verifies they do not depend on distro web-server packages;
+10. starts both web servers with a deterministic test rule, verifies an HTTP `403` response and a non-empty JSON audit log, and checks the dedicated include, configuration test, CRS, log path, and managed-file guard;
+11. signs a temporary five-package verification bundle without creating a Manager Docker image.
 
 Pull requests, `dev` pushes, and manual workflow runs stop after verification. They do not build or publish the project Docker image. Only a validated semantic release tag push such as `v0.1.0` starts the publish job. The job downloads the exact tested DEBs through a workflow artifact, requires `RELEASE_BUNDLE_SIGNING_KEY_B64`, signs the release bundle, embeds it in the Manager image, and then publishes:
 
@@ -248,7 +283,7 @@ Pull requests, `dev` pushes, and manual workflow runs stop after verification. T
 3. immutable `sha-<full-commit-sha>`;
 4. build provenance using GitHub OIDC.
 
-The workflow does not initialize MariaDB or run browser/frontend tests. Full Manager-to-Agent enrollment, mTLS, policy, event-ingest, and database integration remains a separate disposable-environment test stage.
+The workflow does not initialize MariaDB or run browser/frontend tests. External-mode CI validates the M-WAF integration contract against pre-installed connectors, not every possible customer compiler/ABI combination. Full Manager-to-Agent enrollment, mTLS, policy, event-ingest, and database integration remains a separate disposable-environment test stage.
 
 The workflow publishes the package but cannot perform GitHub's irreversible first-time visibility choice. After making the package public once, confirm anonymous access before distributing the Compose stack:
 
@@ -266,7 +301,7 @@ go test ./...
 docker compose --env-file deploy/compose/.env.example -f deploy/compose/compose.yaml config --quiet
 ```
 
-These checks do not start MariaDB or modify a database. A full integration test additionally needs an Ubuntu 24.04 amd64 Apache/Nginx VM and a published Manager image.
+These checks do not start MariaDB or modify a database. A full integration test additionally needs a representative hosting-provider custom build, an Ubuntu 24.04 amd64 VM, and a published Manager image.
 
 ## Repository layout
 

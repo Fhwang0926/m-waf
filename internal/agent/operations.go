@@ -71,10 +71,6 @@ func (a *Agent) executeNextCommand(ctx context.Context) error {
 	if err := a.client.SendCommandResult(ctx, command.ID, "ACCEPTED", "Agent가 고정 명령을 접수했습니다."); err != nil {
 		return err
 	}
-	if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-command-id"), []byte(command.ID+"\n"), 0o640); err != nil {
-		_ = a.client.SendCommandResult(ctx, command.ID, "FAILED", "명령 실행 상태를 저장하지 못했습니다.")
-		return err
-	}
 	operationCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(operationCtx, arguments[0], arguments[1:]...).CombinedOutput()
@@ -82,6 +78,9 @@ func (a *Agent) executeNextCommand(ctx context.Context) error {
 		detail := "고정 명령 실행 실패: " + truncateOperationOutput(output)
 		_ = a.client.SendCommandResult(ctx, command.ID, "FAILED", detail)
 		return fmt.Errorf("execute %s: %s: %w", command.Command, truncateOperationOutput(output), err)
+	}
+	if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-command-id"), []byte(command.ID+"\n"), 0o640); err != nil {
+		return fmt.Errorf("save completed command: %w", err)
 	}
 	return nil
 }

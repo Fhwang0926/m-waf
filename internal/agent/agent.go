@@ -17,12 +17,13 @@ import (
 )
 
 type Agent struct {
-	cfg    config.Agent
-	client *Client
-	audit  *AuditReader
-	policy *PolicyApplier
-	spool  *EventSpool
-	logger *slog.Logger
+	cfg                     config.Agent
+	client                  *Client
+	audit                   *AuditReader
+	policy                  *PolicyApplier
+	spool                   *EventSpool
+	logger                  *slog.Logger
+	packageRestartRequested string
 }
 
 func New(cfg config.Agent, logger *slog.Logger) (*Agent, error) {
@@ -36,7 +37,7 @@ func New(cfg config.Agent, logger *slog.Logger) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Agent{cfg: cfg, client: client, audit: NewAuditReader(cfg.AuditLog, cfg.StateDirectory), policy: NewPolicyApplier(cfg), spool: NewEventSpool(cfg.SpoolDirectory), logger: logger}, nil
+	return &Agent{cfg: cfg, client: client, audit: NewAuditReader(cfg.AuditLog, cfg.StateDirectory), policy: NewPolicyApplier(cfg), spool: NewEventSpool(cfg.SpoolDirectory, cfg.SpoolMaxBytes), logger: logger}, nil
 }
 
 func (a *Agent) Run(ctx context.Context) error {
@@ -153,33 +154,57 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 		return err
 	}
 	if desired.PackageDeployment != nil {
-		lastPackageID, err := readStateValue(filepath.Join(a.cfg.StateDirectory, "last-package-deployment"))
+		deployment := *desired.PackageDeployment
+		installedID, err := readStateValue(filepath.Join(a.cfg.StateDirectory, "last-package-deployment"))
 		if err != nil {
 			return err
 		}
-		if lastPackageID != desired.PackageDeployment.ID {
-			applyErr := a.applyPackageDeployment(ctx, *desired.PackageDeployment)
-			if applyErr != nil {
-				if err := a.client.SendPackageResult(ctx, desired.PackageDeployment.ID, "FAILED", applyErr.Error()); err != nil {
+		failedID, err := readStateValue(filepath.Join(a.cfg.StateDirectory, "failed-package-deployment"))
+		if err != nil {
+			return err
+		}
+		reportedID, err := readStateValue(filepath.Join(a.cfg.StateDirectory, "reported-package-deployment"))
+		if err != nil {
+			return err
+		}
+		if installedID == deployment.ID {
+			if reportedID != deployment.ID && a.packageRestartRequested != deployment.ID && inventory.AgentVersion == deployment.Agent.Version && inventory.ModuleVersion == deployment.Module.Version {
+				if err := a.client.SendPackageResult(ctx, deployment.ID, "APPLIED", "Agent 재시작 후 설치 버전을 확인했습니다."); err != nil {
 					return err
 				}
-				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-package-deployment"), []byte(desired.PackageDeployment.ID+"\n"), 0o640); err != nil {
+				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "reported-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
+					return err
+				}
+				a.logger.Info("packages_applied", "deployment_id", deployment.ID, "agent_package", deployment.Agent.ID, "module_package", deployment.Module.ID)
+			} else if reportedID != deployment.ID && failedID != deployment.ID && a.packageRestartRequested == "" {
+				detail := fmt.Sprintf("재시작 후 설치 버전 불일치: agent=%s/%s module=%s/%s", inventory.AgentVersion, deployment.Agent.Version, inventory.ModuleVersion, deployment.Module.Version)
+				if err := a.client.SendPackageResult(ctx, deployment.ID, "FAILED", detail); err != nil {
+					return err
+				}
+				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "failed-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
+					return err
+				}
+			}
+		} else if failedID != deployment.ID {
+			applyErr := a.applyPackageDeployment(ctx, deployment)
+			if applyErr != nil {
+				if err := a.client.SendPackageResult(ctx, deployment.ID, "FAILED", applyErr.Error()); err != nil {
+					return err
+				}
+				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "failed-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
 					return err
 				}
 				return applyErr
 			}
-			if err := a.client.SendPackageResult(ctx, desired.PackageDeployment.ID, "APPLIED", ""); err != nil {
+			if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
 				return err
 			}
-			if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-package-deployment"), []byte(desired.PackageDeployment.ID+"\n"), 0o640); err != nil {
-				return err
-			}
-			a.logger.Info("packages_applied", "deployment_id", desired.PackageDeployment.ID, "agent_package", desired.PackageDeployment.Agent.ID, "module_package", desired.PackageDeployment.Module.ID)
+			a.packageRestartRequested = deployment.ID
 			if err := restartUpdatedAgent(); err != nil {
-				a.logger.Warn("updated_agent_restart_failed", "error", err)
-			} else {
-				return nil
+				_ = a.client.SendPackageResult(ctx, deployment.ID, "FAILED", err.Error())
+				return err
 			}
+			return nil
 		}
 	}
 	if err := a.executeNextCommand(ctx); err != nil {

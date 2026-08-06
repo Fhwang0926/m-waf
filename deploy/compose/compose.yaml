@@ -67,6 +67,7 @@ services:
       MWAF_BUNDLE_REQUIRED: "true"
       MWAF_ARTIFACT_ROOT: /var/lib/mwaf-manager/artifacts
       MWAF_EVENT_RETENTION: ${MWAF_EVENT_RETENTION:-720h}
+      MWAF_POLICY_SYNC_INTERVAL: ${MWAF_POLICY_SYNC_INTERVAL:-15m}
     secrets:
       - mariadb_app_password
       - mwaf_session_key

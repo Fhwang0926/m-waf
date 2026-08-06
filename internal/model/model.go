@@ -2,6 +2,18 @@ package model
 
 import "time"
 
+const (
+	IntegrationModeDistro   = "distro"
+	IntegrationModeExternal = "external"
+)
+
+func NormalizeIntegrationMode(mode string) string {
+	if mode == "" {
+		return IntegrationModeDistro
+	}
+	return mode
+}
+
 type Inventory struct {
 	Hostname         string `json:"hostname"`
 	OSID             string `json:"os_id"`
@@ -10,6 +22,7 @@ type Inventory struct {
 	WebServer        string `json:"web_server"`
 	WebServerVersion string `json:"web_server_version"`
 	WebServerBuild   string `json:"web_server_build_hash"`
+	IntegrationMode  string `json:"integration_mode,omitempty"`
 	AgentVersion     string `json:"agent_version,omitempty"`
 	ModuleVersion    string `json:"module_version,omitempty"`
 	CRSVersion       string `json:"crs_version,omitempty"`
@@ -26,6 +39,8 @@ type PackageArtifact struct {
 	WebServer        string `json:"web_server,omitempty"`
 	WebServerVersion string `json:"web_server_version,omitempty"`
 	WebServerBuild   string `json:"web_server_build_hash,omitempty"`
+	CRSVersion       string `json:"crs_version,omitempty"`
+	IntegrationMode  string `json:"integration_mode,omitempty"`
 	Path             string `json:"path"`
 	Size             int64  `json:"size"`
 	SHA256           string `json:"sha256"`

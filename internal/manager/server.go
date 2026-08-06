@@ -21,11 +21,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Fhwang0926/m-waf/internal/config"
 	"github.com/Fhwang0926/m-waf/internal/model"
 	"github.com/Fhwang0926/m-waf/internal/packages"
+	"github.com/Fhwang0926/m-waf/internal/systempolicy"
 	"github.com/Fhwang0926/m-waf/internal/version"
 	webassets "github.com/Fhwang0926/m-waf/web"
 )
@@ -47,11 +49,13 @@ type Server struct {
 	catalogErr       error
 	ca               *CertificateAuthority
 	policySigner     *PolicySigner
+	policyCatalog    *systempolicy.Catalog
 	templates        *template.Template
 	sessions         *sessionManager
 	loginLimiter     *loginLimiter
 	bootstrapLimiter *requestLimiter
 	downloadLimiter  *requestLimiter
+	policySyncMu     sync.Mutex
 	logger           *slog.Logger
 }
 
@@ -64,13 +68,17 @@ func NewServer(cfg config.Manager, store *Store, logger *slog.Logger) (*Server, 
 	if err != nil {
 		return nil, err
 	}
+	policyCatalog, err := systempolicy.Load()
+	if err != nil {
+		return nil, err
+	}
 	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}
 	catalog, catalogErr := packages.Load(cfg.BundleRoot, cfg.BundlePublicKey, version.Commit, cfg.BundleAllowUnsigned)
 	return &Server{
-		cfg: cfg, store: store, catalog: catalog, catalogErr: catalogErr, ca: ca, policySigner: policySigner, templates: templates,
+		cfg: cfg, store: store, catalog: catalog, catalogErr: catalogErr, ca: ca, policySigner: policySigner, policyCatalog: policyCatalog, templates: templates,
 		sessions: newSessionManager(cfg.SessionKey), loginLimiter: newLoginLimiter(),
 		bootstrapLimiter: newRequestLimiter(60, time.Minute), downloadLimiter: newRequestLimiter(8, time.Minute), logger: logger,
 	}, nil
@@ -97,6 +105,8 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.HandleFunc("GET /login", s.login)
 	mux.HandleFunc("POST /login", s.login)
 	mux.Handle("POST /logout", s.requireAdmin(http.HandlerFunc(s.logout)))
+	mux.Handle("GET /account", s.requireAdmin(http.HandlerFunc(s.account)))
+	mux.Handle("POST /account/password", s.requireAdmin(http.HandlerFunc(s.updateOwnPassword)))
 	mux.Handle("GET /", s.requireAdmin(http.HandlerFunc(s.dashboard)))
 	mux.Handle("GET /servers", s.requireAdmin(http.HandlerFunc(s.servers)))
 	mux.Handle("POST /servers/{id}/commands", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.createServerCommand))))
@@ -196,7 +206,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/setup", http.StatusSeeOther)
 			return
 		}
-		_ = s.templates.ExecuteTemplate(w, "login.html", map[string]any{})
+		_ = s.templates.ExecuteTemplate(w, "login.html", map[string]any{"PasswordChanged": r.URL.Query().Get("password_changed") == "1"})
 		return
 	}
 	remote := remoteIP(r)
@@ -281,12 +291,60 @@ func (s *Server) servers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	session := sessionFrom(r)
-	items, err := s.store.ListEvents(r.Context(), session.ScopeEnterpriseID(), 500)
+	filter := EventFilter{ServerID: truncate(strings.TrimSpace(r.URL.Query().Get("server")), 64), Severity: strings.TrimSpace(r.URL.Query().Get("severity")), Query: truncate(strings.TrimSpace(r.URL.Query().Get("q")), 255)}
+	if len(filter.Severity) != 1 || filter.Severity[0] < '0' || filter.Severity[0] > '7' {
+		filter.Severity = ""
+	}
+	switch r.URL.Query().Get("result") {
+	case "blocked":
+		value := true
+		filter.Blocked = &value
+	case "detected":
+		value := false
+		filter.Blocked = &value
+	}
+	page, err := strconv.Atoi(r.URL.Query().Get("page"))
+	if err != nil || page < 1 {
+		page = 1
+	} else if page > 10000 {
+		page = 10000
+	}
+	const pageSize = 100
+	filter.Offset = (page - 1) * pageSize
+	items, err := s.store.ListEventsFiltered(r.Context(), session.ScopeEnterpriseID(), filter, pageSize+1)
 	if err != nil {
 		http.Error(w, "load events", http.StatusInternalServerError)
 		return
 	}
-	_ = s.templates.ExecuteTemplate(w, "events.html", s.viewData(r, "events", map[string]any{"Events": items}))
+	hasNext := len(items) > pageSize
+	if hasNext {
+		items = items[:pageSize]
+	}
+	servers, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 500)
+	if err != nil {
+		http.Error(w, "load servers", http.StatusInternalServerError)
+		return
+	}
+	query := r.URL.Query()
+	query.Del("page")
+	pageURL := func(target int) string {
+		values := url.Values{}
+		for key, entries := range query {
+			for _, entry := range entries {
+				values.Add(key, entry)
+			}
+		}
+		values.Set("page", strconv.Itoa(target))
+		return "/events?" + values.Encode()
+	}
+	data := map[string]any{"Events": items, "Servers": servers, "FilterServer": filter.ServerID, "FilterSeverity": filter.Severity, "FilterQuery": filter.Query, "FilterResult": r.URL.Query().Get("result"), "Page": page, "HasNext": hasNext}
+	if page > 1 {
+		data["PreviousURL"] = pageURL(page - 1)
+	}
+	if hasNext {
+		data["NextURL"] = pageURL(page + 1)
+	}
+	_ = s.templates.ExecuteTemplate(w, "events.html", s.viewData(r, "events", data))
 }
 
 func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
@@ -310,7 +368,9 @@ func (s *Server) newPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load server groups", http.StatusInternalServerError)
 		return
 	}
-	_ = s.templates.ExecuteTemplate(w, "policy.html", s.viewData(r, "policies", map[string]any{"Servers": servers, "Groups": groups}))
+	_ = s.templates.ExecuteTemplate(w, "policy.html", s.viewData(r, "policies", map[string]any{
+		"Servers": servers, "Groups": groups, "PolicyTemplates": s.policyCatalog.ListLatest(), "DefaultTemplate": s.policyCatalog.Default(),
+	}))
 }
 
 func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
@@ -321,6 +381,15 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 	name := truncate(strings.TrimSpace(r.FormValue("name")), 255)
 	description := truncate(strings.TrimSpace(r.FormValue("description")), 1024)
 	target := strings.TrimSpace(r.FormValue("target"))
+	templateKey := strings.TrimSpace(r.FormValue("template_key"))
+	if templateKey == "" {
+		templateKey = s.policyCatalog.Default().Key
+	}
+	policyTemplate, ok := s.policyCatalog.Latest(templateKey)
+	if !ok {
+		http.Error(w, "지원하지 않는 시스템 정책 템플릿입니다.", http.StatusBadRequest)
+		return
+	}
 	mode := strings.TrimSpace(r.FormValue("mode"))
 	paranoiaLevel, paranoiaErr := strconv.Atoi(strings.TrimSpace(r.FormValue("paranoia_level")))
 	inboundScore, scoreErr := strconv.Atoi(strings.TrimSpace(r.FormValue("inbound_score")))
@@ -328,7 +397,12 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "정책 이름, 대상과 유효한 세부 설정이 필요합니다.", http.StatusBadRequest)
 		return
 	}
-	artifact, settingsJSON, err := buildPolicyArtifact(mode, paranoiaLevel, inboundScore, r.FormValue("request_body") == "on", r.FormValue("excluded_paths"), r.FormValue("excluded_ips"), r.FormValue("custom_rules"))
+	metadata := ManagedPolicyMetadata{
+		SchemaVersion: policyTemplate.SchemaVersion, TemplateKey: policyTemplate.Key, TemplateVersion: policyTemplate.Version,
+		CRSTrack: policyTemplate.CRSTrack, CRSVersion: policyTemplate.CRSVersion, Target: target,
+		AutoUpdate: r.FormValue("auto_update") == "on", PolicyOrigin: "administrator", MigrationStatus: "CURRENT",
+	}
+	artifact, settingsJSON, err := buildManagedPolicyArtifact(mode, paranoiaLevel, inboundScore, r.FormValue("request_body") == "on", r.FormValue("excluded_paths"), r.FormValue("excluded_ips"), r.FormValue("custom_rules"), metadata)
 	if err != nil {
 		http.Error(w, "정책 설정이 올바르지 않습니다: "+err.Error(), http.StatusBadRequest)
 		return
@@ -356,7 +430,7 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "assign policy", http.StatusInternalServerError)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, "policy.assign", target+":"+revisionID, "success", remoteIP(r))
+	s.audit(r, session.Username, "policy.assign", target+":"+revisionID, "success")
 	http.Redirect(w, r, "/servers?notice="+url.QueryEscape("정책이 "+strconv.Itoa(len(serverIDs))+"대 서버에 배포 대기 중입니다."), http.StatusSeeOther)
 }
 
@@ -397,7 +471,7 @@ func (s *Server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "create enrollment", http.StatusInternalServerError)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), sessionFrom(r).Username, "enrollment.create", label, "success", remoteIP(r))
+	s.audit(r, sessionFrom(r).Username, "enrollment.create", label, "success")
 	_ = s.templates.ExecuteTemplate(w, "enrollment.html", s.viewData(r, "enrollments", map[string]any{"Token": token, "ExpiresAt": expires, "AgentURL": s.cfg.AgentPublicURL}))
 }
 
@@ -446,7 +520,7 @@ func (s *Server) apiCreateEnrollment(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "create enrollment")
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), sessionFrom(r).Username, "enrollment.create", request.Label, "success", remoteIP(r))
+	s.audit(r, sessionFrom(r).Username, "enrollment.create", request.Label, "success")
 	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "expires_at": expires, "agent_api": s.cfg.AgentPublicURL})
 }
 
@@ -561,6 +635,13 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := s.SyncSystemPolicies(ctx); err != nil {
+			s.logger.Warn("system_policy_sync_after_enrollment_failed", "server_id", serverID, "error", err)
+		}
+	}()
 	writeJSON(w, http.StatusCreated, model.EnrollResponse{ServerID: serverID, CertificatePEM: certificate, CACertificate: s.ca.CertificatePEM(), PolicyPublicKey: s.policySigner.PublicPEM(), AgentAPI: s.cfg.AgentPublicURL})
 }
 
@@ -570,13 +651,9 @@ func (s *Server) renewCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	serverID := agentIDFrom(r)
-	certificate, serial, expiresAt, err := s.ca.SignAgentCSR(request.CSRPEM, serverID)
+	certificate, _, expiresAt, err := s.ca.SignAgentCSR(request.CSRPEM, serverID)
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "invalid agent certificate request")
-		return
-	}
-	if err := s.store.UpdateCertificateSerial(r.Context(), serverID, serial); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "certificate renewal failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, model.CertificateRenewResponse{CertificatePEM: certificate, ExpiresAt: expiresAt})
@@ -700,13 +777,14 @@ func (s *Server) eventBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	batch.BatchID = truncate(batch.BatchID, 128)
+	now := time.Now().UTC()
 	for i := range batch.Events {
 		event := &batch.Events[i]
 		if event.EventID == "" {
 			event.EventID = randomID()
 		}
-		if event.OccurredAt.IsZero() {
-			event.OccurredAt = time.Now().UTC()
+		if event.OccurredAt.IsZero() || event.OccurredAt.After(now.Add(5*time.Minute)) {
+			event.OccurredAt = now
 		}
 		event.URI = truncate(event.URI, 2048)
 		event.Message = truncate(event.Message, 2048)
@@ -736,6 +814,11 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		}
 		user, err := s.store.UserByID(r.Context(), data.UserID)
 		if err != nil || !user.Active {
+			clearSessionCookie(w)
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		if !secureEqual([]byte(data.CredentialTag), []byte(s.sessions.credentialTag(user.PasswordHash))) {
 			clearSessionCookie(w)
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
@@ -799,6 +882,12 @@ func (s *Server) validCSRF(r *http.Request) bool {
 		provided = r.Header.Get("X-CSRF-Token")
 	}
 	return secureEqual([]byte(provided), []byte(sessionFrom(r).CSRF))
+}
+
+func (s *Server) audit(r *http.Request, actor, action, target, result string) {
+	if err := s.store.Audit(r.Context(), requestID(r), actor, action, target, result, remoteIP(r)); err != nil {
+		s.logger.Error("admin audit write failed", "request_id", requestID(r), "actor", actor, "action", action, "error", err)
+	}
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {

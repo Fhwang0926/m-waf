@@ -26,6 +26,7 @@ type sessionData struct {
 	Role           Role   `json:"role"`
 	EnterpriseID   string `json:"enterprise_id,omitempty"`
 	EnterpriseName string `json:"enterprise_name,omitempty"`
+	CredentialTag  string `json:"credential_tag"`
 	ExpiresAt      int64  `json:"expires_at"`
 	CSRF           string `json:"csrf"`
 }
@@ -77,7 +78,8 @@ func (s *sessionManager) create(user UserRecord) (string, sessionData, error) {
 	data := sessionData{
 		UserID: user.ID, Username: user.Username, DisplayName: user.DisplayName, Role: user.Role,
 		EnterpriseID: user.EnterpriseID, EnterpriseName: user.EnterpriseName,
-		ExpiresAt: time.Now().UTC().Add(8 * time.Hour).Unix(), CSRF: base64.RawURLEncoding.EncodeToString(random),
+		CredentialTag: s.credentialTag(user.PasswordHash), ExpiresAt: time.Now().UTC().Add(8 * time.Hour).Unix(),
+		CSRF: base64.RawURLEncoding.EncodeToString(random),
 	}
 	raw, err := json.Marshal(data)
 	if err != nil {
@@ -110,10 +112,16 @@ func (s *sessionManager) parse(token string) (sessionData, error) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return sessionData{}, err
 	}
-	if data.UserID == "" || data.Username == "" || data.CSRF == "" || !roleAtLeast(data.Role, RoleEnterpriseUser) || time.Now().UTC().Unix() >= data.ExpiresAt {
+	if data.UserID == "" || data.Username == "" || data.CSRF == "" || data.CredentialTag == "" || !roleAtLeast(data.Role, RoleEnterpriseUser) || time.Now().UTC().Unix() >= data.ExpiresAt {
 		return sessionData{}, errors.New("expired session")
 	}
 	return data, nil
+}
+
+func (s *sessionManager) credentialTag(passwordHash string) string {
+	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte("credential:" + passwordHash))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {

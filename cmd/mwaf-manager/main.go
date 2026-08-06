@@ -57,6 +57,7 @@ func main() {
 	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
 	defer stopCleanup()
 	go runLogCleanup(cleanupCtx, cfg, store, logger)
+	go runSystemPolicySync(cleanupCtx, cfg.PolicySyncInterval, app, logger)
 	agentTLS, err := app.AgentTLSConfig()
 	if err != nil {
 		logger.Error("agent_tls_config", "error", err)
@@ -98,35 +99,66 @@ func main() {
 	_ = agentServer.Shutdown(shutdownCtx)
 }
 
+func runSystemPolicySync(ctx context.Context, interval time.Duration, app *manager.Server, logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	syncPolicies := func() {
+		syncCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		if err := app.SyncSystemPolicies(syncCtx); err != nil {
+			logger.Warn("system_policy_sync_failed", "error", err)
+		}
+	}
+	syncPolicies()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			syncPolicies()
+		}
+	}
+}
+
 func runLogCleanup(ctx context.Context, cfg config.Manager, store *manager.Store, logger *slog.Logger) {
 	ticker := time.NewTicker(cfg.CleanupInterval)
 	defer ticker.Stop()
 	cleanup := func() {
-		cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer cancel()
 		fallback := manager.DefaultLogRetentionSettings(cfg.EventRetention)
-		settings, err := store.LogRetentionSettings(cleanupCtx, fallback)
+		settingsCtx, cancelSettings := context.WithTimeout(ctx, 10*time.Second)
+		settings, err := store.LogRetentionSettings(settingsCtx, fallback)
+		cancelSettings()
 		if err != nil {
 			logger.Warn("log_retention_settings_unavailable", "error", err)
 			settings = fallback
 		}
 		now := time.Now().UTC()
+		eventCtx, cancelEvents := context.WithTimeout(ctx, 2*time.Minute)
 		eventDeleted, err := pruneInBatches(func() (int64, error) {
-			return store.PruneEvents(cleanupCtx, now.AddDate(0, 0, -settings.EventDays), 5000)
+			return store.PruneEvents(eventCtx, now.AddDate(0, 0, -settings.EventDays), 5000)
 		})
+		cancelEvents()
 		if err != nil {
 			logger.Warn("event_cleanup_failed", "error", err)
-			return
 		}
-		auditDeleted, err := pruneInBatches(func() (int64, error) {
-			return store.PruneAuditLogs(cleanupCtx, now.AddDate(0, 0, -settings.AuditDays), 5000)
+		batchCtx, cancelBatches := context.WithTimeout(ctx, 2*time.Minute)
+		batchDeleted, err := pruneInBatches(func() (int64, error) {
+			return store.PruneEventBatches(batchCtx, now.AddDate(0, 0, -settings.EventDays), 5000)
 		})
+		cancelBatches()
+		if err != nil {
+			logger.Warn("event_batch_cleanup_failed", "error", err)
+		}
+		auditCtx, cancelAudit := context.WithTimeout(ctx, 2*time.Minute)
+		auditDeleted, err := pruneInBatches(func() (int64, error) {
+			return store.PruneAuditLogs(auditCtx, now.AddDate(0, 0, -settings.AuditDays), 5000)
+		})
+		cancelAudit()
 		if err != nil {
 			logger.Warn("audit_cleanup_failed", "error", err)
-			return
 		}
-		if eventDeleted != 0 || auditDeleted != 0 {
-			logger.Info("log_cleanup", "events_deleted", eventDeleted, "audit_logs_deleted", auditDeleted, "event_retention_days", settings.EventDays, "audit_retention_days", settings.AuditDays)
+		if eventDeleted != 0 || batchDeleted != 0 || auditDeleted != 0 {
+			logger.Info("log_cleanup", "events_deleted", eventDeleted, "event_batches_deleted", batchDeleted, "audit_logs_deleted", auditDeleted, "event_retention_days", settings.EventDays, "audit_retention_days", settings.AuditDays)
 		}
 	}
 	cleanup()
@@ -142,7 +174,7 @@ func runLogCleanup(ctx context.Context, cfg config.Manager, store *manager.Store
 
 func pruneInBatches(prune func() (int64, error)) (int64, error) {
 	var total int64
-	for range 20 {
+	for {
 		deleted, err := prune()
 		if err != nil {
 			return total, err

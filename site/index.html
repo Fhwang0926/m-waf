@@ -91,7 +91,7 @@
         </div>
         <div class="value-grid">
           <article><span>01</span><h3>기존 인프라 유지</h3><p>Apache·Nginx와 기존 80/443 서비스 경로를 유지하므로 별도 프록시 장비나 네트워크 재구성이 필요하지 않습니다.</p></article>
-          <article><span>02</span><h3>고객 설치 범위 최소화</h3><p>고객 서버에는 공통 정책관리 Agent와 해당 웹서버용 ModSecurity 모듈, 두 패키지만 설치합니다.</p></article>
+          <article><span>02</span><h3>고객 설치 범위 최소화</h3><p>고객 서버에는 공통 정책관리 Agent와 해당 웹서버용 distro/external 통합 패키지, 두 개만 설치합니다.</p></article>
           <article><span>03</span><h3>오픈소스 우선</h3><p>ModSecurity와 OWASP CRS 원본을 사용하고, M-WAF는 배포·서명·롤백·로그 수집에 필요한 관리 기능을 제공합니다.</p></article>
         </div>
       </div>
@@ -138,12 +138,12 @@
           <p>Go 표준 라이브러리 중심의 Manager·Agent와 MariaDB, Docker Compose로 구성하며 별도 메시지 브로커나 검색 클러스터를 요구하지 않습니다.</p>
         </div>
         <div class="capability-list">
-          <article><div><span>Package Control</span><h3>환경 일치 패키지 제공</h3></div><p>OS, CPU, 웹서버 버전과 빌드 해시가 catalog와 모두 일치할 때만 Agent·모듈 설치 파일을 제공합니다.</p></article>
+          <article><div><span>Package Control</span><h3>환경 일치 패키지 제공</h3></div><p>배포판 설치와 기존 Connector 재사용을 구분하고, 사전진단과 configtest를 통과한 서버에만 Agent·통합 패키지를 제공합니다.</p></article>
           <article><div><span>Policy Safety</span><h3>서명·검증·자동 롤백</h3></div><p>Ed25519 서명과 SHA-256을 확인하고 웹서버 설정 검사에 성공한 경우에만 reload합니다. 실패하면 직전 정책으로 복구합니다.</p></article>
           <article><div><span>Secure Channel</span><h3>Agent별 mTLS 통신</h3></div><p>일회용 등록 토큰과 Agent별 인증서를 사용해 정책 조회, heartbeat, 이벤트 전송 경로를 보호합니다.</p></article>
           <article><div><span>Event Collection</span><h3>감사 이벤트 배치 수집</h3></div><p>ModSecurity JSON 이벤트를 로컬 디스크에 임시 보관하고 최대 500건 단위의 멱등 batch로 Manager에 전송합니다.</p></article>
           <article><div><span>Access Control</span><h3>기업 단위 관리자 분리</h3></div><p>시스템 관리자, 기업 관리자, 기업 사용자 역할을 구분하고 서버와 보안 이벤트 조회 범위를 기업 단위로 분리합니다.</p></article>
-          <article><div><span>Single Distribution</span><h3>Manager 중심 배포</h3></div><p>동일 commit에서 생성한 Agent와 Apache·Nginx 모듈을 Manager 이미지에 포함해 설치 버전의 출처를 하나로 유지합니다.</p></article>
+          <article><div><span>Single Distribution</span><h3>Manager 중심 배포</h3></div><p>동일 commit에서 생성한 Agent와 Apache·Nginx의 distro/external 통합 패키지를 Manager 이미지에 포함해 설치 출처를 하나로 유지합니다.</p></article>
         </div>
       </div>
     </section>
@@ -198,7 +198,7 @@
       <div class="shell">
         <div class="section-heading">
           <div><p class="section-label">지원 명세</p><h2>검증된 환경만<br>명확하게 지원합니다</h2></div>
-          <p>현재 MVP는 Ubuntu Server 24.04 LTS amd64의 배포판 기본 웹서버만 지원합니다. 표시 버전뿐 아니라 실제 빌드 구성이 일치해야 설치할 수 있습니다.</p>
+          <p>Ubuntu Server 24.04 LTS amd64에서 배포판 기본 웹서버와 호스팅사가 관리하는 커스텀 빌드를 구분해 지원합니다. 커스텀 빌드는 호환 ModSecurity Connector가 미리 로드되어 있어야 합니다.</p>
         </div>
         <div class="support-table-wrap">
           <table>
@@ -206,11 +206,13 @@
             <tbody>
               <tr><td><strong>Apache HTTP Server</strong></td><td><code>2.4.58</code></td><td><code>2.4.58-1ubuntu8.15</code></td><td>ModSecurity 2.9.7 + CRS 4.28.0</td></tr>
               <tr><td><strong>Nginx</strong></td><td><code>1.24.0</code></td><td><code>1.24.0-2ubuntu7.15</code></td><td>Connector 1.0.3 + libmodsecurity 3.0.12 + CRS 4.28.0</td></tr>
+              <tr><td><strong>Apache external</strong></td><td><code>2.4.x</code></td><td>호스팅사 관리 빌드</td><td>사전 설치된 security2_module + CRS 4.28.0</td></tr>
+              <tr><td><strong>Nginx external</strong></td><td>빌드별 진단</td><td>호스팅사 관리 빌드</td><td>동일 빌드용 Connector + CRS 4.28.0</td></tr>
             </tbody>
           </table>
-          <div class="support-note"><strong>Exact build match</strong><span>표시 버전이 같아도 <code>apachectl -V</code> 또는 <code>nginx -V</code>의 정규화된 빌드 해시가 Manager 내장 catalog와 다르면 설치하지 않습니다.</span></div>
+          <div class="support-note"><strong>Fail-closed preflight</strong><span><code>distro</code>는 Ubuntu 패키지 의존성을, <code>external</code>은 절대 바이너리 경로·Connector 로드·전용 include·configtest를 확인합니다. M-WAF는 고객 웹서버 바이너리를 교체하지 않습니다.</span></div>
         </div>
-        <div class="unsupported"><strong>현재 미지원</strong><span>ARM64</span><span>Rocky·RHEL·Debian</span><span>OpenResty</span><span>nginx.org·PPA</span><span>직접 컴파일 빌드</span></div>
+        <div class="unsupported"><strong>현재 미지원</strong><span>ARM64</span><span>Rocky·RHEL·Debian</span><span>OpenResty</span><span>Connector 자동 컴파일</span><span>호환 미확인 모듈</span></div>
       </div>
     </section>
 

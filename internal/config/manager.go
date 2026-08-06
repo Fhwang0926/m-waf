@@ -34,6 +34,7 @@ type Manager struct {
 	EnrollmentTTL       time.Duration
 	EventRetention      time.Duration
 	CleanupInterval     time.Duration
+	PolicySyncInterval  time.Duration
 	ShutdownTimeout     time.Duration
 }
 
@@ -85,6 +86,7 @@ func LoadManager() (Manager, error) {
 		EnrollmentTTL:       duration("MWAF_ENROLLMENT_TTL", 15*time.Minute),
 		EventRetention:      duration("MWAF_EVENT_RETENTION", 30*24*time.Hour),
 		CleanupInterval:     duration("MWAF_CLEANUP_INTERVAL", time.Hour),
+		PolicySyncInterval:  duration("MWAF_POLICY_SYNC_INTERVAL", 15*time.Minute),
 		ShutdownTimeout:     duration("MWAF_SHUTDOWN_TIMEOUT", 15*time.Second),
 	}
 	if override := os.Getenv("MWAF_DB_DSN"); override != "" {
@@ -116,8 +118,8 @@ func (c Manager) Validate() error {
 	if err != nil || publicURL.Scheme != "https" || publicURL.Hostname() == "" {
 		return errors.New("MWAF_AGENT_PUBLIC_URL must be an https URL")
 	}
-	if c.EventRetention < 24*time.Hour || c.CleanupInterval < time.Minute {
-		return errors.New("event retention must be at least 24h and cleanup interval at least 1m")
+	if c.EventRetention < 24*time.Hour || c.CleanupInterval < time.Minute || c.PolicySyncInterval < time.Minute {
+		return errors.New("event retention must be at least 24h and cleanup and policy sync intervals at least 1m")
 	}
 	return nil
 }

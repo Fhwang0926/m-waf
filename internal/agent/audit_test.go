@@ -120,3 +120,30 @@ func TestAuditReaderKeepsWholeLineAtBatchBoundary(t *testing.T) {
 		t.Fatalf("second line was not fully consumed: got %d", secondPosition.Offset)
 	}
 }
+
+func TestAuditReaderContinuesOversizedTransaction(t *testing.T) {
+	state := t.TempDir()
+	logPath := filepath.Join(state, "audit.jsonl")
+	line := `{"transaction":{"unique_id":"large","time_stamp":"2026-08-06T01:02:03Z","request":{"method":"GET","uri":"/large"},"response":{"http_code":403},"messages":[{"message":"one","details":{"ruleId":"1","severity":"2"}},{"message":"two","details":{"ruleId":"2","severity":"2"}},{"message":"three","details":{"ruleId":"3","severity":"2"}}]}}`
+	if err := os.WriteFile(logPath, []byte(line+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	reader := NewAuditReader(logPath, state)
+	first, firstPosition, err := reader.ReadBatch(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || firstPosition.Offset != 0 || firstPosition.MessageOffset != 2 {
+		t.Fatalf("unexpected first part: events=%d position=%#v", len(first), firstPosition)
+	}
+	if err := reader.Commit(firstPosition); err != nil {
+		t.Fatal(err)
+	}
+	second, secondPosition, err := reader.ReadBatch(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].Message != "three" || secondPosition.Offset != int64(len(line)+1) || secondPosition.MessageOffset != 0 {
+		t.Fatalf("unexpected second part: events=%#v position=%#v", second, secondPosition)
+	}
+}

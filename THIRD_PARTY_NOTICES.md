@@ -12,3 +12,5 @@ M-WAF does not implement a new WAF engine or attack-rule parser. The MVP package
 | Go MySQL Driver | [go-sql-driver/mysql](https://github.com/go-sql-driver/mysql) | Manager's MariaDB protocol driver |
 
 Exact versions and source hashes are recorded in `packaging/sources.lock.yaml` and in each generated bundle manifest. The CRS license is included in each module package. Distribution of a release must also preserve the license and source-offer requirements of its distro packages and container base images.
+
+The external integration packages do not redistribute an Apache/Nginx binary or ModSecurity connector. They reuse the compatible connector already supplied and loaded by the hosting operator, and add only M-WAF-managed configuration, unchanged CRS files, audit-log rotation, and the Agent integration helper.

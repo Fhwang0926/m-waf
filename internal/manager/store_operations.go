@@ -24,17 +24,18 @@ type GroupRecord struct {
 }
 
 type PolicyRecord struct {
-	ID             string
-	EnterpriseName string
-	Name           string
-	Description    string
-	Mode           string
-	Settings       PolicySettings
-	TargetCount    int
-	PendingCount   int
-	AppliedCount   int
-	FailedCount    int
-	CreatedAt      time.Time
+	ID              string
+	EnterpriseName  string
+	Name            string
+	Description     string
+	Mode            string
+	Settings        PolicySettings
+	TargetCount     int
+	PendingCount    int
+	AppliedCount    int
+	FailedCount     int
+	SupersededCount int
+	CreatedAt       time.Time
 }
 
 func (s *Store) AuthorizeAgent(ctx context.Context, serverID string, certificate *x509.Certificate) error {
@@ -50,12 +51,23 @@ func (s *Store) AuthorizeAgent(ctx context.Context, serverID string, certificate
 	if currentSerial == serial {
 		return nil
 	}
-	// Renewal updates the stored serial before the response reaches the Agent.
-	// Keep an old, CA-verified certificate usable only during the maximum
-	// configured renewal window so an interrupted atomic certificate write can
-	// safely retry without extending the certificate's original lifetime.
-	if certificate.NotAfter.After(time.Now()) && !certificate.NotAfter.After(time.Now().Add(60*24*time.Hour)) {
-		return nil
+	// A renewed certificate becomes authoritative on its first authenticated
+	// request. Until then the stored certificate remains valid, so a lost renewal
+	// response cannot strand the Agent. The short window prevents an arbitrary
+	// older certificate for the same identity from replacing the active one.
+	now := time.Now().UTC()
+	if certificate.NotAfter.After(now) && certificate.NotBefore.After(now.Add(-20*time.Minute)) {
+		result, err := s.db.ExecContext(ctx, `UPDATE servers SET certificate_serial=? WHERE id=? AND certificate_serial=? AND revoked_at IS NULL`, serial, serverID, currentSerial)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed == 1 {
+			return nil
+		}
 	}
 	return sql.ErrNoRows
 }
@@ -72,6 +84,7 @@ WHERE s.id=? AND (?='' OR s.enterprise_id=?)`, serverID, enterpriseID, enterpris
 		return item, err
 	}
 	_ = json.Unmarshal(inventory, &item.Inventory)
+	markServerOffline(&item, time.Now().UTC())
 	return item, nil
 }
 
@@ -91,28 +104,38 @@ func (s *Store) RevokeServer(ctx context.Context, enterpriseID, serverID, userID
 }
 
 func (s *Store) QueueCommand(ctx context.Context, enterpriseID, serverID, command, userID string) (string, error) {
-	var accessible int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM servers WHERE id=? AND revoked_at IS NULL AND (?='' OR enterprise_id=?)`, serverID, enterpriseID, enterpriseID).Scan(&accessible); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return "", err
 	}
-	if accessible != 1 {
+	defer tx.Rollback()
+	var lockedID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM servers WHERE id=? AND revoked_at IS NULL AND (?='' OR enterprise_id=?) FOR UPDATE`, serverID, enterpriseID, enterpriseID).Scan(&lockedID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", sql.ErrNoRows
+		}
+		return "", err
+	}
+	if lockedID == "" {
 		return "", sql.ErrNoRows
 	}
 	var pending int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_commands WHERE server_id=? AND status IN ('PENDING','ACCEPTED')`, serverID).Scan(&pending); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM agent_commands WHERE server_id=? AND status IN ('PENDING','ACCEPTED')`, serverID).Scan(&pending); err != nil {
 		return "", err
 	}
 	if pending != 0 {
 		return "", errors.New("server already has a pending command")
 	}
 	id := randomID()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_commands(id,server_id,command,status,detail,requested_by) VALUES (?,?,?,'PENDING','',?)`, id, serverID, command, userID)
-	return id, err
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_commands(id,server_id,command,status,detail,requested_by) VALUES (?,?,?,'PENDING','',?)`, id, serverID, command, userID); err != nil {
+		return "", err
+	}
+	return id, tx.Commit()
 }
 
 func (s *Store) NextCommand(ctx context.Context, serverID string) (model.AgentCommand, error) {
 	var command model.AgentCommand
-	err := s.db.QueryRowContext(ctx, `SELECT id,command FROM agent_commands WHERE server_id=? AND status='PENDING' ORDER BY created_at LIMIT 1`, serverID).Scan(&command.ID, &command.Command)
+	err := s.db.QueryRowContext(ctx, `SELECT id,command FROM agent_commands WHERE server_id=? AND status IN ('PENDING','ACCEPTED') ORDER BY created_at LIMIT 1`, serverID).Scan(&command.ID, &command.Command)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.AgentCommand{}, nil
 	}
@@ -147,7 +170,7 @@ func (s *Store) UpdateCommandResult(ctx context.Context, serverID, commandID, st
 }
 
 func (s *Store) UpdatePolicyDeploymentResult(ctx context.Context, serverID, revisionID, status, detail string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE policy_deployments SET status=?,detail=?,updated_at=UTC_TIMESTAMP(6) WHERE server_id=? AND policy_revision_id=?`, status, detail, serverID, revisionID)
+	result, err := s.db.ExecContext(ctx, `UPDATE policy_deployments SET status=?,detail=?,updated_at=UTC_TIMESTAMP(6) WHERE server_id=? AND policy_revision_id=? AND status<>'SUPERSEDED'`, status, detail, serverID, revisionID)
 	if err != nil {
 		return err
 	}
@@ -168,7 +191,7 @@ func (s *Store) UpdatePolicyDeploymentResult(ctx context.Context, serverID, revi
 }
 
 func (s *Store) UpdatePackageDeploymentResult(ctx context.Context, serverID, deploymentID, status, detail string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE package_deployments SET status=?,detail=?,updated_at=UTC_TIMESTAMP(6) WHERE id=? AND server_id=?`, status, detail, deploymentID, serverID)
+	result, err := s.db.ExecContext(ctx, `UPDATE package_deployments SET status=?,detail=?,updated_at=UTC_TIMESTAMP(6) WHERE id=? AND server_id=? AND status<>'SUPERSEDED'`, status, detail, deploymentID, serverID)
 	if err != nil {
 		return err
 	}
@@ -207,8 +230,11 @@ func (s *Store) AssignPackages(ctx context.Context, enterpriseID, serverID, agen
 	if accessible != 1 {
 		return "", sql.ErrNoRows
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE package_deployments SET status='SUPERSEDED',detail='새 배포 요청으로 대체됨',updated_at=UTC_TIMESTAMP(6) WHERE server_id=? AND status='PENDING'`, serverID); err != nil {
+		return "", err
+	}
 	id := randomID()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO package_deployments(id,server_id,agent_package_id,module_package_id,status,detail,requested_by) VALUES (?,?,?,?,'PENDING','',?)`, id, serverID, agentID, moduleID, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO package_deployments(id,server_id,agent_package_id,module_package_id,status,detail,requested_by) VALUES (?,?,?,?,'PENDING','',NULLIF(?,''))`, id, serverID, agentID, moduleID, userID); err != nil {
 		return "", err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE desired_states SET agent_package_id=?,module_package_id=?,package_deployment_id=? WHERE server_id=?`, agentID, moduleID, id, serverID)
@@ -244,6 +270,9 @@ func (s *Store) AssignPolicyToServers(ctx context.Context, enterpriseID string, 
 		if accessible != 1 {
 			return fmt.Errorf("server %s: %w", serverID, sql.ErrNoRows)
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE policy_deployments SET status='SUPERSEDED',detail='새 정책 배포로 대체됨',updated_at=UTC_TIMESTAMP(6) WHERE server_id=? AND status='PENDING'`, serverID); err != nil {
+			return err
+		}
 		result, err := tx.ExecContext(ctx, `UPDATE desired_states SET policy_revision_id=? WHERE server_id=?`, revisionID, serverID)
 		if err != nil {
 			return err
@@ -254,7 +283,7 @@ func (s *Store) AssignPolicyToServers(ctx context.Context, enterpriseID string, 
 			}
 			return fmt.Errorf("server %s desired state: %w", serverID, sql.ErrNoRows)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO policy_deployments(id,server_id,policy_revision_id,status,detail,requested_by) VALUES (?,?,?,'PENDING','',?)`, randomID(), serverID, revisionID, userID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO policy_deployments(id,server_id,policy_revision_id,status,detail,requested_by) VALUES (?,?,?,'PENDING','',NULLIF(?,''))`, randomID(), serverID, revisionID, userID); err != nil {
 			return err
 		}
 	}
@@ -263,7 +292,7 @@ func (s *Store) AssignPolicyToServers(ctx context.Context, enterpriseID string, 
 
 func (s *Store) ListPolicies(ctx context.Context, enterpriseID string, limit int) ([]PolicyRecord, error) {
 	query := `SELECT pr.id,COALESCE(e.name,'미지정'),pr.revision_name,pr.description,pr.mode,pr.settings_json,
-COUNT(pd.id),COALESCE(SUM(pd.status='PENDING'),0),COALESCE(SUM(pd.status='APPLIED'),0),COALESCE(SUM(pd.status='FAILED'),0),pr.created_at
+COUNT(pd.id),COALESCE(SUM(pd.status='PENDING'),0),COALESCE(SUM(pd.status='APPLIED'),0),COALESCE(SUM(pd.status='FAILED'),0),COALESCE(SUM(pd.status='SUPERSEDED'),0),pr.created_at
 FROM policy_revisions pr LEFT JOIN enterprises e ON e.id=pr.enterprise_id LEFT JOIN policy_deployments pd ON pd.policy_revision_id=pr.id`
 	args := make([]any, 0, 2)
 	if enterpriseID != "" {
@@ -281,7 +310,7 @@ FROM policy_revisions pr LEFT JOIN enterprises e ON e.id=pr.enterprise_id LEFT J
 	for rows.Next() {
 		var item PolicyRecord
 		var settings sql.NullString
-		if err := rows.Scan(&item.ID, &item.EnterpriseName, &item.Name, &item.Description, &item.Mode, &settings, &item.TargetCount, &item.PendingCount, &item.AppliedCount, &item.FailedCount, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.EnterpriseName, &item.Name, &item.Description, &item.Mode, &settings, &item.TargetCount, &item.PendingCount, &item.AppliedCount, &item.FailedCount, &item.SupersededCount, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		if settings.Valid {
@@ -385,6 +414,7 @@ WHERE gm.group_id=? ORDER BY s.name`, groupID)
 			return nil, err
 		}
 		_ = json.Unmarshal(inventory, &item.Inventory)
+		markServerOffline(&item, time.Now().UTC())
 		items = append(items, item)
 	}
 	return items, rows.Err()

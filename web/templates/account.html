@@ -1,0 +1,7 @@
+{{define "account.html"}}
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 내 계정</title><link rel="stylesheet" href="/static/app.css"></head>
+<body>{{template "navigation" .}}<main class="container narrow"><div class="page-head"><div><p class="eyebrow">ACCOUNT SECURITY</p><h1>내 계정</h1></div></div>
+{{if .Error}}<div class="alert error">{{.Error}}</div>{{end}}
+<section class="panel"><h2>비밀번호 변경</h2><p class="muted">변경이 완료되면 현재 세션을 종료하고 다시 로그인합니다.</p><form method="post" action="/account/password"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>현재 비밀번호<input type="password" name="current_password" autocomplete="current-password" required></label><label>새 비밀번호<input type="password" name="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><label>새 비밀번호 확인<input type="password" name="password_confirm" minlength="12" maxlength="256" autocomplete="new-password" required></label><button type="submit">비밀번호 변경</button></form></section>
+</main></body></html>
+{{end}}

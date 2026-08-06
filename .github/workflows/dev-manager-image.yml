@@ -64,6 +64,7 @@ jobs:
           sh -n internal/manager/bootstrap-install.sh
           sh -n packaging/agent/deb/build.sh
           sh -n packaging/module/deb/build.sh
+          sh -n packaging/module/external/configure.sh
           sh -n deploy/compose/prepare.sh
           grep -F 'agent_file="$tmp_dir/mwaf-agent.deb"' internal/manager/bootstrap-install.sh
           grep -F 'module_file="$tmp_dir/mwaf-module.deb"' internal/manager/bootstrap-install.sh
@@ -80,17 +81,18 @@ jobs:
             *) package_version="0.1.0~ci.${RUN_NUMBER}" ;;
           esac
           mkdir -p dist/packages dist/metadata dist/empty
+          crs_version="$(go run ./cmd/mwaf-crs-updater -field version-number)"
+          crs_archive="$(go run ./cmd/mwaf-crs-updater -field archive)"
+          crs_sha256="$(go run ./cmd/mwaf-crs-updater -field sha256)"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X github.com/Fhwang0926/m-waf/internal/version.Version=${package_version} -X github.com/Fhwang0926/m-waf/internal/version.Commit=${COMMIT}" -o dist/mwaf-agent ./cmd/mwaf-agent
           VERSION="$package_version" COMMIT="$COMMIT" AGENT_BINARY=dist/mwaf-agent OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/agent/deb/build.sh
-          curl -fL https://github.com/coreruleset/coreruleset/archive/refs/tags/v4.28.0.tar.gz -o dist/coreruleset.tar.gz
-          echo "d8acc96f25ad07c8e3a595a23c797324f6d77e59ddf9e26e90dd95ebd2e676ce  dist/coreruleset.tar.gz" | sha256sum --check
-          apache_version=$(apachectl -v 2>&1 | sed -n 's#.*Apache/\([^ ]*\).*#\1#p' | head -n 1)
-          apache_hash=$(apachectl -V 2>&1 | sed '/^AH[0-9][0-9]*:/d; /^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//' | sha256sum | awk '{print $1}')
-          WEBSERVER=apache VERSION="$package_version" WEB_VERSION="$apache_version" WEB_BUILD_HASH="$apache_hash" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
-          nginx_version=$(nginx -v 2>&1 | sed -n 's#.*nginx/##p')
-          nginx_hash=$(nginx -V 2>&1 | sed '/^AH[0-9][0-9]*:/d; /^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//' | sha256sum | awk '{print $1}')
-          WEBSERVER=nginx VERSION="$package_version" WEB_VERSION="$nginx_version" WEB_BUILD_HASH="$nginx_hash" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
-          test "$(find dist/packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 3
+          curl -fL "$crs_archive" -o dist/coreruleset.tar.gz
+          echo "$crs_sha256  dist/coreruleset.tar.gz" | sha256sum --check
+          WEBSERVER=apache CRS_VERSION="$crs_version" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          WEBSERVER=nginx CRS_VERSION="$crs_version" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          WEBSERVER=apache INTEGRATION_MODE=external CRS_VERSION="$crs_version" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          WEBSERVER=nginx INTEGRATION_MODE=external CRS_VERSION="$crs_version" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          test "$(find dist/packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 5
           for package in dist/packages/*.deb; do
             dpkg-deb --info "$package"
           done
@@ -98,7 +100,8 @@ jobs:
       - name: Install Agent and Apache module on clean Ubuntu
         run: |
           set -eu
-          docker run --rm --platform linux/amd64 \
+          crs_version="$(go run ./cmd/mwaf-crs-updater -field version-number)"
+          docker run --rm --platform linux/amd64 -e EXPECTED_CRS_VERSION="$crs_version" \
             -v "$PWD/dist:/dist:ro" \
             "$TEST_UBUNTU_IMAGE" sh -euxc '
               export DEBIAN_FRONTEND=noninteractive
@@ -107,13 +110,9 @@ jobs:
               apt-get install --no-install-recommends -y /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-apache_*.deb
               dpkg-query -W mwaf-agent mwaf-modsecurity-apache
               /usr/bin/mwaf-agent -version
-              actual_version=$(apachectl -v 2>&1 | sed -n "s#.*Apache/\([^ ]*\).*#\1#p" | head -n 1)
-              actual_hash=$(apachectl -V 2>&1 | sed "/^AH[0-9][0-9]*:/d; /^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//" | sha256sum | awk "{print \$1}")
-              test "$actual_version" = "$(jq -r .web_server_version /dist/metadata/module-apache.json)"
-              test "$actual_hash" = "$(jq -r .web_server_build_hash /dist/metadata/module-apache.json)"
               apachectl configtest
               apachectl -M 2>&1 | grep -q security2_module
-              grep -qx "4.28.0" /etc/mwaf/crs.version
+              grep -qx "$EXPECTED_CRS_VERSION" /etc/mwaf/crs.version
               grep -q "copytruncate" /etc/logrotate.d/mwaf-modsecurity
               test "$(find /usr/share/mwaf/crs/rules -type f -name "*.conf" | wc -l)" -ge 20
               test "$(stat -c "%a:%U:%G" /var/log/modsecurity/audit.jsonl)" = "660:root:www-data"
@@ -122,7 +121,8 @@ jobs:
       - name: Install Agent and Nginx module on clean Ubuntu
         run: |
           set -eu
-          docker run --rm --platform linux/amd64 \
+          crs_version="$(go run ./cmd/mwaf-crs-updater -field version-number)"
+          docker run --rm --platform linux/amd64 -e EXPECTED_CRS_VERSION="$crs_version" \
             -v "$PWD/dist:/dist:ro" \
             "$TEST_UBUNTU_IMAGE" sh -euxc '
               export DEBIAN_FRONTEND=noninteractive
@@ -131,16 +131,81 @@ jobs:
               apt-get install --no-install-recommends -y /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-nginx_*.deb
               dpkg-query -W mwaf-agent mwaf-modsecurity-nginx
               /usr/bin/mwaf-agent -version
-              actual_version=$(nginx -v 2>&1 | sed -n "s#.*nginx/##p")
-              actual_hash=$(nginx -V 2>&1 | sed "/^AH[0-9][0-9]*:/d; /^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//" | sha256sum | awk "{print \$1}")
-              test "$actual_version" = "$(jq -r .web_server_version /dist/metadata/module-nginx.json)"
-              test "$actual_hash" = "$(jq -r .web_server_build_hash /dist/metadata/module-nginx.json)"
               nginx -t
               nginx -T 2>&1 | grep -q "modsecurity on;"
-              grep -qx "4.28.0" /etc/mwaf/crs.version
+              grep -qx "$EXPECTED_CRS_VERSION" /etc/mwaf/crs.version
               grep -q "copytruncate" /etc/logrotate.d/mwaf-modsecurity
               test "$(find /usr/share/mwaf/crs/rules -type f -name "*.conf" | wc -l)" -ge 20
               test "$(stat -c "%a:%U:%G" /var/log/modsecurity/audit.jsonl)" = "660:root:www-data"
+            '
+
+      - name: Reuse pre-installed Apache connector through an external integration path
+        run: |
+          set -eu
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/dist:/dist:ro" \
+            "$TEST_UBUNTU_IMAGE" sh -euxc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install --no-install-recommends -y apache2 libapache2-mod-security2 curl logrotate
+              mkdir -p /opt/hosting/apache/bin
+              ln -s "$(command -v apachectl)" /opt/hosting/apache/bin/apachectl
+              apt-get install --no-install-recommends -y /dist/packages/mwaf-modsecurity-apache-external_*.deb
+              /usr/lib/mwaf/configure-external \
+                --webserver apache \
+                --binary /opt/hosting/apache/bin/apachectl \
+                --integration-config /etc/apache2/conf-enabled/mwaf-external.conf \
+                --audit-log /var/log/modsecurity/mwaf-external.jsonl \
+                --web-group www-data
+              apachectl configtest
+              apachectl -M 2>&1 | grep -q security2_module
+              apachectl -t -D DUMP_INCLUDES 2>&1 | grep -F /etc/apache2/conf-enabled/mwaf-external.conf
+              grep -Fqx "# Managed by M-WAF external integration." /etc/apache2/conf-enabled/mwaf-external.conf
+              test "$(dpkg-query -W -f="\${Depends}" mwaf-modsecurity-apache-external)" = "logrotate"
+              printf "%s\n" \
+                "SecRuleEngine On" \
+                "SecRule REQUEST_URI \"@streq /mwaf-ci-block\" \"id:1000001,phase:1,deny,status:403,log\"" \
+                > /etc/mwaf/active/main.conf
+              apachectl configtest
+              apachectl start
+              test "$(curl --silent --output /dev/null --write-out "%{http_code}" http://127.0.0.1/mwaf-ci-block)" = "403"
+              apachectl stop
+              test -s /var/log/modsecurity/mwaf-external.jsonl
+            '
+
+      - name: Reuse pre-installed Nginx connector through an external integration path
+        run: |
+          set -eu
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/dist:/dist:ro" \
+            "$TEST_UBUNTU_IMAGE" sh -euxc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install --no-install-recommends -y nginx libnginx-mod-http-modsecurity curl logrotate
+              mkdir -p /opt/hosting/nginx/sbin
+              ln -s "$(command -v nginx)" /opt/hosting/nginx/sbin/nginx
+              apt-get install --no-install-recommends -y /dist/packages/mwaf-modsecurity-nginx-external_*.deb
+              /usr/lib/mwaf/configure-external \
+                --webserver nginx \
+                --binary /opt/hosting/nginx/sbin/nginx \
+                --integration-config /etc/nginx/conf.d/mwaf-external.conf \
+                --audit-log /var/log/modsecurity/mwaf-external.jsonl \
+                --web-group www-data \
+                --modsecurity-base /etc/nginx/modsecurity.conf
+              nginx -t
+              nginx -T 2>&1 | grep -q "modsecurity on;"
+              nginx -T 2>&1 | grep -F "configuration file /etc/nginx/conf.d/mwaf-external.conf:"
+              grep -Fqx "# Managed by M-WAF external integration." /etc/nginx/conf.d/mwaf-external.conf
+              test "$(dpkg-query -W -f="\${Depends}" mwaf-modsecurity-nginx-external)" = "logrotate"
+              printf "%s\n" \
+                "SecRuleEngine On" \
+                "SecRule REQUEST_URI \"@streq /mwaf-ci-block\" \"id:1000001,phase:1,deny,status:403,log\"" \
+                > /etc/mwaf/active/main.conf
+              nginx -t
+              nginx
+              test "$(curl --silent --output /dev/null --write-out "%{http_code}" http://127.0.0.1/mwaf-ci-block)" = "403"
+              nginx -s quit
+              test -s /var/log/modsecurity/mwaf-external.jsonl
             '
 
       - name: Sign verification bundle
@@ -150,7 +215,7 @@ jobs:
           set -eu
           openssl genpkey -algorithm ED25519 -out dist/test-bundle-signing.key
           go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/test-bundle-signing.key -public-key-output dist/package-signing.pub -version "test-${COMMIT}" -commit "$COMMIT"
-          test "$(find dist/bundle/packages -type f | wc -l)" -eq 3
+          test "$(find dist/bundle/packages -type f | wc -l)" -eq 5
 
       - name: Upload verified package inputs
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -195,13 +260,34 @@ jobs:
           BUNDLE_SIGNING_KEY_B64: ${{ secrets.RELEASE_BUNDLE_SIGNING_KEY_B64 }}
           COMMIT: ${{ github.sha }}
           RELEASE_TAG: ${{ github.ref_name }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         run: |
           set -eu
-          test "$(find dist/packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 3
+          test "$(find dist/packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 5
           test -n "$BUNDLE_SIGNING_KEY_B64" || { echo "RELEASE_BUNDLE_SIGNING_KEY_B64 is required for tagged releases" >&2; exit 1; }
           printf '%s' "$BUNDLE_SIGNING_KEY_B64" | base64 --decode > dist/bundle-signing.key
-          go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/bundle-signing.key -public-key-output dist/package-signing.pub -version "$RELEASE_TAG" -commit "$COMMIT"
-          test "$(find dist/bundle/packages -type f | wc -l)" -eq 3
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          if docker pull ghcr.io/fhwang0926/m-waf-manager:latest; then
+            previous_container=$(docker create ghcr.io/fhwang0926/m-waf-manager:latest)
+            trap 'docker rm -f "$previous_container" >/dev/null 2>&1 || true' EXIT INT TERM
+            mkdir -p dist/previous-bundle
+            docker cp "$previous_container:/opt/mwaf/bundles/current/." dist/previous-bundle
+            docker cp "$previous_container:/etc/mwaf-manager/package-signing.pub" dist/previous-package-signing.pub
+            docker rm "$previous_container"
+            trap - EXIT INT TERM
+            go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/bundle-signing.key -public-key-output dist/package-signing.pub -version "$RELEASE_TAG" -commit "$COMMIT" -previous-bundle dist/previous-bundle -previous-public-key dist/previous-package-signing.pub
+            bundle_package_count=$(find dist/bundle/packages -type f | wc -l)
+            test "$bundle_package_count" -ge 8
+            test "$bundle_package_count" -le 10
+          else
+            if [ "$RELEASE_TAG" != "v0.1.0" ]; then
+              echo "A verified previous latest image is required for rollback packages" >&2
+              exit 1
+            fi
+            go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/bundle-signing.key -public-key-output dist/package-signing.pub -version "$RELEASE_TAG" -commit "$COMMIT"
+            test "$(find dist/bundle/packages -type f | wc -l)" -eq 5
+          fi
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f

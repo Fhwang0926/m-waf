@@ -98,7 +98,13 @@ func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, mod
 			}
 			agent = &artifact
 		case "module":
-			if artifact.WebServer != inventory.WebServer || artifact.WebServerVersion != inventory.WebServerVersion {
+			if artifact.WebServer != inventory.WebServer {
+				continue
+			}
+			if model.NormalizeIntegrationMode(artifact.IntegrationMode) != model.NormalizeIntegrationMode(inventory.IntegrationMode) {
+				continue
+			}
+			if artifact.WebServerVersion != "" && artifact.WebServerVersion != inventory.WebServerVersion {
 				continue
 			}
 			if artifact.WebServerBuild != "" && artifact.WebServerBuild != inventory.WebServerBuild {
@@ -114,7 +120,7 @@ func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, mod
 		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("no agent package for %s %s %s", inventory.OSID, inventory.OSVersion, inventory.Architecture)
 	}
 	if module == nil {
-		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("no %s module package for %s %s version %s build %s", inventory.WebServer, inventory.OSID, inventory.OSVersion, inventory.WebServerVersion, inventory.WebServerBuild)
+		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("no %s module package for %s %s %s", inventory.WebServer, inventory.OSID, inventory.OSVersion, inventory.Architecture)
 	}
 	return *agent, *module, nil
 }
@@ -162,6 +168,12 @@ func (c *Catalog) validateArtifact(artifact model.PackageArtifact) error {
 	}
 	if artifact.Kind != "agent" && artifact.Kind != "module" {
 		return fmt.Errorf("package artifact %q has invalid kind %q", artifact.ID, artifact.Kind)
+	}
+	if artifact.Kind == "module" {
+		mode := model.NormalizeIntegrationMode(artifact.IntegrationMode)
+		if mode != model.IntegrationModeDistro && mode != model.IntegrationModeExternal {
+			return fmt.Errorf("package artifact %q has invalid integration mode %q", artifact.ID, artifact.IntegrationMode)
+		}
 	}
 	clean := filepath.Clean(filepath.FromSlash(artifact.Path))
 	if filepath.IsAbs(clean) || clean == "." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {

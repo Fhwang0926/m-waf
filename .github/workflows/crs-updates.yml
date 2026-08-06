@@ -1,0 +1,60 @@
+name: Discover OWASP CRS updates
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: mwaf-crs-stable-update
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out development branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Update verified CRS source lock and system templates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: go run ./cmd/mwaf-crs-updater -channel stable -write
+
+      - name: Open or refresh the CRS update pull request
+        if: ${{ hashFiles('packaging/sources.lock.yaml') != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          if git diff --quiet -- packaging/sources.lock.yaml internal/systempolicy/templates; then
+            echo "No CRS update is available"
+            exit 0
+          fi
+          version="$(go run ./cmd/mwaf-crs-updater -field version)"
+          branch="codex/crs-auto-update"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add packaging/sources.lock.yaml internal/systempolicy/templates
+          git commit -m "chore: prepare OWASP CRS ${version}"
+          git push --force-with-lease origin "HEAD:refs/heads/${branch}"
+          if gh pr view "$branch" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh pr edit "$branch" --repo "$GITHUB_REPOSITORY" --title "chore: prepare OWASP CRS ${version}" --body "Automated signed-tag discovery for OWASP CRS ${version}. The normal package compatibility checks and approval flow remain required before release."
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base dev --head "$branch" --title "chore: prepare OWASP CRS ${version}" --body "Automated signed-tag discovery for OWASP CRS ${version}. The normal package compatibility checks and approval flow remain required before release."
+          fi

@@ -41,7 +41,7 @@ func (s *Server) createServerCommand(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "명령을 예약할 수 없습니다: "+err.Error(), status)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, "server.command", serverID+":"+commandID+":"+command, "success", remoteIP(r))
+	s.audit(r, session.Username, "server.command", serverID+":"+commandID+":"+command, "success")
 	http.Redirect(w, r, "/servers?notice="+url.QueryEscape(label+" 명령이 예약되었습니다."), http.StatusSeeOther)
 }
 
@@ -96,7 +96,7 @@ func (s *Server) deployServerPackages(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "패키지 배포를 예약할 수 없습니다: "+err.Error(), http.StatusConflict)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, "package."+operation, serverID+":"+deploymentID, "success", remoteIP(r))
+	s.audit(r, session.Username, "package."+operation, serverID+":"+deploymentID, "success")
 	http.Redirect(w, r, "/servers?notice="+url.QueryEscape("Agent와 WAF 모듈 "+map[string]string{"update": "업데이트", "rollback": "롤백"}[operation]+"가 예약되었습니다."), http.StatusSeeOther)
 }
 
@@ -115,6 +115,6 @@ func (s *Server) revokeServer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "server not found", http.StatusNotFound)
 		return
 	}
-	s.store.Audit(r.Context(), requestID(r), session.Username, "server.revoke", serverID, "success", remoteIP(r))
+	s.audit(r, session.Username, "server.revoke", serverID, "success")
 	http.Redirect(w, r, "/servers?notice="+url.QueryEscape("서버 등록을 해제하고 Agent 인증서를 차단했습니다."), http.StatusSeeOther)
 }

@@ -5,6 +5,13 @@ manager=""
 token=""
 ca_file=""
 web_server=""
+web_server_binary=""
+integration_mode="distro"
+integration_config=""
+audit_log="/var/log/modsecurity/audit.jsonl"
+web_group="www-data"
+modsecurity_base=""
+reload_web_server=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -12,12 +19,25 @@ while [ "$#" -gt 0 ]; do
     --token) token=$2; shift 2 ;;
     --ca) ca_file=$2; shift 2 ;;
     --webserver) web_server=$2; shift 2 ;;
+    --webserver-bin) web_server_binary=$2; shift 2 ;;
+    --integration) integration_mode=$2; shift 2 ;;
+    --integration-config) integration_config=$2; shift 2 ;;
+    --audit-log) audit_log=$2; shift 2 ;;
+    --web-group) web_group=$2; shift 2 ;;
+    --modsecurity-base) modsecurity_base=$2; shift 2 ;;
+    --reload) reload_web_server=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 [ -n "$manager" ] && [ -n "$token" ] && [ -r "$ca_file" ] || { echo "--manager, --token and readable --ca are required" >&2; exit 2; }
+case "$integration_mode" in distro|external) ;; *) echo "--integration must be distro or external" >&2; exit 2 ;; esac
+if [ -n "$web_server_binary" ]; then
+  [ -n "$web_server" ] || { echo "--webserver is required with --webserver-bin" >&2; exit 2; }
+  case "$web_server_binary" in /*) ;; *) echo "--webserver-bin must be an absolute path" >&2; exit 2 ;; esac
+  [ -x "$web_server_binary" ] || { echo "web-server control binary is not executable: $web_server_binary" >&2; exit 1; }
+fi
 command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 [ -r /etc/os-release ] || { echo "unsupported OS: /etc/os-release missing" >&2; exit 1; }
 
@@ -26,8 +46,7 @@ os_id=${ID:-unknown}
 os_version=${VERSION_ID:-unknown}
 case "$(uname -m)" in
   x86_64) architecture=amd64 ;;
-  aarch64|arm64) architecture=arm64 ;;
-  *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+  *) echo "unsupported architecture: $(uname -m); this release supports x86_64 only" >&2; exit 1 ;;
 esac
 
 has_apache=0
@@ -55,22 +74,37 @@ normalize_build() { sed '/^AH[0-9][0-9]*:/d; /^[[:space:]]*$/d; s/^[[:space:]]*/
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
 if [ "$web_server" = nginx ]; then
-  [ "$has_nginx" -eq 1 ] || { echo "nginx is not installed" >&2; exit 1; }
-  web_version=$(nginx -v 2>&1 | sed -n 's#.*nginx/##p')
-  web_build=$(nginx -V 2>&1 | normalize_build | hash_text)
+  if [ -n "$web_server_binary" ]; then web_cmd=$web_server_binary; else web_cmd=$(command -v nginx || true); fi
+  [ -n "$web_cmd" ] && [ -x "$web_cmd" ] || { echo "nginx is not installed" >&2; exit 1; }
+  web_version=$($web_cmd -v 2>&1 | sed -n 's#.*nginx/##p')
+  web_build=$($web_cmd -V 2>&1 | normalize_build | hash_text)
 elif [ "$web_server" = apache ]; then
-  [ "$has_apache" -eq 1 ] || { echo "Apache is not installed" >&2; exit 1; }
-  if command -v apachectl >/dev/null 2>&1; then apache_cmd=apachectl; else apache_cmd=httpd; fi
-  web_version=$($apache_cmd -v 2>&1 | sed -n 's#.*Apache/\([^ ]*\).*#\1#p' | head -n 1)
-  web_build=$($apache_cmd -V 2>&1 | normalize_build | hash_text)
+  if [ -n "$web_server_binary" ]; then
+    web_cmd=$web_server_binary
+  elif command -v apachectl >/dev/null 2>&1; then
+    web_cmd=$(command -v apachectl)
+  else
+    web_cmd=$(command -v httpd || true)
+  fi
+  [ -n "$web_cmd" ] && [ -x "$web_cmd" ] || { echo "Apache is not installed" >&2; exit 1; }
+  web_version=$($web_cmd -v 2>&1 | sed -n 's#.*Apache/\([^ ]*\).*#\1#p' | head -n 1)
+  web_build=$($web_cmd -V 2>&1 | normalize_build | hash_text)
 else
   echo "unsupported webserver: $web_server" >&2
   exit 1
 fi
+command -v dpkg-query >/dev/null 2>&1 || { echo "Ubuntu dpkg-query is required" >&2; exit 1; }
+if [ "$integration_mode" = distro ]; then
+  if [ "$web_server" = apache ]; then web_package=apache2; else web_package=nginx; fi
+  dpkg-query -W "$web_package" >/dev/null 2>&1 || { echo "the selected web server must be installed from Ubuntu packages; use --integration external for a pre-installed custom build" >&2; exit 1; }
+else
+  [ -n "$integration_config" ] || { echo "external integration requires --integration-config" >&2; exit 2; }
+  case "$integration_config" in /*) ;; *) echo "--integration-config must be an absolute path" >&2; exit 2 ;; esac
+fi
 
 hostname_value=$(hostname 2>/dev/null || printf 'unknown')
-payload=$(printf '{"token":"%s","inventory":{"hostname":"%s","os_id":"%s","os_version":"%s","architecture":"%s","web_server":"%s","web_server_version":"%s","web_server_build_hash":"%s"}}' \
-  "$(json_escape "$token")" "$(json_escape "$hostname_value")" "$(json_escape "$os_id")" "$(json_escape "$os_version")" "$architecture" "$web_server" "$(json_escape "$web_version")" "$web_build")
+payload=$(printf '{"token":"%s","inventory":{"hostname":"%s","os_id":"%s","os_version":"%s","architecture":"%s","web_server":"%s","web_server_version":"%s","web_server_build_hash":"%s","integration_mode":"%s"}}' \
+  "$(json_escape "$token")" "$(json_escape "$hostname_value")" "$(json_escape "$os_id")" "$(json_escape "$os_version")" "$architecture" "$web_server" "$(json_escape "$web_version")" "$web_build" "$integration_mode")
 
 resolution=$(curl --fail --silent --show-error --cacert "$ca_file" -H 'Content-Type: application/json' -H 'Accept: text/plain' --data "$payload" "$manager/bootstrap/v1/packages/resolve")
 agent_url=$(printf '%s\n' "$resolution" | sed -n '2p')
@@ -99,6 +133,14 @@ case "$os_id" in
   *) echo "unsupported distribution: $os_id" >&2; exit 1 ;;
 esac
 
+if [ "$integration_mode" = external ]; then
+  [ -x /usr/lib/mwaf/configure-external ] || { echo "external integration helper is missing from module package" >&2; exit 1; }
+  set -- --webserver "$web_server" --binary "$web_cmd" --integration-config "$integration_config" --audit-log "$audit_log" --web-group "$web_group"
+  if [ -n "$modsecurity_base" ]; then set -- "$@" --modsecurity-base "$modsecurity_base"; fi
+  if [ "$reload_web_server" -eq 1 ]; then set -- "$@" --reload; fi
+  /usr/lib/mwaf/configure-external "$@"
+fi
+
 install -d -m 0750 /etc/mwaf-agent /var/lib/mwaf-agent /var/lib/mwaf-agent/spool
 install -m 0644 "$ca_file" /etc/mwaf-agent/manager-ca.crt
 printf '%s\n' "$token" > /etc/mwaf-agent/enrollment.token
@@ -108,6 +150,8 @@ cat > /etc/mwaf-agent/agent.json <<EOF
   "manager_url": "$(json_escape "$manager")",
   "server_name": "$(json_escape "$hostname_value")",
   "web_server": "$(json_escape "$web_server")",
+  "web_server_binary": "$(json_escape "$web_cmd")",
+  "integration_mode": "$(json_escape "$integration_mode")",
   "enrollment_token_file": "/etc/mwaf-agent/enrollment.token",
   "ca_certificate": "/etc/mwaf-agent/manager-ca.crt",
   "certificate": "/var/lib/mwaf-agent/agent.crt",
@@ -116,15 +160,16 @@ cat > /etc/mwaf-agent/agent.json <<EOF
   "policy_path": "/etc/mwaf/active/main.conf",
   "state_directory": "/var/lib/mwaf-agent",
   "spool_directory": "/var/lib/mwaf-agent/spool",
-  "audit_log": "/var/log/modsecurity/audit.jsonl",
+  "audit_log": "$(json_escape "$audit_log")",
   "heartbeat_interval": "30s",
   "certificate_renew_before": "720h",
   "event_flush_interval": "2s",
   "event_retry_max": "1m",
   "event_batch_size": 500,
-  "event_batches_per_flush": 20
+  "event_batches_per_flush": 20,
+  "spool_max_bytes": 536870912
 }
 EOF
 chmod 0640 /etc/mwaf-agent/agent.json
 systemctl enable --now mwaf-agent
-echo "M-WAF Agent and $web_server module were installed from Manager bundle"
+echo "M-WAF Agent and $web_server $integration_mode integration were installed from Manager bundle"
