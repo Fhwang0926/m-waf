@@ -108,7 +108,15 @@ MWAF_ADMIN_PORT=8443
 MWAF_AGENT_PORT=10443
 ```
 
+For a one-off local run, the same values can be supplied in one command:
+
+```sh
+MWAF_ADMIN_PORT=18443 MWAF_AGENT_PORT=20443 make dev
+```
+
 Local source development binds both endpoints to loopback by default. `MWAF_DEV_ADMIN_BIND` and `MWAF_DEV_AGENT_BIND` can change those local bind addresses. Container deployment uses `MWAF_ADMIN_BIND` and `MWAF_AGENT_BIND`; keep the Admin UI on a management network, while protected servers must be able to reach the Agent API.
+
+Port `10443` is opened by Manager, not by the Agent. The Agent has no inbound management listener; it initiates authenticated HTTPS requests to this Manager endpoint for heartbeat, desired policy, package deployment, status reporting, and fixed control-command polling.
 
 HTML templates and CSS are embedded in the Go binary. After changing Go, HTML, or CSS, stop the foreground process and run `make dev` again. Never add `-v` to the local Compose shutdown command unless the isolated development data is intentionally disposable.
 

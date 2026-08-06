@@ -32,9 +32,19 @@ command -v openssl >/dev/null 2>&1 || { echo "OpenSSL is required" >&2; exit 1; 
 
 "$script_dir/prepare.sh"
 
+requested_admin_port=${MWAF_ADMIN_PORT:-}
+requested_agent_port=${MWAF_AGENT_PORT:-}
+requested_admin_bind=${MWAF_DEV_ADMIN_BIND:-}
+requested_agent_bind=${MWAF_DEV_AGENT_BIND:-}
+requested_agent_public_url=${MWAF_AGENT_PUBLIC_URL:-}
 set -a
 . "$script_dir/.env"
 set +a
+[ -z "$requested_admin_port" ] || export MWAF_ADMIN_PORT="$requested_admin_port"
+[ -z "$requested_agent_port" ] || export MWAF_AGENT_PORT="$requested_agent_port"
+[ -z "$requested_admin_bind" ] || export MWAF_DEV_ADMIN_BIND="$requested_admin_bind"
+[ -z "$requested_agent_bind" ] || export MWAF_DEV_AGENT_BIND="$requested_agent_bind"
+[ -z "$requested_agent_public_url" ] || export MWAF_AGENT_PUBLIC_URL="$requested_agent_public_url"
 
 admin_port=${MWAF_ADMIN_PORT:-8443}
 agent_port=${MWAF_AGENT_PORT:-10443}

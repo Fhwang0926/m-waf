@@ -5,6 +5,7 @@
 - Admin UI와 Agent API 포트를 각각 `MWAF_ADMIN_PORT`, `MWAF_AGENT_PORT`로 변경할 수 있게 했다.
 - Agent API 기본 포트를 `9443`에서 `10443`으로 변경했다.
 - 로컬 개발에서는 Admin UI와 Agent API를 각각 `MWAF_DEV_ADMIN_BIND`, `MWAF_DEV_AGENT_BIND`로 별도 바인딩할 수 있게 했다.
+- `make dev` 앞에 지정한 포트·바인드·Agent 공개 URL은 `.env`보다 우선하도록 했다.
 - Manager 시작 전에 수신 주소와 포트 범위를 검증하고, 로컬 실행 스크립트에서도 포트 범위를 확인한다.
 - 현재 서명 번들에 유효한 이전 Agent·모듈 패키지가 모두 있을 때만 롤백 버튼을 활성화한다.
 - 패키지 강제 업데이트·롤백 전에 서비스 영향 확인을 요구한다.
