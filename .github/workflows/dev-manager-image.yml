@@ -3,6 +3,7 @@ name: Verify changes and publish tagged Manager release
 on:
   pull_request:
     paths:
+      - ".dockerignore"
       - ".github/workflows/dev-manager-image.yml"
       - "build/**"
       - "cmd/**"
@@ -27,6 +28,7 @@ concurrency:
 
 env:
   TEST_UBUNTU_IMAGE: docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+  TEST_WEBSERVER_IMAGE: mwaf-ci-webservers:ubuntu-24.04-amd64
 
 jobs:
   verify:
@@ -42,11 +44,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Install distro build inputs
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y apache2 libapache2-mod-security2 nginx libnginx-mod-http-modsecurity jq
+          cache-dependency-path: go.sum
 
       - name: Validate release tag
         if: startsWith(github.ref, 'refs/tags/')
@@ -59,6 +57,10 @@ jobs:
       - name: Verify source and deployment files
         run: |
           set -eu
+          command -v curl
+          command -v dpkg-deb
+          command -v jq
+          command -v sha256sum
           go test ./...
           go vet ./...
           sh -n internal/manager/bootstrap-install.sh
@@ -70,9 +72,49 @@ jobs:
           grep -F 'module_file="$tmp_dir/mwaf-module.deb"' internal/manager/bootstrap-install.sh
           docker compose --env-file deploy/compose/.env.example -f deploy/compose/compose.yaml config --quiet
 
+      - name: Resolve locked CRS source
+        id: crs
+        run: |
+          set -eu
+          echo "version=$(go run ./cmd/mwaf-crs-updater -field version-number)" >> "$GITHUB_OUTPUT"
+          echo "archive=$(go run ./cmd/mwaf-crs-updater -field archive)" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(go run ./cmd/mwaf-crs-updater -field sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore locked CRS archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: dist/coreruleset.tar.gz
+          key: mwaf-crs-${{ runner.os }}-${{ runner.arch }}-${{ steps.crs.outputs.sha256 }}
+
+      - name: Set up Docker Buildx for install-test fixture
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+
+      - name: Resolve install-test fixture cache period
+        id: fixture-cache
+        run: echo "apt_refresh_week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Build cached Ubuntu web server fixture
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: build/containers/ci-webservers
+          file: build/containers/ci-webservers/Dockerfile
+          load: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          tags: ${{ env.TEST_WEBSERVER_IMAGE }}
+          build-args: |
+            APT_REFRESH_WEEK=${{ steps.fixture-cache.outputs.apt_refresh_week }}
+            TEST_UBUNTU_IMAGE=${{ env.TEST_UBUNTU_IMAGE }}
+          cache-from: type=gha,scope=mwaf-ci-webservers-amd64
+          cache-to: type=gha,scope=mwaf-ci-webservers-amd64,mode=max,ignore-error=true
+
       - name: Build Agent and module packages
         env:
           COMMIT: ${{ github.sha }}
+          CRS_ARCHIVE: ${{ steps.crs.outputs.archive }}
+          CRS_SHA256: ${{ steps.crs.outputs.sha256 }}
+          CRS_VERSION: ${{ steps.crs.outputs.version }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -eu
@@ -81,33 +123,35 @@ jobs:
             *) package_version="0.1.0~ci.${RUN_NUMBER}" ;;
           esac
           mkdir -p dist/packages dist/metadata dist/empty
-          crs_version="$(go run ./cmd/mwaf-crs-updater -field version-number)"
-          crs_archive="$(go run ./cmd/mwaf-crs-updater -field archive)"
-          crs_sha256="$(go run ./cmd/mwaf-crs-updater -field sha256)"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X github.com/Fhwang0926/m-waf/internal/version.Version=${package_version} -X github.com/Fhwang0926/m-waf/internal/version.Commit=${COMMIT}" -o dist/mwaf-agent ./cmd/mwaf-agent
           VERSION="$package_version" COMMIT="$COMMIT" AGENT_BINARY=dist/mwaf-agent OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/agent/deb/build.sh
-          curl -fL "$crs_archive" -o dist/coreruleset.tar.gz
-          echo "$crs_sha256  dist/coreruleset.tar.gz" | sha256sum --check
-          WEBSERVER=apache CRS_VERSION="$crs_version" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
-          WEBSERVER=nginx CRS_VERSION="$crs_version" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
-          WEBSERVER=apache INTEGRATION_MODE=external CRS_VERSION="$crs_version" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
-          WEBSERVER=nginx INTEGRATION_MODE=external CRS_VERSION="$crs_version" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          if [ -f dist/coreruleset.tar.gz ] && ! echo "$CRS_SHA256  dist/coreruleset.tar.gz" | sha256sum --check >/dev/null 2>&1; then
+            rm -f dist/coreruleset.tar.gz
+          fi
+          if [ ! -f dist/coreruleset.tar.gz ]; then
+            curl -fL "$CRS_ARCHIVE" -o dist/coreruleset.tar.gz.download
+            mv dist/coreruleset.tar.gz.download dist/coreruleset.tar.gz
+          fi
+          echo "$CRS_SHA256  dist/coreruleset.tar.gz" | sha256sum --check
+          WEBSERVER=apache CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          WEBSERVER=nginx CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          WEBSERVER=apache INTEGRATION_MODE=external CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          WEBSERVER=nginx INTEGRATION_MODE=external CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
           test "$(find dist/packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 5
           for package in dist/packages/*.deb; do
             dpkg-deb --info "$package"
           done
 
       - name: Install Agent and Apache module on clean Ubuntu
+        env:
+          CRS_VERSION: ${{ steps.crs.outputs.version }}
         run: |
           set -eu
-          crs_version="$(go run ./cmd/mwaf-crs-updater -field version-number)"
-          docker run --rm --platform linux/amd64 -e EXPECTED_CRS_VERSION="$crs_version" \
+          docker run --rm --platform linux/amd64 -e EXPECTED_CRS_VERSION="$CRS_VERSION" \
             -v "$PWD/dist:/dist:ro" \
-            "$TEST_UBUNTU_IMAGE" sh -euxc '
+            "$TEST_WEBSERVER_IMAGE" sh -euxc '
               export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install --no-install-recommends -y apache2 jq
-              apt-get install --no-install-recommends -y /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-apache_*.deb
+              apt-get --no-download install --no-install-recommends -y /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-apache_*.deb
               dpkg-query -W mwaf-agent mwaf-modsecurity-apache
               /usr/bin/mwaf-agent -version
               apachectl configtest
@@ -119,16 +163,15 @@ jobs:
             '
 
       - name: Install Agent and Nginx module on clean Ubuntu
+        env:
+          CRS_VERSION: ${{ steps.crs.outputs.version }}
         run: |
           set -eu
-          crs_version="$(go run ./cmd/mwaf-crs-updater -field version-number)"
-          docker run --rm --platform linux/amd64 -e EXPECTED_CRS_VERSION="$crs_version" \
+          docker run --rm --platform linux/amd64 -e EXPECTED_CRS_VERSION="$CRS_VERSION" \
             -v "$PWD/dist:/dist:ro" \
-            "$TEST_UBUNTU_IMAGE" sh -euxc '
+            "$TEST_WEBSERVER_IMAGE" sh -euxc '
               export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install --no-install-recommends -y nginx jq
-              apt-get install --no-install-recommends -y /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-nginx_*.deb
+              apt-get --no-download install --no-install-recommends -y /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-nginx_*.deb
               dpkg-query -W mwaf-agent mwaf-modsecurity-nginx
               /usr/bin/mwaf-agent -version
               nginx -t
@@ -144,10 +187,9 @@ jobs:
           set -eu
           docker run --rm --platform linux/amd64 \
             -v "$PWD/dist:/dist:ro" \
-            "$TEST_UBUNTU_IMAGE" sh -euxc '
+            "$TEST_WEBSERVER_IMAGE" sh -euxc '
               export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install --no-install-recommends -y apache2 libapache2-mod-security2 curl logrotate
+              apt-get --no-download install --no-install-recommends -y libapache2-mod-security2
               mkdir -p /opt/hosting/apache/bin
               ln -s "$(command -v apachectl)" /opt/hosting/apache/bin/apachectl
               apt-get install --no-install-recommends -y /dist/packages/mwaf-modsecurity-apache-external_*.deb
@@ -178,10 +220,9 @@ jobs:
           set -eu
           docker run --rm --platform linux/amd64 \
             -v "$PWD/dist:/dist:ro" \
-            "$TEST_UBUNTU_IMAGE" sh -euxc '
+            "$TEST_WEBSERVER_IMAGE" sh -euxc '
               export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install --no-install-recommends -y nginx libnginx-mod-http-modsecurity curl logrotate
+              apt-get --no-download install --no-install-recommends -y libnginx-mod-http-modsecurity
               mkdir -p /opt/hosting/nginx/sbin
               ln -s "$(command -v nginx)" /opt/hosting/nginx/sbin/nginx
               apt-get install --no-install-recommends -y /dist/packages/mwaf-modsecurity-nginx-external_*.deb
@@ -248,6 +289,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: go.sum
+
+      - name: Ensure release metadata tools
+        run: |
+          command -v jq >/dev/null && exit 0
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y jq
 
       - name: Download verified package inputs
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
@@ -264,14 +312,62 @@ jobs:
           GHCR_USER: ${{ github.actor }}
           GHCR_OWNER: ${{ github.repository_owner }}
         run: |
-          set -eu
+          set -euo pipefail
           mkdir -p dist/empty
           test "$(find dist/packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 5
           test -n "$BUNDLE_SIGNING_KEY_B64" || { echo "RELEASE_BUNDLE_SIGNING_KEY_B64 is required for tagged releases" >&2; exit 1; }
           printf '%s' "$BUNDLE_SIGNING_KEY_B64" | base64 --decode > dist/bundle-signing.key
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
-          if docker pull ghcr.io/fhwang0926/m-waf-manager:latest; then
-            previous_container=$(docker create ghcr.io/fhwang0926/m-waf-manager:latest)
+          package_versions=dist/ghcr-package-versions.json
+          package_status=$(curl --silent --show-error --output "$package_versions" --write-out '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GHCR_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/users/$GHCR_OWNER/packages/container/m-waf-manager/versions?per_page=100")
+          current_version=${RELEASE_TAG#v}
+          previous_tag=""
+          case "$package_status" in
+            404)
+              echo "No previous GHCR package exists; assembling initial release bundle for $RELEASE_TAG"
+              ;;
+            200)
+              jq -r '
+                [.[].metadata.container.tags[]?
+                  | select(test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))]
+                | unique[]
+              ' "$package_versions" | sort -Vu > dist/ghcr-release-tags.txt
+              cp dist/ghcr-release-tags.txt dist/ghcr-release-candidates.txt
+              printf '%s\n' "$current_version" >> dist/ghcr-release-candidates.txt
+              sort -Vu -o dist/ghcr-release-candidates.txt dist/ghcr-release-candidates.txt
+              latest_known_tag=$(tail -n 1 dist/ghcr-release-candidates.txt)
+              if [ "$latest_known_tag" != "$current_version" ]; then
+                echo "Published GHCR release $latest_known_tag is newer than $current_version; refusing an out-of-order release" >&2
+                exit 1
+              fi
+              previous_tag=$(awk -v current="$current_version" '
+                $0 == current { print prior; found=1; exit }
+                { prior=$0 }
+                END { if (!found) exit 2 }
+              ' dist/ghcr-release-candidates.txt) || {
+                echo "Unable to order GHCR release tags for $current_version" >&2
+                exit 1
+              }
+              if [ -n "$previous_tag" ]; then
+                echo "Using GHCR release $previous_tag as the verified rollback source"
+              else
+                echo "No earlier semantic GHCR release exists; assembling initial release bundle for $RELEASE_TAG"
+              fi
+              ;;
+            *)
+              echo "Unable to inspect GHCR package versions (GitHub API HTTP $package_status)" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ -n "$previous_tag" ]; then
+            previous_image="ghcr.io/fhwang0926/m-waf-manager:$previous_tag"
+            docker pull "$previous_image"
+            previous_container=$(docker create "$previous_image")
             trap 'docker rm -f "$previous_container" >/dev/null 2>&1 || true' EXIT INT TERM
             mkdir -p dist/previous-bundle
             docker cp "$previous_container:/opt/mwaf/bundles/current/." dist/previous-bundle
@@ -283,26 +379,8 @@ jobs:
             test "$bundle_package_count" -ge 8
             test "$bundle_package_count" -le 10
           else
-            package_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-              -H 'Accept: application/vnd.github+json' \
-              -H "Authorization: Bearer $GHCR_TOKEN" \
-              -H 'X-GitHub-Api-Version: 2022-11-28' \
-              "https://api.github.com/users/$GHCR_OWNER/packages/container/m-waf-manager/versions?per_page=1")
-            case "$package_status" in
-              404)
-                echo "No previous GHCR package exists; assembling initial release bundle for $RELEASE_TAG"
-                go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/bundle-signing.key -public-key-output dist/package-signing.pub -version "$RELEASE_TAG" -commit "$COMMIT"
-                test "$(find dist/bundle/packages -type f | wc -l)" -eq 5
-                ;;
-              200)
-                echo "A GHCR package exists but latest is unavailable; refusing a release without verified rollback packages" >&2
-                exit 1
-                ;;
-              *)
-                echo "Unable to verify GHCR package history (GitHub API HTTP $package_status)" >&2
-                exit 1
-                ;;
-            esac
+            go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/bundle-signing.key -public-key-output dist/package-signing.pub -version "$RELEASE_TAG" -commit "$COMMIT"
+            test "$(find dist/bundle/packages -type f | wc -l)" -eq 5
           fi
 
       - name: Log in to GitHub Container Registry
@@ -324,7 +402,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=sha,prefix=sha-,format=long
 
       - name: Build and push Manager image with verified packages
@@ -342,8 +420,8 @@ jobs:
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ github.event.repository.updated_at }}
             BUNDLE_VERSION=${{ github.ref_name }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=mwaf-manager-amd64
+          cache-to: type=gha,scope=mwaf-manager-amd64,mode=max,ignore-error=true
 
       - name: Attest published image
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661

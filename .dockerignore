@@ -4,6 +4,9 @@ bin
 deploy/compose/.env
 deploy/compose/secrets/*
 docs
-dist/metadata
-dist/packages
+dist/*
+!dist/bundle
+!dist/bundle/**
+!dist/empty
+!dist/package-signing.pub
 README.md

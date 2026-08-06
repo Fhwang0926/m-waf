@@ -225,7 +225,7 @@ The current MVP has no supported `tar.gz`, manual-copy, or RPM installation path
 - **이벤트** filters by server, block/detect result, severity, URL, Rule ID, or message and pages through 100 records at a time.
 - Agent control uses authenticated HTTPS polling during the normal heartbeat loop. It does not open a WebSocket or arbitrary command port, and arbitrary shell execution is not provided.
 - `Agent 중지` and `서버 종료` cannot be reversed through Manager after connectivity is lost; use the host console, service manager, hypervisor, or power controller to recover them.
-- Starting with the second tagged release, the release workflow verifies the previous signed image and embeds its Agent and module packages as explicit rollback targets.
+- Starting with the second tagged release, the release workflow resolves the highest earlier semantic GHCR tag, verifies that signed image, and embeds its Agent and module packages as explicit rollback targets.
 - **서버 그룹** manages enterprise-scoped groups used by enterprise-policy targets.
 - **시스템 정책** is a system-administrator read-only catalog of immutable GitHub-managed versions, CRS compatibility, lifecycle status, source commit, migration notes, and adoption counts. Manager does not provide create, edit, or publish controls for this catalog.
 - **기업 정책** adopts one published system-policy version and owns the enterprise target, detection/blocking mode, CRS sensitivity, anomaly threshold, request-body inspection, URL/IP exclusions, restricted custom `SecRule` lines, and update strategy. New standalone policies are blocked; untraceable existing revisions remain `LEGACY_LOCKED` until an administrator explicitly converts them.
@@ -319,7 +319,7 @@ Relevant pull requests, every push to `dev`, and `vMAJOR.MINOR.PATCH` tags run `
 1. tests the Go code;
 2. builds the Linux amd64 Agent;
 3. builds `mwaf-agent` and four Apache/Nginx distro/external integration DEB packages;
-4. reads the CRS version/archive/hash from `packaging/sources.lock.yaml`, downloads that official archive, and verifies its locked SHA-256;
+4. reads the CRS version/archive/hash from `packaging/sources.lock.yaml`, restores the exact archive from cache or downloads it, and always verifies its locked SHA-256;
 5. records the supported Ubuntu, architecture, and web-server type in the bundle catalog;
 6. installs the Agent and Apache module on a clean pinned Ubuntu 24.04 amd64 container and runs `apachectl configtest`;
 7. installs the Agent and Nginx module on a separate clean container and runs `nginx -t`;
@@ -328,14 +328,16 @@ Relevant pull requests, every push to `dev`, and `vMAJOR.MINOR.PATCH` tags run `
 10. starts both web servers with a deterministic test rule, verifies an HTTP `403` response and a non-empty JSON audit log, and checks the dedicated include, configuration test, CRS, log path, and managed-file guard;
 11. signs a temporary five-package verification bundle without creating a Manager Docker image.
 
+The workflow reuses four bounded caches: Go modules/build outputs keyed by `go.sum`, the CRS archive keyed by its locked SHA-256, a pinned Ubuntu 24.04 Apache/Nginx install-test fixture, and Manager BuildKit layers in a separate image scope. The fixture is refreshed at least once per UTC week so Ubuntu dependency drift is still detected; within that period it only avoids repeating package downloads. Every verification run still installs the newly built local DEBs and performs the same configuration, module-load, HTTP block, and audit-log checks. Cache misses fall back to normal downloads and builds. Release signing keys, signed bundles, DEBs, workflow artifacts, and GHCR rollback inputs are never restored from these cross-run caches.
+
 Pull requests, `dev` pushes, and manual workflow runs stop after verification. They do not build or publish the project Docker image. Only a validated semantic release tag push such as `v0.1.0` starts the publish job. The job downloads the exact tested DEBs through a workflow artifact, requires `RELEASE_BUNDLE_SIGNING_KEY_B64`, signs the release bundle, embeds it in the Manager image, and then publishes:
 
 1. `ghcr.io/fhwang0926/m-waf-manager:<major.minor.patch>`;
-2. moving convenience tags `<major.minor>`, `<major>`, and `latest`;
+2. moving convenience tags `<major.minor>`, `<major>`, and `latest` (`latest` is updated only by a validated `vMAJOR.MINOR.PATCH` tag release);
 3. immutable `sha-<full-commit-sha>`;
 4. build provenance using GitHub OIDC.
 
-For the first successful tagged publication, the workflow confirms through the GitHub Packages API that the `m-waf-manager` container package does not exist, then creates a five-package bundle without an N-1 rollback target. From the second successful release onward, `latest` must be downloadable and its signed bundle must verify; an existing package with a missing `latest` tag fails closed instead of publishing without rollback packages. Failed pre-publication tag attempts do not force the first successful version to be named `v0.1.0`.
+For the first successful tagged publication, the workflow lists GHCR package versions through the GitHub Packages API. A package shell, an untagged version, or a version tagged only with the current release does not count as a previous approved release, so failed pre-publication attempts do not permanently block the first successful image. From the second successful release onward, the workflow selects the highest semantic `x.y.z` tag lower than the current release and verifies that exact signed image before embedding N-1 rollback packages. A missing or invalid previous semantic image, an API error, or an out-of-order release still fails closed. Rollback assembly no longer depends on the moving `latest` tag.
 
 The workflow does not initialize MariaDB or run browser/frontend tests. External-mode CI validates the M-WAF integration contract against pre-installed connectors, not every possible customer compiler/ABI combination. Full Manager-to-Agent enrollment, mTLS, policy, event-ingest, and database integration stays outside CI and is available through `deploy/e2e/run.sh` on a dedicated disposable Linux host.
 
@@ -367,6 +369,7 @@ internal/packages/           Signed embedded package catalog
 migrations/                  Forward-only MariaDB schema
 packaging/                   Agent/module DEB builders and source locks
 build/containers/manager/    Manager multi-stage Dockerfile
+build/containers/ci-webservers/ Cached Ubuntu install-test fixture
 deploy/compose/              Clone-to-deploy Manager stack
 .github/workflows/           PR/dev verification and tag-only GHCR publication
 site/                        No-build GitHub Pages introduction site
