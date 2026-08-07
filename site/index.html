@@ -38,18 +38,18 @@
         <span><strong>M-WAF</strong><small>SELF-HOSTED WAF</small></span>
       </a>
       <nav aria-label="주요 메뉴">
-        <a href="#why">제품 개요</a>
-        <a href="#architecture">구성</a>
-        <a href="#install">설치</a>
-        <a href="#support">지원 범위</a>
+        <a href="#why">차별성</a>
+        <a href="#policy">보안 정책</a>
+        <a href="#architecture">구성·구동</a>
+        <a href="#support">지원 웹서버·WAS</a>
       </nav>
       <details class="mobile-menu">
         <summary>메뉴</summary>
         <div>
-          <a href="#why">제품 개요</a>
-          <a href="#architecture">구성</a>
-          <a href="#install">설치</a>
-          <a href="#support">지원 범위</a>
+          <a href="#why">차별성</a>
+          <a href="#policy">보안 정책</a>
+          <a href="#architecture">구성·구동</a>
+          <a href="#support">지원 웹서버·WAS</a>
         </div>
       </details>
       <a class="header-link" href="https://github.com/Fhwang0926/m-waf">GitHub</a>
@@ -124,14 +124,30 @@
     <section class="section why" id="why">
       <div class="shell">
         <div class="section-heading">
-          <p class="eyebrow">DESIGNED FOR HOSTING PROVIDERS</p>
-          <h2>웹서버 앞단을 바꾸지 않고<br>보호 범위를 넓힙니다.</h2>
-          <p>중앙 프록시를 새로 구성하는 대신 기존 웹서버에 검사 모듈을 연결합니다. 고객 트래픽과 관리 트래픽을 분리해 호스팅 환경의 변경 범위를 줄입니다.</p>
+          <p class="eyebrow">DIFFERENTIATION</p>
+          <h2>호스팅 환경의 변경 범위는 줄이고<br>운영 경계는 분명하게.</h2>
+          <p>검증된 오픈소스 구성요소를 다시 만들지 않고 조합합니다. 중앙 프록시를 추가하지 않아 고객 트래픽 경로와 기존 웹 애플리케이션 구성을 유지합니다.</p>
         </div>
         <div class="value-list">
-          <article><span>01</span><h3>기존 서비스 경로 유지</h3><p>클라이언트 요청은 Manager를 거치지 않습니다. Apache·Nginx에 연결된 ModSecurity가 현재 서버에서 검사하고 차단합니다.</p></article>
-          <article><span>02</span><h3>여러 서버를 한 곳에서 운영</h3><p>Manager에서 기업, 서버 그룹, 정책, 단계 배포, 패키지 상태와 보안 이벤트를 동일한 운영 범위로 확인합니다.</p></article>
-          <article><span>03</span><h3>데이터와 관리 서버 자체 보관</h3><p>Manager와 MariaDB를 호스팅사 인프라에 배포합니다. 고객 서버의 Agent는 Manager API로 발신 연결합니다.</p></article>
+          <article><span>01</span><h3>인라인 장비 없는 로컬 검사</h3><p>클라이언트 요청은 Manager를 거치지 않습니다. Apache·Nginx에 연결된 ModSecurity가 웹서버에서 직접 검사하고 차단합니다.</p></article>
+          <article><span>02</span><h3>고객 서버 설치는 두 패키지</h3><p>공통 mwaf-agent와 웹서버별 통합 패키지만 설치합니다. 배포판 웹서버와 운영자가 관리하는 커스텀 빌드를 구분해 적용합니다.</p></article>
+          <article><span>03</span><h3>오픈소스 기반의 자체 운영</h3><p>OWASP CRS·ModSecurity를 기반으로 Manager와 MariaDB를 호스팅사 인프라에 둡니다. 기업별 정책과 여러 서버의 상태·이벤트를 한 곳에서 관리합니다.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section operations" id="policy">
+      <div class="shell">
+        <div class="section-heading compact-heading">
+          <p class="eyebrow">SECURITY POLICY</p>
+          <h2>검증된 CRS를 기준으로<br>기업별 보호 수준을 운영합니다.</h2>
+          <p>CRS 소스를 가져오는 단계와 실제 정책을 게시하는 단계를 분리합니다. 검토한 시스템 정책을 기준으로 기업별 탐지·차단 설정과 예외만 관리합니다.</p>
+        </div>
+        <div class="operation-rail">
+          <article><span>01</span><div><h3>검증된 기준 정책</h3><p>OWASP CRS 4.28.0의 버전·커밋·아카이브 해시를 확인하고, 관리자가 검토한 뒤 수정 불가능한 새 시스템 정책 버전으로 게시합니다.</p></div></article>
+          <article><span>02</span><div><h3>보호 수준 설정</h3><p>탐지만 또는 탐지·차단, Paranoia Level, Inbound 차단 점수와 요청 본문 검사를 기업 정책으로 설정합니다.</p></div></article>
+          <article><span>03</span><div><h3>서비스 예외 관리</h3><p>URL, IP/CIDR, Rule ID·Target 예외와 제한된 추가 SecRule을 검증한 뒤 서명된 정책 리비전으로 생성합니다.</p></div></article>
+          <article><span>04</span><div><h3>통제된 배포와 복구</h3><p>자동·수동 승인·버전 고정 전략을 선택하고, 카나리·확대 배포와 웹서버 설정 검사 후 문제가 생기면 직전 성공 버전으로 롤백합니다.</p></div></article>
         </div>
       </div>
     </section>
@@ -139,35 +155,20 @@
     <section class="section architecture" id="architecture">
       <div class="shell architecture-grid">
         <div class="architecture-copy">
-          <p class="eyebrow">DEPLOYMENT ARCHITECTURE</p>
-          <h2>검사는 고객 서버에서,<br>운영은 Manager에서.</h2>
-          <p>웹 요청 경로와 정책·로그 관리 경로가 분리됩니다. Manager 연결이 중단돼도 웹서버는 마지막으로 적용된 정책을 계속 사용합니다.</p>
+          <p class="eyebrow">ARCHITECTURE &amp; RUNTIME</p>
+          <h2>요청 검사는 고객 서버에서,<br>정책과 로그는 Manager에서.</h2>
+          <p>웹 요청 경로와 관리 경로를 분리합니다. Agent는 Manager로 발신 연결해 정책을 주기적으로 확인하고 감사 로그를 전송하며, Manager가 일시 중단돼도 웹서버는 마지막 성공 정책으로 계속 동작합니다.</p>
           <dl>
-            <div><dt>고객 서버</dt><dd>mwaf-agent + 웹서버 통합 패키지</dd></div>
+            <div><dt>요청 검사</dt><dd>Apache/Nginx 프로세스의 ModSecurity + CRS</dd></div>
+            <div><dt>정책 적용</dt><dd>Agent polling → 서명 검증 → configtest → reload</dd></div>
+            <div><dt>이벤트 수집</dt><dd>JSON 감사 로그 spool → batch 전송</dd></div>
             <div><dt>관리 서버</dt><dd>Manager + MariaDB, Docker Compose</dd></div>
-            <div><dt>관리 연결</dt><dd>Agent 발신 mTLS</dd></div>
           </dl>
         </div>
         <div class="architecture-map" aria-label="M-WAF 구성도">
-          <div class="map-band data-band"><span>WEB REQUEST</span><div class="map-flow"><b>Internet</b><i>→</i><strong>Apache / Nginx<small>ModSecurity + CRS</small></strong><i>→</i><b>Web application</b></div></div>
+          <div class="map-band data-band"><span>DATA PLANE · 고객 요청</span><div class="map-flow"><b>Internet</b><i>→</i><strong>Apache / Nginx<small>ModSecurity + CRS</small></strong><i>→</i><b>WAS / Web application</b></div></div>
           <div class="map-separator"><span>요청은 Manager를 경유하지 않음</span></div>
-          <div class="map-band control-band"><span>CONTROL &amp; EVENTS</span><div class="map-flow"><b>Audit log</b><i>→</i><strong>mwaf-agent<small>spool · apply · heartbeat</small></strong><i>⇄</i><b>M-WAF Manager<small>MariaDB</small></b></div></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="section operations" id="operations">
-      <div class="shell">
-        <div class="section-heading compact-heading">
-          <p class="eyebrow">CENTRAL OPERATIONS</p>
-          <h2>운영자가 필요한 상태를<br>한 화면 흐름으로 연결합니다.</h2>
-          <p>서버 등록부터 정책 적용 결과와 보안 이벤트까지 Manager의 실제 메뉴 구조를 기준으로 운영합니다.</p>
-        </div>
-        <div class="operation-rail">
-          <article><span>01</span><div><h3>보호 서버</h3><p>Agent 연결, 웹서버·통합 방식, CRS, 정책과 패키지 적용 상태를 확인합니다.</p></div></article>
-          <article><span>02</span><div><h3>기업 정책</h3><p>시스템 정책을 기준으로 민감도, 임계점수, URL·IP 예외와 제한된 추가 규칙을 배포합니다.</p></div></article>
-          <article><span>03</span><div><h3>보안 이벤트</h3><p>기업, 그룹, 서버, 위험도, 처리 결과, Rule ID와 요청 경로로 탐지·차단 기록을 조회합니다.</p></div></article>
-          <article><span>04</span><div><h3>감사 및 시스템 운영</h3><p>기업과 사용자 변경, 오픈소스 CRS, 시스템 정책과 관리자 작업 이력을 분리해 관리합니다.</p></div></article>
+          <div class="map-band control-band"><span>CONTROL PLANE · 발신 mTLS</span><div class="map-flow"><b>Audit log</b><i>→</i><strong>mwaf-agent<small>spool · polling · apply</small></strong><i>⇄</i><b>M-WAF Manager<small>policy · event · MariaDB</small></b></div></div>
         </div>
       </div>
     </section>
@@ -204,25 +205,28 @@ sudo sh /tmp/mwaf-install.sh \
     <section class="section support" id="support">
       <div class="shell">
         <div class="section-heading compact-heading">
-          <p class="eyebrow">CURRENT MVP SCOPE</p>
-          <h2>지원 범위를 먼저 확인하십시오.</h2>
-          <p>현재 릴리스에서 자동 설치와 검증을 제공하는 범위입니다. 이 표 밖의 환경은 지원된다고 가정하지 않습니다.</p>
+          <p class="eyebrow">WEB SERVER &amp; WAS SUPPORT</p>
+          <h2>직접 지원 웹서버와<br>WAS 연동 범위를 구분합니다.</h2>
+          <p>모듈 설치와 버전 검증의 대상은 Apache·Nginx입니다. WAS는 두 웹서버 뒤에서 HTTP(S)로 연결되는 애플리케이션 계층이며, M-WAF 모듈을 WAS에 직접 설치하지 않습니다.</p>
         </div>
         <div class="support-layout">
-          <div class="support-table-wrap" tabindex="0" aria-label="M-WAF 지원 범위 표">
+          <div class="support-table-wrap" tabindex="0" aria-label="M-WAF 웹서버와 WAS 지원 범위 표">
             <table>
-              <thead><tr><th>구분</th><th>지원</th><th>설치 방식</th></tr></thead>
+              <thead><tr><th>대상</th><th>현재 검증 기준</th><th>적용 방식</th><th>지원 경계</th></tr></thead>
               <tbody>
-                <tr><th scope="row">운영체제</th><td>Ubuntu Server 24.04 LTS amd64</td><td>서명된 DEB</td></tr>
-                <tr><th scope="row">Apache</th><td>2.4.58 · ModSecurity 2.9.7 · CRS 4.28.0, 또는 호환 커스텀 빌드</td><td>distro / external</td></tr>
-                <tr><th scope="row">Nginx</th><td>1.24.0 · libmodsecurity 3.0.12 · CRS 4.28.0, 또는 Connector가 준비된 커스텀 빌드</td><td>distro / external</td></tr>
-                <tr><th scope="row">Manager</th><td>Linux amd64, Docker Engine·Compose plugin</td><td>Manager + MariaDB</td></tr>
+                <tr><th scope="row">운영체제</th><td>Ubuntu Server 24.04 LTS amd64</td><td>서명된 DEB</td><td>Agent와 웹서버 통합 패키지 공통 기준</td></tr>
+                <tr><th scope="row">Apache HTTP Server</th><td>2.4.58 · ModSecurity 2.9.7 · CRS 4.28.0</td><td>distro / external</td><td>배포판 패키지 또는 사전 준비된 호환 커스텀 빌드</td></tr>
+                <tr><th scope="row">Nginx</th><td>1.24.0 · Connector 1.0.3 · libmodsecurity 3.0.12 · CRS 4.28.0</td><td>distro / external</td><td>배포판 패키지 또는 Connector가 로드된 호환 커스텀 빌드</td></tr>
+                <tr><th scope="row">WAS / Web application</th><td>직접 설치·버전별 인증 대상 아님</td><td>지원 Apache/Nginx 뒤 HTTP(S) 연동</td><td>Tomcat·JEUS·WebLogic·WildFly/JBoss 등 WAS 제품과 버전은 별도 보증하지 않음</td></tr>
+                <tr><th scope="row">Manager</th><td>Linux amd64</td><td>Docker Engine·Compose</td><td>Manager + MariaDB를 별도 관리 서버에 배포</td></tr>
               </tbody>
             </table>
           </div>
           <aside class="scope-note">
+            <strong>지원 판정 기준</strong>
+            <p>WAS가 표에 없어도 요청이 지원 Apache/Nginx를 반드시 통과하면 보호할 수 있습니다. 이는 해당 WAS에 대한 직접 설치 지원이나 제품별 호환성 인증을 뜻하지 않습니다.</p>
             <strong>현재 지원하지 않음</strong>
-            <p>RPM 계열, ARM64, Windows, OpenResty, portable Agent, Connector 자동 컴파일, Manager HA와 공식 처리량 보증.</p>
+            <p>RPM 계열, ARM64, Windows, IIS, OpenResty, portable Agent, Connector 자동 컴파일, WAS 직접 설치, Manager HA와 공식 처리량 보증.</p>
             <a href="https://github.com/Fhwang0926/m-waf#supported-customer-web-server-matrix">버전 명세 확인</a>
           </aside>
         </div>
@@ -234,19 +238,19 @@ sudo sh /tmp/mwaf-install.sh \
         <details class="comparison-details">
           <summary><span><small>DEPLOYMENT MODEL REVIEW</small><strong>DeepFinder 공개 자료와 설치·운영 모델 비교</strong></span></summary>
           <div class="comparison-body">
-            <p>DeepFinder와 M-WAF는 모두 보호 웹서버에 소프트웨어를 설치하고 Manager에서 여러 서버를 관리하는 구조입니다. 다만 M-WAF는 ModSecurity·OWASP CRS 기반의 좁은 MVP이며 상용 제품의 지원 범위와 용량 보증을 제공하지 않습니다.</p>
+            <p>DeepFinder와 M-WAF는 모두 보호 서버에서 요청을 검사하고 Manager에서 여러 서버를 관리하는 소프트웨어 WAF 구조입니다. 아래 내용은 공급사 공개 설명의 정보 항목을 M-WAF의 현재 구현 범위와 대조한 것이며, 동일 환경의 제품 성능 비교가 아닙니다.</p>
             <div class="comparison-table-wrap" tabindex="0" aria-label="DeepFinder와 M-WAF 비교 표">
               <table>
                 <thead><tr><th>판단 기준</th><th>M-WAF MVP</th><th>DeepFinder 공개 자료</th></tr></thead>
                 <tbody>
-                  <tr><th scope="row">검사 위치</th><td>Apache·Nginx의 ModSecurity</td><td>보호 웹서버에 설치되는 Agent 모듈</td></tr>
-                  <tr><th scope="row">중앙 관리</th><td>정책·서버·패키지·감사 이벤트</td><td>정책 배포와 Agent 감사 데이터 보관</td></tr>
-                  <tr><th scope="row">공개 범위</th><td>코드와 오픈소스 기반 구성 공개</td><td>상용 소프트웨어와 제품 매뉴얼</td></tr>
-                  <tr><th scope="row">규모 근거</th><td>공식 용량 수치 없음</td><td>매뉴얼에 1,000개 이상 Agent 표현</td></tr>
+                  <tr><th scope="row">차별성</th><td>ModSecurity·OWASP CRS 기반의 공개 구성, 자체 호스팅 Manager, 고객 서버 패키지 2개</td><td>기존 네트워크 변경을 줄이는 웹서버 내 필터와 상용 운영·관제 선택지</td></tr>
+                  <tr><th scope="row">보안 정책</th><td>CRS 기준의 탐지/차단, 민감도·점수, 요청 본문, URL·IP·Rule 예외</td><td>Low·Medium·High 정책 레벨과 공급사 보안 기능</td></tr>
+                  <tr><th scope="row">구성·구동</th><td>ModSecurity 통합 패키지 + 별도 Agent + Manager/MariaDB</td><td>보호 서버의 Agent 보안모듈 + 선택 가능한 통합 Manager</td></tr>
+                  <tr><th scope="row">웹서버·WAS</th><td>Ubuntu 24.04 amd64의 Apache 2.4.58·Nginx 1.24.0 직접 지원, WAS는 뒷단 연동</td><td>마켓플레이스에 IIS 6.0+, Apache 2.0+, Nginx 1.8.x+와 J2EE WAS 범위 기재</td></tr>
                 </tbody>
               </table>
             </div>
-            <p class="comparison-source">2026-08-07 확인: DeepFinder <a href="https://www.deepfinder.co.kr/">제품 소개</a>와 <a href="https://docs.deepfinder.co.kr/ko/operation/part1/Architecture/">공개 구성 매뉴얼</a>. 동일 환경의 성능·탐지율 비교가 아닙니다.</p>
+            <p class="comparison-source">2026-08-07 확인: NAVER Cloud 공공기관용 <a href="https://www.gov-ncloud.com/marketplace/deepfinder">DeepFinder 마켓플레이스</a>, 공급사 <a href="https://www.deepfinder.co.kr/">제품 소개</a>와 <a href="https://docs.deepfinder.co.kr/ko/operation/part1/Architecture/">공개 구성 매뉴얼</a>. 공급사 공개 내용의 요약이며 독립적인 호환성·성능 인증이 아닙니다.</p>
           </div>
         </details>
       </div>
