@@ -54,12 +54,13 @@ if [ -z "$token" ]; then
     printf 'M-WAF enterprise install token: ' >&2
     if [ -t 0 ]; then
       stty -echo
+      trap 'stty echo' EXIT HUP INT TERM
       if ! IFS= read -r install_token; then
-        stty echo
         echo "could not read enterprise install token" >&2
         exit 2
       fi
       stty echo
+      trap - EXIT HUP INT TERM
     else
       IFS= read -r install_token || { echo "could not read enterprise install token" >&2; exit 2; }
     fi
