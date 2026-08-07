@@ -320,7 +320,7 @@ footer { padding: 35px 0; border-top: 1px solid #2e4966; background: var(--navy-
 .footer-links a { color: #aebdd0; font-size: 12px; }
 
 @media (max-width: 1020px) {
-  .hero-grid, .section-heading, .installation-layout, .deploy-panel, .opensource-inner { grid-template-columns: 1fr; }
+  .hero-grid, .section-heading, .installation-layout, .deploy-panel, .opensource-inner { grid-template-columns: minmax(0, 1fr); }
   .hero-grid { gap: 50px; }
   .summary-panel { width: min(680px, 100%); }
   .section-heading { gap: 16px; }

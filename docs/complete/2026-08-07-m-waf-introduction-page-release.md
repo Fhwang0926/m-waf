@@ -29,3 +29,5 @@ Manager, Agent, DB, 배포 Compose의 다른 작업 중 변경은 이번 Pages �
 
 - HTML과 CSS 프론트엔드 빌드·테스트는 저장소 작업 지침에 따라 실행하지 않는다.
 - `git diff --check`와 배포 후 실제 GitHub Pages의 데스크톱·모바일 렌더링을 확인한다.
+- 공개 모바일 화면의 설치 영역에서 발생한 가로 스크롤을 확인하고 최소 콘텐츠 폭을 제한했다.
+- Pages 상태 확인 대기 시간을 GitHub Actions 허용 상한에 맞춰 불필요한 경고를 제거했다.
