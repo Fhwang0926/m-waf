@@ -7,7 +7,6 @@ repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 base_compose="$repo_root/deploy/compose/compose.yaml"
 e2e_compose="$script_dir/compose.yaml"
 prepare_script="$repo_root/deploy/compose/prepare.sh"
-project_name=mwaf-e2e
 runtime_dir=${MWAF_E2E_RUNTIME_DIR:-$repo_root/.local/mwaf-e2e}
 case "$runtime_dir" in
   /*) ;;
@@ -28,6 +27,8 @@ stored_value() {
   sed -n "s/^${key}=//p" "$env_file" | tail -n 1
 }
 
+project_name=${MWAF_E2E_PROJECT_NAME:-$(stored_value MWAF_E2E_PROJECT_NAME)}
+project_name=${project_name:-mwaf-e2e}
 manager_image=${MWAF_E2E_MANAGER_IMAGE:-$(stored_value MWAF_MANAGER_IMAGE)}
 manager_image=${manager_image:-ghcr.io/fhwang0926/m-waf-manager:latest}
 admin_port=${MWAF_E2E_ADMIN_PORT:-$(stored_value MWAF_ADMIN_PORT)}
@@ -44,8 +45,14 @@ enterprise_name=${MWAF_E2E_ENTERPRISE_NAME:-mwaf-e2e}
 group_name=${MWAF_E2E_GROUP_NAME:-mwaf-e2e-webservers}
 policy_name=${MWAF_E2E_POLICY_NAME:-mwaf-e2e-block-policy}
 admin_display_name=${MWAF_E2E_ADMIN_DISPLAY_NAME:-M-WAF E2E Administrator}
-admin_url="https://localhost:$admin_port"
-agent_url="https://manager:$agent_port"
+admin_url_input=${MWAF_E2E_ADMIN_URL:-$(stored_value MWAF_E2E_ADMIN_URL)}
+agent_url_input=${MWAF_E2E_AGENT_URL:-$(stored_value MWAF_E2E_AGENT_URL)}
+ca_cert_input=${MWAF_E2E_CA_CERT:-$(stored_value MWAF_E2E_CA_CERT)}
+admin_username_input=${MWAF_E2E_ADMIN_USERNAME:-}
+admin_password_file_input=${MWAF_E2E_ADMIN_PASSWORD_FILE:-}
+remote_mode=0
+admin_url=""
+agent_url=""
 
 usage() {
   cat <<'EOF'
@@ -63,6 +70,12 @@ Options:
   --manager-image IMAGE   Tagged or digest-pinned Manager image
   --admin-port PORT       Host Admin HTTPS port (default: 8443)
   --agent-port PORT       Host Agent HTTPS port (default: 10443)
+  --admin-url URL         Existing Manager Admin HTTPS origin
+  --agent-url URL         Existing Manager Agent HTTPS origin
+  --ca-cert FILE          CA certificate for an existing Manager
+  --admin-username USER   Existing system-administrator username
+  --admin-password-file FILE
+                          Existing administrator password file
   --apache-port PORT      Host Apache test port (default: 18080)
   --nginx-port PORT       Host Nginx test port (default: 18081)
   -h, --help              Show this help
@@ -70,6 +83,10 @@ Options:
 Set MWAF_E2E_ADMIN_PASSWORD before the first run to choose the generated system
 administrator password. If omitted, a random password is stored with mode 0600
 under .local/mwaf-e2e and is never printed.
+
+Supplying --admin-url selects remote mode. Remote mode also requires --agent-url,
+--ca-cert, and existing administrator credentials. It starts only the two customer
+containers and never initializes or replaces the existing Manager database.
 EOF
 }
 
@@ -87,6 +104,17 @@ valid_port() {
     ''|*[!0-9]*) return 1 ;;
   esac
   [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+valid_https_origin() {
+  case "$1" in
+    https://?*) ;;
+    *) return 1 ;;
+  esac
+  authority=${1#https://}
+  case "$authority" in
+    ""|*/*|*\?*|*\#*|*" "*) return 1 ;;
+  esac
 }
 
 compose() {
@@ -149,6 +177,11 @@ while [ "$#" -gt 0 ]; do
     --manager-image) [ "$#" -ge 2 ] || fail "--manager-image requires a value"; manager_image=$2; shift 2 ;;
     --admin-port) [ "$#" -ge 2 ] || fail "--admin-port requires a value"; admin_port=$2; shift 2 ;;
     --agent-port) [ "$#" -ge 2 ] || fail "--agent-port requires a value"; agent_port=$2; shift 2 ;;
+    --admin-url) [ "$#" -ge 2 ] || fail "--admin-url requires a value"; admin_url_input=$2; shift 2 ;;
+    --agent-url) [ "$#" -ge 2 ] || fail "--agent-url requires a value"; agent_url_input=$2; shift 2 ;;
+    --ca-cert) [ "$#" -ge 2 ] || fail "--ca-cert requires a value"; ca_cert_input=$2; shift 2 ;;
+    --admin-username) [ "$#" -ge 2 ] || fail "--admin-username requires a value"; admin_username_input=$2; shift 2 ;;
+    --admin-password-file) [ "$#" -ge 2 ] || fail "--admin-password-file requires a value"; admin_password_file_input=$2; shift 2 ;;
     --apache-port) [ "$#" -ge 2 ] || fail "--apache-port requires a value"; apache_port=$2; shift 2 ;;
     --nginx-port) [ "$#" -ge 2 ] || fail "--nginx-port requires a value"; nginx_port=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -156,8 +189,21 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-admin_url="https://localhost:$admin_port"
-agent_url="https://manager:$agent_port"
+if [ -n "$admin_url_input$agent_url_input$ca_cert_input" ]; then
+  [ -n "$admin_url_input" ] || fail "--admin-url is required for remote mode"
+  [ -n "$agent_url_input" ] || fail "--agent-url is required for remote mode"
+  [ -n "$ca_cert_input" ] || fail "--ca-cert is required for remote mode"
+  remote_mode=1
+  admin_url=${admin_url_input%/}
+  agent_url=${agent_url_input%/}
+  case "$ca_cert_input" in
+    /*) ;;
+    *) ca_cert_input="$repo_root/$ca_cert_input" ;;
+  esac
+else
+  admin_url="https://localhost:$admin_port"
+  agent_url="https://manager:$agent_port"
+fi
 
 preflight_common() {
   require_command docker
@@ -177,57 +223,118 @@ preflight_full() {
   require_command openssl
   require_command awk
   require_command sed
-  for port in "$admin_port" "$agent_port" "$apache_port" "$nginx_port"; do
+  for port in "$apache_port" "$nginx_port"; do
     valid_port "$port" || fail "invalid port: $port"
   done
-  [ "$admin_port" != "$agent_port" ] || fail "Admin and Agent ports must differ"
   [ "$apache_port" != "$nginx_port" ] || fail "Apache and Nginx ports must differ"
+  if [ "$remote_mode" -eq 1 ]; then
+    valid_https_origin "$admin_url" || fail "remote Admin URL must be an HTTPS origin without a path: $admin_url"
+    valid_https_origin "$agent_url" || fail "remote Agent URL must be an HTTPS origin without a path: $agent_url"
+    [ "$admin_url" != "$agent_url" ] || fail "remote Admin and Agent URLs must differ"
+    [ -f "$ca_cert_input" ] || fail "remote Manager CA certificate not found: $ca_cert_input"
+    openssl x509 -in "$ca_cert_input" -noout >/dev/null 2>&1 || fail "remote Manager CA certificate is invalid: $ca_cert_input"
+  else
+    for port in "$admin_port" "$agent_port"; do
+      valid_port "$port" || fail "invalid port: $port"
+    done
+    [ "$admin_port" != "$agent_port" ] || fail "Admin and Agent ports must differ"
+    [ -n "$manager_image" ] || fail "Manager image is required"
+    case "$manager_image" in
+      *[!A-Za-z0-9_./:@+-]*) fail "Manager image contains unsupported characters" ;;
+    esac
+  fi
   seen_ports=" "
-  for port in "$admin_port" "$agent_port" "$apache_port" "$nginx_port"; do
+  checked_ports="$apache_port $nginx_port"
+  if [ "$remote_mode" -eq 0 ]; then
+    checked_ports="$admin_port $agent_port $checked_ports"
+  fi
+  for port in $checked_ports; do
     case "$seen_ports" in
       *" $port "*) fail "host ports must be unique: $port is repeated" ;;
     esac
     seen_ports="$seen_ports$port "
   done
-  [ -n "$manager_image" ] || fail "Manager image is required"
-  case "$manager_image" in
-    *[!A-Za-z0-9_./:@+-]*) fail "Manager image contains unsupported characters" ;;
-  esac
   case "$runtime_dir" in
     *" "*|*"#"*) fail "MWAF_E2E_RUNTIME_DIR must not contain spaces or #" ;;
   esac
   if [ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$project_name")" ] && command -v ss >/dev/null 2>&1; then
     listening=$(ss -H -ltn 2>/dev/null | awk '{print $4}')
-    for port in "$admin_port" "$agent_port" "$apache_port" "$nginx_port"; do
+    for port in $checked_ports; do
       if printf '%s\n' "$listening" | grep -Eq "[:.]${port}$"; then
         fail "host port $port is already in use"
       fi
     done
   fi
-  if [ "$manager_image" = ghcr.io/fhwang0926/m-waf-manager:latest ]; then
+  if [ "$remote_mode" -eq 0 ] && [ "$manager_image" = ghcr.io/fhwang0926/m-waf-manager:latest ]; then
     echo "Warning: latest is mutable; use --manager-image with a release tag or digest for reproducible evidence." >&2
   fi
+}
+
+prepare_admin_credentials() {
+  username_file="$runtime_dir/admin.username"
+  password_file="$runtime_dir/admin.password"
+  if [ -e "$username_file" ] || [ -e "$password_file" ]; then
+    [ -s "$username_file" ] && [ -s "$password_file" ] || fail "administrator credential files are incomplete in $runtime_dir"
+    return 0
+  fi
+
+  if [ "$remote_mode" -eq 1 ]; then
+    admin_username=$admin_username_input
+    [ -n "$admin_username" ] || fail "remote mode requires --admin-username or MWAF_E2E_ADMIN_USERNAME"
+    if [ -n "$admin_password_file_input" ]; then
+      case "$admin_password_file_input" in
+        /*) ;;
+        *) admin_password_file_input="$repo_root/$admin_password_file_input" ;;
+      esac
+      [ -s "$admin_password_file_input" ] || fail "administrator password file is missing or empty: $admin_password_file_input"
+      admin_password=$(cat "$admin_password_file_input")
+    else
+      admin_password=${MWAF_E2E_ADMIN_PASSWORD:-}
+      [ -n "$admin_password" ] || fail "remote mode requires --admin-password-file or MWAF_E2E_ADMIN_PASSWORD"
+    fi
+  else
+    admin_username=${MWAF_E2E_ADMIN_USERNAME:-mwaf-e2e-admin}
+    admin_password=${MWAF_E2E_ADMIN_PASSWORD:-$(openssl rand -hex 24)}
+  fi
+
+  printf '%s' "$admin_username" | grep -Eq '^[A-Za-z0-9._-]{3,128}$' || fail "MWAF_E2E_ADMIN_USERNAME is invalid"
+  [ "${#admin_password}" -ge 12 ] || fail "MWAF_E2E_ADMIN_PASSWORD must be at least 12 characters"
+  printf '%s\n' "$admin_username" > "$username_file"
+  printf '%s' "$admin_password" > "$password_file"
+  chmod 0600 "$username_file" "$password_file"
+  admin_password=""
 }
 
 prepare_runtime() {
   umask 077
   mkdir -p "$runtime_dir" "$secrets_dir" "$runtime_dir/results"
+  prepare_admin_credentials
 
-  username_file="$runtime_dir/admin.username"
-  password_file="$runtime_dir/admin.password"
-  if [ -e "$username_file" ] || [ -e "$password_file" ]; then
-    [ -s "$username_file" ] && [ -s "$password_file" ] || fail "administrator credential files are incomplete in $runtime_dir"
-  else
-    admin_username=${MWAF_E2E_ADMIN_USERNAME:-mwaf-e2e-admin}
-    admin_password=${MWAF_E2E_ADMIN_PASSWORD:-$(openssl rand -hex 24)}
-    printf '%s' "$admin_username" | grep -Eq '^[A-Za-z0-9._-]{3,128}$' || fail "MWAF_E2E_ADMIN_USERNAME is invalid"
-    [ "${#admin_password}" -ge 12 ] || fail "MWAF_E2E_ADMIN_PASSWORD must be at least 12 characters"
-    printf '%s\n' "$admin_username" > "$username_file"
-    printf '%s' "$admin_password" > "$password_file"
-    chmod 0600 "$username_file" "$password_file"
+  if [ "$remote_mode" -eq 1 ]; then
+    runtime_ca="$secrets_dir/mwaf_ca_cert.pem"
+    if [ "$ca_cert_input" != "$runtime_ca" ]; then
+      cp "$ca_cert_input" "$runtime_ca"
+    fi
+    chmod 0644 "$runtime_ca"
+    ca_cert_input=$runtime_ca
+    cat > "$env_file" <<EOF
+MWAF_E2E_PROJECT_NAME=$project_name
+MWAF_E2E_REMOTE=1
+MWAF_E2E_ADMIN_URL=$admin_url
+MWAF_E2E_AGENT_URL=$agent_url
+MWAF_E2E_CA_CERT=$runtime_ca
+MWAF_E2E_RUNTIME_DIR=$runtime_dir
+MWAF_E2E_WEB_BIND=$web_bind
+MWAF_E2E_APACHE_PORT=$apache_port
+MWAF_E2E_NGINX_PORT=$nginx_port
+EOF
+    chmod 0600 "$env_file"
+    compose config --quiet
+    return 0
   fi
 
   cat > "$env_file" <<EOF
+MWAF_E2E_PROJECT_NAME=$project_name
 MARIADB_IMAGE=mariadb:11.8.6@sha256:78a5047d3ba33975f183f183c2464cc7f1eab13ec8667e57cc9a5821d6da7577
 MWAF_MANAGER_IMAGE=$manager_image
 MWAF_DB_NAME=mwaf
@@ -262,6 +369,14 @@ wait_manager() {
   fail "Manager did not become ready within 180 seconds"
 }
 
+verify_remote_manager() {
+  [ "$remote_mode" -eq 1 ] || return 0
+  curl --fail --silent --show-error --connect-timeout 5 --max-time 15 --cacert "$secrets_dir/mwaf_ca_cert.pem" \
+    "$admin_url/health/ready" >/dev/null || fail "remote Manager Admin endpoint or CA verification failed: $admin_url"
+  curl --fail --silent --show-error --connect-timeout 5 --max-time 15 --cacert "$secrets_dir/mwaf_ca_cert.pem" \
+    "$agent_url/bootstrap/v1/install.sh" -o /dev/null || fail "remote Manager Agent endpoint or CA verification failed: $agent_url"
+}
+
 admin_get() {
   path=$1
   output=$2
@@ -280,6 +395,7 @@ login_admin() {
     --cookie "$cookie_jar" --cookie-jar "$cookie_jar" "$admin_url/setup" -o "$setup_page"
 
   if grep -q 'FIRST-TIME SETUP' "$setup_page"; then
+    [ "$remote_mode" -eq 0 ] || fail "remote Manager has not completed first-time setup; initialize it through the Admin UI before E2E testing"
     csrf=$(extract_csrf "$setup_page")
     [ -n "$csrf" ] || fail "could not read setup CSRF token"
     status=$(curl --silent --show-error --cacert "$secrets_dir/mwaf_ca_cert.pem" \
@@ -505,9 +621,15 @@ up_stack() {
   preflight_full
   acquire_lock
   prepare_runtime
-  echo "Starting isolated Manager and systemd customer containers..."
-  compose pull mariadb manager
-  compose up -d --build mariadb manager customer-apache customer-nginx
+  if [ "$remote_mode" -eq 1 ]; then
+    verify_remote_manager
+    echo "Starting systemd customer containers against remote Manager $admin_url..."
+    compose up -d --build customer-apache customer-nginx
+  else
+    echo "Starting isolated Manager and systemd customer containers..."
+    compose pull mariadb manager
+    compose up -d --build mariadb manager customer-apache customer-nginx
+  fi
   wait_manager
   login_admin
   ensure_enterprise
@@ -526,6 +648,7 @@ verify_stack() {
   [ -f "$env_file" ] || fail "run the up command first"
   result_dir="$runtime_dir/results/$(date -u +%Y%m%dT%H%M%SZ)-$$"
   mkdir -p "$result_dir"
+  verify_remote_manager
   wait_manager
   login_admin
   ensure_enterprise
@@ -543,12 +666,14 @@ verify_stack() {
   wait_block_events
 
   commit=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || printf unknown)
+  manager_mode=isolated
+  [ "$remote_mode" -eq 0 ] || manager_mode=remote
   jq -n \
-    --arg status PASS --arg commit "$commit" --arg manager_image "$manager_image" \
-    --arg admin_url "$admin_url" --arg apache_server_id "$apache_server_id" \
+    --arg status PASS --arg commit "$commit" --arg manager_mode "$manager_mode" --arg manager_image "$manager_image" \
+    --arg admin_url "$admin_url" --arg agent_url "$agent_url" --arg apache_server_id "$apache_server_id" \
     --arg nginx_server_id "$nginx_server_id" --arg enterprise_id "$enterprise_id" \
     --arg group_id "$group_id" --arg policy_name "$policy_name" \
-    '{status:$status,commit:$commit,manager_image:$manager_image,admin_url:$admin_url,enterprise_id:$enterprise_id,group_id:$group_id,policy_name:$policy_name,servers:{apache:$apache_server_id,nginx:$nginx_server_id},checks:["agents_online","group_policy_applied","benign_200","excluded_path_200","blocked_path_403","blocked_events_collected"]}' \
+    '{status:$status,commit:$commit,manager_mode:$manager_mode,manager_image:(if $manager_mode == "remote" then null else $manager_image end),admin_url:$admin_url,agent_url:$agent_url,enterprise_id:$enterprise_id,group_id:$group_id,policy_name:$policy_name,servers:{apache:$apache_server_id,nginx:$nginx_server_id},checks:["agents_online","group_policy_applied","benign_200","excluded_path_200","blocked_path_403","blocked_events_collected"]}' \
     > "$result_dir/summary.json"
   printf 'PASS\n' > "$result_dir/status.txt"
   collect_diagnostics

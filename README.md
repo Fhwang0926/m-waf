@@ -295,6 +295,18 @@ The first run creates a random system-administrator password under `.local/mwaf-
 
 The `all` command verifies that both Agents become online, one enterprise-scoped group policy reaches `APPLIED` on both servers, normal and excluded requests return 200, a restricted custom test rule returns 403, and both blocked events arrive at Manager. Evidence and size-bounded diagnostic logs are written under `.local/mwaf-e2e/results/<run-id>` without enrollment tokens or passwords.
 
+To run the same customer-container flow against the existing test Manager at `https://192.168.7.200:18443`, use its Agent API at `https://192.168.7.200:10443` and the CA certificate generated on that Manager host. The remote mode never starts MariaDB or another Manager and never performs first-time setup. It does create or reuse the named `mwaf-e2e` enterprise, group, policy, enrollment tokens, server records, and test events in the existing Manager:
+
+```sh
+export MWAF_E2E_ADMIN_USERNAME='EXISTING_SYSTEM_ADMIN'
+export MWAF_E2E_ADMIN_PASSWORD_FILE='/secure/path/admin.password'
+make e2e-remote
+```
+
+By default, `make e2e-remote` reads `deploy/compose/secrets/mwaf_ca_cert.pem`, which is correct when the test runs from the checkout used to deploy that Manager. From another test host, securely copy only that public CA certificate and override `MWAF_E2E_REMOTE_CA_CERT=/secure/path/mwaf_ca_cert.pem`. Do not substitute an unrelated local CA and do not disable TLS verification. The remote test uses a separate Compose project and `.local/mwaf-e2e-192-168-7-200` runtime so it cannot reuse Agent state from the isolated local E2E stack.
+
+After the first run, `make e2e-remote-verify` repeats policy, blocking, and event checks with the preserved remote test state. `make e2e-remote-down` removes only the two local customer containers and their network; it preserves their named volumes and does not delete Manager-side audit records.
+
 Operational commands are also exposed through Make:
 
 ```sh

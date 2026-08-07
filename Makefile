@@ -1,6 +1,12 @@
 SHELL := /bin/sh
 
-.PHONY: fmt build-manager build-agent dev dev-down dev-db-logs prepare deploy pull prepare-dev deploy-dev pull-dev down logs e2e e2e-up e2e-verify e2e-status e2e-logs e2e-down
+.PHONY: fmt build-manager build-agent dev dev-down dev-db-logs prepare deploy pull prepare-dev deploy-dev pull-dev down logs e2e e2e-up e2e-verify e2e-status e2e-logs e2e-down e2e-remote e2e-remote-verify e2e-remote-down
+
+MWAF_E2E_REMOTE_ADMIN_URL ?= https://192.168.7.200:18443
+MWAF_E2E_REMOTE_AGENT_URL ?= https://192.168.7.200:10443
+MWAF_E2E_REMOTE_CA_CERT ?= deploy/compose/secrets/mwaf_ca_cert.pem
+MWAF_E2E_REMOTE_RUNTIME_DIR ?= .local/mwaf-e2e-192-168-7-200
+MWAF_E2E_REMOTE_PROJECT ?= mwaf-e2e-192-168-7-200
 
 fmt:
 	gofmt -w cmd internal migrations web/assets.go
@@ -60,3 +66,12 @@ e2e-logs:
 
 e2e-down:
 	./deploy/e2e/run.sh down
+
+e2e-remote:
+	MWAF_E2E_RUNTIME_DIR="$(MWAF_E2E_REMOTE_RUNTIME_DIR)" MWAF_E2E_PROJECT_NAME="$(MWAF_E2E_REMOTE_PROJECT)" ./deploy/e2e/run.sh all --admin-url "$(MWAF_E2E_REMOTE_ADMIN_URL)" --agent-url "$(MWAF_E2E_REMOTE_AGENT_URL)" --ca-cert "$(MWAF_E2E_REMOTE_CA_CERT)"
+
+e2e-remote-verify:
+	MWAF_E2E_RUNTIME_DIR="$(MWAF_E2E_REMOTE_RUNTIME_DIR)" ./deploy/e2e/run.sh verify
+
+e2e-remote-down:
+	MWAF_E2E_RUNTIME_DIR="$(MWAF_E2E_REMOTE_RUNTIME_DIR)" ./deploy/e2e/run.sh down
