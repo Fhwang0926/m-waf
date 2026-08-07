@@ -145,6 +145,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.Handle("POST /install-tokens/{id}/revoke", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.revokeInstallToken))))
 	mux.Handle("GET /enterprises", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.enterprises))))
 	mux.Handle("POST /enterprises", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.createEnterprise))))
+	mux.Handle("POST /enterprises/{id}/delete", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.deleteEnterprise))))
 	mux.Handle("GET /settings", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.systemSettings))))
 	mux.Handle("POST /settings", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.updateSystemSettings))))
 	mux.Handle("GET /users", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.users))))
@@ -222,41 +223,40 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		hasUsers, err := s.store.HasAdminUsers(r.Context())
 		if err != nil {
-			http.Error(w, "load administrator configuration", http.StatusInternalServerError)
+			s.renderLogin(w, r, http.StatusInternalServerError, "로그인 설정을 불러올 수 없습니다. 잠시 후 다시 시도하세요.", "")
 			return
 		}
 		if !hasUsers {
 			http.Redirect(w, r, "/setup", http.StatusSeeOther)
 			return
 		}
-		_ = s.templates.ExecuteTemplate(w, "login.html", map[string]any{"PasswordChanged": r.URL.Query().Get("password_changed") == "1"})
+		s.renderLogin(w, r, http.StatusOK, "", "")
 		return
 	}
 	remote := remoteIP(r)
 	if !s.loginLimiter.allow(remote) {
-		http.Error(w, "too many login attempts", http.StatusTooManyRequests)
+		s.renderLogin(w, r, http.StatusTooManyRequests, "로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.", "")
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.renderLogin(w, r, http.StatusBadRequest, "입력 내용을 읽을 수 없습니다. 다시 입력해 주세요.", "")
 		return
 	}
 	username := strings.TrimSpace(r.FormValue("username"))
 	user, err := s.store.UserByUsername(r.Context(), username)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		http.Error(w, "login unavailable", http.StatusInternalServerError)
+		s.renderLogin(w, r, http.StatusInternalServerError, "로그인을 처리할 수 없습니다. 잠시 후 다시 시도하세요.", username)
 		return
 	}
 	if err != nil || !user.Active || !verifyPassword(r.FormValue("password"), user.PasswordHash) {
 		s.loginLimiter.fail(remote)
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = s.templates.ExecuteTemplate(w, "login.html", map[string]any{"Error": "로그인 정보가 올바르지 않습니다."})
+		s.renderLogin(w, r, http.StatusUnauthorized, "로그인 정보가 올바르지 않습니다.", username)
 		return
 	}
 	s.loginLimiter.reset(remote)
 	token, data, err := s.sessions.create(user)
 	if err != nil {
-		http.Error(w, "session error", http.StatusInternalServerError)
+		s.renderLogin(w, r, http.StatusInternalServerError, "로그인 세션을 만들 수 없습니다. 잠시 후 다시 시도하세요.", username)
 		return
 	}
 	s.store.RecordLogin(r.Context(), user.ID)
@@ -264,9 +264,19 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+func (s *Server) renderLogin(w http.ResponseWriter, r *http.Request, status int, pageError, username string) {
+	w.Header().Set("Cache-Control", "no-store")
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	_ = s.templates.ExecuteTemplate(w, "login.html", map[string]any{
+		"Error": pageError, "Username": username, "PasswordChanged": r.URL.Query().Get("password_changed") == "1",
+	})
+}
+
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
 		return
 	}
 	clearSessionCookie(w)
@@ -275,21 +285,21 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	session := sessionFrom(r)
-	servers, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 10)
+	summary, err := s.store.DashboardSummary(r.Context(), session.ScopeEnterpriseID(), time.Now().UTC())
 	if err != nil {
-		http.Error(w, "load servers", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "운영 현황을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	events, err := s.store.ListEvents(r.Context(), session.ScopeEnterpriseID(), 10)
+	servers, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 10)
 	if err != nil {
-		http.Error(w, "load events", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 현황을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	bundleVersion := "unavailable"
 	if s.catalog != nil {
 		bundleVersion = s.catalog.Manifest().BundleVersion
 	}
-	data := s.viewData(r, "dashboard", map[string]any{"Servers": servers, "Events": events, "BundleVersion": bundleVersion, "Ready": s.catalog != nil})
+	data := s.viewData(r, "dashboard", map[string]any{"Summary": summary, "Servers": servers, "BundleVersion": bundleVersion, "Ready": s.catalog != nil})
 	if s.catalogErr != nil {
 		data["Notice"] = "Package bundle을 사용할 수 없습니다: " + s.catalogErr.Error()
 	}
@@ -297,10 +307,14 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) servers(w http.ResponseWriter, r *http.Request) {
+	s.renderServers(w, r, http.StatusOK, "")
+}
+
+func (s *Server) renderServers(w http.ResponseWriter, r *http.Request, status int, pageError string) {
 	session := sessionFrom(r)
 	items, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 500)
 	if err != nil {
-		http.Error(w, "load servers", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	if s.catalog != nil {
@@ -309,7 +323,10 @@ func (s *Server) servers(w http.ResponseWriter, r *http.Request) {
 			items[i].CanRollbackPackages = rollbackErr == nil
 		}
 	}
-	_ = s.templates.ExecuteTemplate(w, "servers.html", s.viewData(r, "servers", map[string]any{"Servers": items, "Notice": strings.TrimSpace(r.URL.Query().Get("notice"))}))
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	_ = s.templates.ExecuteTemplate(w, "servers.html", s.viewData(r, "servers", map[string]any{"Servers": items, "Notice": strings.TrimSpace(r.URL.Query().Get("notice")), "Error": pageError}))
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
@@ -336,7 +353,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	filter.Offset = (page - 1) * pageSize
 	items, err := s.store.ListEventsFiltered(r.Context(), session.ScopeEnterpriseID(), filter, pageSize+1)
 	if err != nil {
-		http.Error(w, "load events", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "이벤트 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	hasNext := len(items) > pageSize
@@ -345,7 +362,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 	servers, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 500)
 	if err != nil {
-		http.Error(w, "load servers", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "이벤트 필터를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	query := r.URL.Query()
@@ -373,34 +390,66 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListEnterprisePolicies(r.Context(), sessionFrom(r).ScopeEnterpriseID(), 500)
 	if err != nil {
-		http.Error(w, "load policies", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	_ = s.templates.ExecuteTemplate(w, "policies.html", s.viewData(r, "policies", map[string]any{"Policies": items}))
 }
 
 func (s *Server) newPolicy(w http.ResponseWriter, r *http.Request) {
+	s.renderPolicyForm(w, r, http.StatusOK, "", nil)
+}
+
+func policyFormState(r *http.Request) map[string]any {
+	return map[string]any{
+		"FormTemplateKey":   strings.TrimSpace(r.FormValue("template_key")),
+		"FormName":          truncate(strings.TrimSpace(r.FormValue("name")), 255),
+		"FormDescription":   truncate(strings.TrimSpace(r.FormValue("description")), 1024),
+		"FormTarget":        strings.TrimSpace(r.FormValue("target")),
+		"FormStrategy":      strings.TrimSpace(r.FormValue("update_strategy")),
+		"FormMode":          strings.TrimSpace(r.FormValue("mode")),
+		"FormParanoia":      strings.TrimSpace(r.FormValue("paranoia_level")),
+		"FormScore":         strings.TrimSpace(r.FormValue("inbound_score")),
+		"FormRequestBody":   r.FormValue("request_body") == "on",
+		"FormExcludedPaths": r.FormValue("excluded_paths"),
+		"FormExcludedIPs":   r.FormValue("excluded_ips"),
+		"FormCustomRules":   r.FormValue("custom_rules"),
+	}
+}
+
+func (s *Server) renderPolicyForm(w http.ResponseWriter, r *http.Request, status int, pageError string, form map[string]any) {
 	session := sessionFrom(r)
 	servers, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 500)
 	if err != nil {
-		http.Error(w, "load servers", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "정책 대상을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	groups, err := s.store.ListGroups(r.Context(), session.ScopeEnterpriseID())
 	if err != nil {
-		http.Error(w, "load server groups", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	_ = s.templates.ExecuteTemplate(w, "policy.html", s.viewData(r, "policies", map[string]any{
-		"Servers": servers, "Groups": groups, "PolicyTemplates": s.policyCatalog.ListLatest(), "DefaultTemplate": s.policyCatalog.Default(),
-	}))
+	defaultTemplate := s.policyCatalog.Default()
+	data := map[string]any{
+		"Servers": servers, "Groups": groups, "PolicyTemplates": s.policyCatalog.ListLatest(), "DefaultTemplate": defaultTemplate,
+		"Error": pageError, "FormTemplateKey": defaultTemplate.Key, "FormStrategy": PolicyStrategyManual, "FormMode": "DetectionOnly",
+		"FormParanoia": "1", "FormScore": "5", "FormRequestBody": true,
+	}
+	for key, value := range form {
+		data[key] = value
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	_ = s.templates.ExecuteTemplate(w, "policy.html", s.viewData(r, "policies", data))
 }
 
 func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
 		return
 	}
+	form := policyFormState(r)
 	name := truncate(strings.TrimSpace(r.FormValue("name")), 255)
 	description := truncate(strings.TrimSpace(r.FormValue("description")), 1024)
 	target := strings.TrimSpace(r.FormValue("target"))
@@ -410,14 +459,14 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	policyTemplate, ok := s.policyCatalog.Latest(templateKey)
 	if !ok {
-		http.Error(w, "지원하지 않는 시스템 정책 템플릿입니다.", http.StatusBadRequest)
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "지원하지 않는 시스템 정책 템플릿입니다.", form)
 		return
 	}
 	mode := strings.TrimSpace(r.FormValue("mode"))
 	paranoiaLevel, paranoiaErr := strconv.Atoi(strings.TrimSpace(r.FormValue("paranoia_level")))
 	inboundScore, scoreErr := strconv.Atoi(strings.TrimSpace(r.FormValue("inbound_score")))
 	if name == "" || target == "" || paranoiaErr != nil || scoreErr != nil {
-		http.Error(w, "정책 이름, 대상과 유효한 세부 설정이 필요합니다.", http.StatusBadRequest)
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 이름, 대상과 유효한 세부 설정을 확인하세요.", form)
 		return
 	}
 	strategy := strings.TrimSpace(r.FormValue("update_strategy"))
@@ -425,7 +474,7 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		strategy = PolicyStrategyManual
 	}
 	if strategy != PolicyStrategyManual && strategy != PolicyStrategyAutomatic && strategy != PolicyStrategyPinned {
-		http.Error(w, "지원하지 않는 업데이트 전략입니다.", http.StatusBadRequest)
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "지원하지 않는 업데이트 전략입니다.", form)
 		return
 	}
 	metadata := ManagedPolicyMetadata{
@@ -435,35 +484,35 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	artifact, settingsJSON, err := buildManagedPolicyArtifact(mode, paranoiaLevel, inboundScore, r.FormValue("request_body") == "on", r.FormValue("excluded_paths"), r.FormValue("excluded_ips"), r.FormValue("custom_rules"), metadata)
 	if err != nil {
-		http.Error(w, "정책 설정이 올바르지 않습니다: "+err.Error(), http.StatusBadRequest)
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 설정이 올바르지 않습니다: "+err.Error(), form)
 		return
 	}
 	session := sessionFrom(r)
 	enterpriseID, serverIDs, err := s.store.ResolvePolicyTarget(r.Context(), session.ScopeEnterpriseID(), target)
 	if err != nil {
-		http.Error(w, "정책 대상을 찾을 수 없습니다: "+err.Error(), http.StatusBadRequest)
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 대상을 찾을 수 없습니다: "+err.Error(), form)
 		return
 	}
 	servers, err := s.store.ListServers(r.Context(), enterpriseID, systemPolicyServerLimit)
 	if err != nil {
-		http.Error(w, "load policy target servers", http.StatusInternalServerError)
+		s.renderPolicyForm(w, r, http.StatusInternalServerError, "정책 대상 서버를 불러올 수 없습니다. 잠시 후 다시 시도하세요.", form)
 		return
 	}
 	policyID := randomID()
 	existingPolicies, err := s.store.ListEnterprisePolicies(r.Context(), enterpriseID, systemPolicyServerLimit)
 	if err != nil {
-		http.Error(w, "load enterprise policies", http.StatusInternalServerError)
+		s.renderPolicyForm(w, r, http.StatusInternalServerError, "기존 기업 정책을 불러올 수 없습니다. 잠시 후 다시 시도하세요.", form)
 		return
 	}
 	candidate := EnterprisePolicyRecord{ID: policyID, EnterpriseID: enterpriseID, Target: target, Status: EnterprisePolicyActive, CurrentRevisionID: "candidate", UpdatedAt: time.Now().UTC()}
 	winners, err := s.enterprisePolicyWinners(r.Context(), append(existingPolicies, candidate), servers)
 	if err != nil {
-		http.Error(w, "resolve policy priority", http.StatusInternalServerError)
+		s.renderPolicyForm(w, r, http.StatusInternalServerError, "정책 우선순위를 확인할 수 없습니다. 잠시 후 다시 시도하세요.", form)
 		return
 	}
 	serverIDs = orderIDsByServers(winners[policyID], servers)
 	if len(serverIDs) == 0 {
-		http.Error(w, "정책 대상에 적용 가능한 서버가 없습니다.", http.StatusBadRequest)
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 대상에 실제로 적용 가능한 서버가 없습니다. 정책 우선순위와 대상 구성을 확인하세요.", form)
 		return
 	}
 	revisionID := randomID()
@@ -471,7 +520,7 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 	relativePath := filepath.Join("policies", revisionID+".conf")
 	fullPath := filepath.Join(s.cfg.ArtifactRoot, relativePath)
 	if err := writeArtifact(fullPath, artifact); err != nil {
-		http.Error(w, "write policy artifact", http.StatusInternalServerError)
+		s.renderPolicyForm(w, r, http.StatusInternalServerError, "정책 파일을 안전하게 저장할 수 없습니다. 잠시 후 다시 시도하세요.", form)
 		return
 	}
 	revision := PolicyRevisionInput{
@@ -482,10 +531,10 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		_ = os.Remove(fullPath)
 		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, "server not found", http.StatusNotFound)
+			s.renderPolicyForm(w, r, http.StatusNotFound, "정책 대상 서버를 찾을 수 없습니다. 대상을 다시 선택하세요.", form)
 			return
 		}
-		http.Error(w, "create enterprise policy", http.StatusInternalServerError)
+		s.renderPolicyForm(w, r, http.StatusInternalServerError, "기업 정책을 생성할 수 없습니다. 잠시 후 다시 시도하세요.", form)
 		return
 	}
 	s.audit(r, session.Username, "enterprise_policy.create", policyID+":"+rolloutID, "success")
@@ -499,26 +548,26 @@ func (s *Server) newEnrollment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusBadRequest, "Error": "입력 내용을 읽을 수 없습니다. 다시 입력해 주세요."})
 		return
 	}
 	label := truncate(strings.TrimSpace(r.FormValue("label")), 255)
 	if label == "" {
-		http.Error(w, "label is required", http.StatusBadRequest)
+		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusBadRequest, "Error": "서버 식별 이름을 입력하세요.", "FormEnterpriseID": strings.TrimSpace(r.FormValue("enterprise_id"))})
 		return
 	}
 	enterpriseID, ok := s.requestEnterpriseID(r)
 	if !ok {
-		http.Error(w, "valid enterprise is required", http.StatusBadRequest)
+		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusBadRequest, "Error": "유효한 기업을 선택하세요.", "FormEnterpriseID": strings.TrimSpace(r.FormValue("enterprise_id")), "FormEnrollmentLabel": label})
 		return
 	}
 	token, expires, err := s.store.CreateEnrollmentToken(r.Context(), enterpriseID, label, s.cfg.EnrollmentTTL)
 	if err != nil {
-		http.Error(w, "create enrollment", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "일회용 등록 토큰을 만들 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	s.audit(r, sessionFrom(r).Username, "enrollment.create", label, "success")
@@ -571,6 +620,7 @@ func (s *Server) apiCreateEnrollment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, sessionFrom(r).Username, "enrollment.create", request.Label, "success")
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "expires_at": expires, "agent_api": s.cfg.AgentPublicURL})
 }
 

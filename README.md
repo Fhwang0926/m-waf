@@ -224,7 +224,7 @@ The current MVP has no supported `tar.gz`, manual-copy, or RPM installation path
 
 ## Operate the MVP
 
-- **시스템 관리자** can view all enterprises, create enterprises, create enterprise administrators/users, and operate every server.
+- **시스템 관리자** can view all enterprises, create enterprises, create enterprise administrators/users, safely delete an unused enterprise, terminate an enterprise with retained history, and operate every server.
 - **기업 사용자** can monitor and operate only its enterprise, including server enrollment/control, groups, enterprise policies, staged rollout approval/retry, and rollback.
 - **기업 관리자** has the same enterprise-scoped operating permissions and additionally manages enterprise users and administrator roles. Self-demotion/deactivation/deletion and removal of the last active enterprise administrator are blocked.
 - **시스템 설정** controls WAF event retention (default 30 days) and administrator audit retention (default 365 days). Cleanup runs at startup and then on the configured cleanup interval in bounded batches.
@@ -317,6 +317,8 @@ make e2e-remote
 ```
 
 By default, `make e2e-remote` reads `deploy/compose/secrets/mwaf_ca_cert.pem`, which is correct when the test runs from the checkout used to deploy that Manager. From another test host, securely copy only that public CA certificate and override `MWAF_E2E_REMOTE_CA_CERT=/secure/path/mwaf_ca_cert.pem`. Do not substitute an unrelated local CA and do not disable TLS verification. The remote test uses a separate Compose project and `.local/mwaf-e2e-192-168-7-200` runtime so it cannot reuse Agent state from the isolated local E2E stack.
+
+When `MWAF_E2E_ADMIN_PASSWORD_FILE` or `MWAF_E2E_ADMIN_PASSWORD` is explicitly supplied to `make e2e-remote`, the remote runtime credential copy is refreshed before login. This allows an administrator password recovered after an earlier failed E2E attempt to be used without manually editing `.local/mwaf-e2e-192-168-7-200/admin.password`. A standalone `make e2e-remote-verify` reuses the protected runtime copy because it does not receive credentials again.
 
 After the first run, `make e2e-remote-verify` repeats policy, blocking, and event checks with the preserved remote test state. `make e2e-remote-down` removes only the two local customer containers and their network; it preserves their named volumes and does not delete Manager-side audit records.
 

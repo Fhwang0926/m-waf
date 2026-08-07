@@ -29,7 +29,9 @@ func (s *Store) AuthorizeAgent(ctx context.Context, serverID string, certificate
 	}
 	serial := hex.EncodeToString(certificate.SerialNumber.Bytes())
 	var currentSerial string
-	err := s.db.QueryRowContext(ctx, `SELECT certificate_serial FROM servers WHERE id=? AND revoked_at IS NULL`, serverID).Scan(&currentSerial)
+	err := s.db.QueryRowContext(ctx, `SELECT s.certificate_serial
+FROM servers s LEFT JOIN enterprises e ON e.id=s.enterprise_id
+WHERE s.id=? AND s.revoked_at IS NULL AND (s.enterprise_id IS NULL OR e.status='ACTIVE')`, serverID).Scan(&currentSerial)
 	if err != nil {
 		return err
 	}
@@ -346,6 +348,9 @@ func (s *Store) SaveGroup(ctx context.Context, scopeEnterpriseID, groupID, enter
 		return "", err
 	}
 	defer tx.Rollback()
+	if err := lockActiveEnterprise(ctx, tx, enterpriseID); err != nil {
+		return "", err
+	}
 	if groupID == "" {
 		groupID = randomID()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO server_groups(id,enterprise_id,name,created_by) VALUES (?,?,?,?)`, groupID, enterpriseID, name, userID); err != nil {

@@ -274,9 +274,15 @@ preflight_full() {
 prepare_admin_credentials() {
   username_file="$runtime_dir/admin.username"
   password_file="$runtime_dir/admin.password"
+  refresh_credentials=0
+  if [ "$remote_mode" -eq 1 ] && { [ -n "$admin_password_file_input" ] || [ -n "${MWAF_E2E_ADMIN_PASSWORD:-}" ]; }; then
+    refresh_credentials=1
+  fi
   if [ -e "$username_file" ] || [ -e "$password_file" ]; then
-    [ -s "$username_file" ] && [ -s "$password_file" ] || fail "administrator credential files are incomplete in $runtime_dir"
-    return 0
+    if [ "$refresh_credentials" -eq 0 ]; then
+      [ -s "$username_file" ] && [ -s "$password_file" ] || fail "administrator credential files are incomplete in $runtime_dir"
+      return 0
+    fi
   fi
 
   if [ "$remote_mode" -eq 1 ]; then
@@ -409,7 +415,7 @@ login_admin() {
     status=$(curl --silent --show-error --cacert "$secrets_dir/mwaf_ca_cert.pem" \
       --cookie "$cookie_jar" --cookie-jar "$cookie_jar" -o "$runtime_dir/login-result.html" -w '%{http_code}' \
       --data-urlencode "username=$admin_username" --data-urlencode "password@$runtime_dir/admin.password" "$admin_url/login")
-    [ "$status" = 303 ] || fail "administrator login returned HTTP $status; restore $runtime_dir/admin.password or provide the original runtime directory"
+    [ "$status" = 303 ] || fail "administrator login returned HTTP $status; verify MWAF_E2E_ADMIN_USERNAME and refresh the password with MWAF_E2E_ADMIN_PASSWORD_FILE"
   fi
   admin_get / "$runtime_dir/dashboard.html"
 }

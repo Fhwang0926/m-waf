@@ -37,3 +37,9 @@
 - Make가 상대 runtime 경로를 프로세스 환경으로 전달하면 Docker Compose가 env 파일의 절대 경로보다 프로세스 환경을 우선하고, 이를 첫 Compose 파일인 `deploy/compose` 기준으로 다시 해석하는 문제가 있었다.
 - `run.sh`가 repository 기준으로 정규화한 절대 `MWAF_E2E_RUNTIME_DIR`을 Compose 실행 환경에 다시 export하도록 수정했다.
 - 따라서 CA secret bind source는 `/root/git/m-waf/.local/mwaf-e2e-192-168-7-200/secrets/mwaf_ca_cert.pem`으로 해석되며 `deploy/compose/.local/...`로 잘못 붙지 않는다.
+
+## 후속 관리자 로그인 수정
+
+- 최초 실패한 E2E 실행이 runtime에 관리자 자격 증명을 저장한 뒤 실제 관리자 비밀번호가 복구되면, 기존 runtime 복사본을 계속 사용해 로그인이 HTTP 401로 실패했다.
+- `make e2e-remote` 실행 시 `MWAF_E2E_ADMIN_PASSWORD_FILE` 또는 `MWAF_E2E_ADMIN_PASSWORD`가 명시되어 있으면 username과 password runtime 복사본을 로그인 전에 갱신한다.
+- 자격 증명을 다시 전달하지 않는 `make e2e-remote-verify`는 기존 mode `0600` runtime 복사본을 계속 사용한다.

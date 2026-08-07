@@ -1,15 +1,35 @@
 {{define "navigation"}}
-<header class="topbar">
-  <a class="brand" href="/">M-WAF</a>
-  <nav>
-    <a class="{{if eq .Active "servers"}}active{{end}}" href="/servers">서버</a>
-    <a class="{{if eq .Active "events"}}active{{end}}" href="/events">이벤트</a>
-    {{if .CanOperate}}<a class="{{if eq .Active "policies"}}active{{end}}" href="/policies">기업 정책</a><a class="{{if eq .Active "groups"}}active{{end}}" href="/groups">서버 그룹</a><a class="{{if eq .Active "enrollments"}}active{{end}}" href="/enrollments/new">설치 및 등록</a>{{end}}
-    {{if .IsSystemAdmin}}<a class="{{if eq .Active "system-policies"}}active{{end}}" href="/system-policies">시스템 정책</a><a class="{{if eq .Active "enterprises"}}active{{end}}" href="/enterprises">기업 관리</a><a class="{{if eq .Active "settings"}}active{{end}}" href="/settings">시스템 설정</a>{{end}}
-    {{if .CanManageUsers}}<a class="{{if eq .Active "users"}}active{{end}}" href="/users">사용자 관리</a>{{end}}
-    <a class="{{if eq .Active "account"}}active{{end}}" href="/account">내 계정</a>
-    <span class="identity"><strong>{{.Session.DisplayName}}</strong><small>{{.Session.RoleLabel}}{{if .Session.EnterpriseName}} · {{.Session.EnterpriseName}}{{end}}</small></span>
-    <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link-button">로그아웃</button></form>
-  </nav>
+<header class="app-header">
+  <div class="topbar">
+    <a class="brand" href="/">M-WAF</a>
+    <div class="account-nav">
+      <span class="identity"><strong>{{.Session.DisplayName}}</strong><small>{{if .Session.EnterpriseName}}{{.Session.EnterpriseName}} · {{end}}{{.Session.RoleLabel}}</small></span>
+      <a class="account-link {{if eq .Active "account"}}active{{end}}" href="/account">내 계정</a>
+      <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="link-button" type="submit">로그아웃</button></form>
+    </div>
+  </div>
+  <div class="nav-shell">
+    <div class="nav-inner">
+      <details class="nav-menu">
+        <summary>메뉴</summary>
+        <nav aria-label="주요 메뉴">
+          <a class="primary-link {{if eq .Active "dashboard"}}active{{end}}" href="/">대시보드</a>
+          <a class="primary-link {{if eq .Active "servers"}}active{{end}}" href="/servers">서버</a>
+          <a class="primary-link {{if eq .Active "events"}}active{{end}}" href="/events">이벤트</a>
+          {{if .CanOperate}}<a class="primary-link {{if eq .Active "policies"}}active{{end}}" href="/policies">기업 정책</a><a class="primary-link {{if eq .Active "groups"}}active{{end}}" href="/groups">서버 그룹</a><a class="primary-link {{if eq .Active "enrollments"}}active{{end}}" href="/enrollments/new">설치 및 등록</a>{{end}}
+          {{if .CanManageUsers}}<a class="primary-link {{if eq .Active "users"}}active{{end}}" href="/users">사용자 관리</a>{{end}}
+          <a class="primary-link mobile-only {{if eq .Active "account"}}active{{end}}" href="/account">내 계정</a>
+          {{if .IsSystemAdmin}}<details class="system-menu {{if or (eq .Active "system-policies") (eq .Active "enterprises") (eq .Active "settings")}}is-active{{end}}">
+            <summary>시스템 관리</summary>
+            <div class="system-submenu">
+              <a class="{{if eq .Active "system-policies"}}active{{end}}" href="/system-policies">시스템 정책</a>
+              <a class="{{if eq .Active "enterprises"}}active{{end}}" href="/enterprises">기업 관리</a>
+              <a class="{{if eq .Active "settings"}}active{{end}}" href="/settings">시스템 설정</a>
+            </div>
+          </details>{{end}}
+        </nav>
+      </details>
+    </div>
+  </div>
 </header>
 {{end}}

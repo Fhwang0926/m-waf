@@ -1,22 +1,34 @@
 {{define "policy.html"}}
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 기업 정책 생성</title><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/policy.css"></head>
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 기업 정책 생성</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>{{template "navigation" .}}
-<main class="container narrow"><div class="page-head"><div><p class="eyebrow">ENTERPRISE POLICY</p><h1>기업 정책 생성</h1></div></div>
-<section class="panel"><p class="muted">기업 정책은 게시된 불변 시스템 정책 버전을 기반으로만 생성됩니다. 기업 설정과 예외는 서명된 개정본에 보존되며 첫 온라인 서버부터 단계 배포됩니다.</p>
-{{if or .Servers .Groups}}<form method="post" action="/policies"><input type="hidden" name="csrf" value="{{.CSRF}}">
-	<label>시스템 정책<select name="template_key" required>{{range .PolicyTemplates}}<option value="{{.Key}}" {{if eq .Key $.DefaultTemplate.Key}}selected{{end}}>{{.Name}} · {{.Version}} · CRS {{.CRSVersion}}</option>{{end}}</select><small>시스템 정책은 GitHub 릴리스에서만 게시되며 이 화면에서는 수정할 수 없습니다.</small></label>
-	<label>기업 정책 이름<input name="name" maxlength="255" placeholder="운영 기본 정책" required></label>
-  <label>설명<textarea name="description" maxlength="1024" rows="2" placeholder="적용 목적과 변경 사유"></textarea></label>
-  <label>배포 대상<select name="target" required><option value="">선택하세요</option>{{range .Groups}}<option value="group:{{.ID}}">그룹 · {{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}} ({{len .Members}}대)</option>{{end}}{{range .Servers}}{{if not .Revoked}}<option value="server:{{.ID}}">서버 · {{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}}</option>{{end}}{{end}}</select></label>
-  <label>업데이트 전략<select name="update_strategy" required><option value="MANUAL" selected>수동 승인 · 새 버전 확인 후 기업 사용자 승인</option><option value="AUTOMATIC">자동 채택 · 새 버전을 카나리부터 단계 배포</option><option value="PINNED">버전 고정 · 정보만 표시하고 적용하지 않음</option></select></label>
-  <div class="form-grid"><label>동작 모드<select name="mode" required><option value="DetectionOnly">탐지만</option><option value="On">탐지 및 차단</option></select></label>
-  <label>CRS 민감도<select name="paranoia_level" required><option value="1">1 · 기본</option><option value="2">2 · 강화</option><option value="3">3 · 높음</option><option value="4">4 · 최고</option></select></label>
-  <label>차단 임계점수<input type="number" name="inbound_score" min="1" max="100" value="5" required><small>낮을수록 더 민감하게 차단합니다.</small></label></div>
-	<label class="check-row"><input type="checkbox" name="request_body" checked> 요청 본문 검사</label>
-  <div class="form-grid"><label>예외 URL 경로<textarea name="excluded_paths" rows="5" placeholder="/health&#10;/internal/callback"></textarea><small>한 줄에 하나씩 입력하며 해당 경로로 시작하는 요청은 WAF 검사를 건너뜁니다.</small></label>
-  <label>예외 IP/CIDR<textarea name="excluded_ips" rows="5" placeholder="192.0.2.10&#10;198.51.100.0/24"></textarea><small>신뢰 가능한 주소만 등록하세요.</small></label></div>
-  <label>추가 ModSecurity 규칙<textarea class="mono" name="custom_rules" rows="8" placeholder='SecRule REQUEST_HEADERS:User-Agent "@contains BadBot" "id:100001,phase:1,deny,status:403,log,msg:Bad bot"'></textarea><small>한 줄짜리 SecRule만 허용합니다. ID는 100000~199999를 사용하며 외부 실행 계열 동작은 차단됩니다.</small></label>
-  <button type="submit">서명 후 단계 배포</button>
-</form>{{else}}<div class="empty">먼저 보호 서버를 등록하세요.</div>{{end}}
+<main class="container narrow"><div class="page-head"><div><p class="eyebrow">기업 정책</p><h1>기업 정책 생성</h1><p class="muted">게시된 시스템 정책에 기업 설정과 예외를 더해 서명된 개정본을 만듭니다.</p></div><a class="button secondary" href="/policies">정책 목록</a></div>
+{{if .Error}}<div id="policy-form-error" class="alert error" role="alert"><strong>정책을 만들 수 없습니다</strong><div>{{.Error}}</div></div>{{end}}
+<section class="panel">
+{{if or .Servers .Groups}}<form method="post" action="/policies" {{if .Error}}aria-describedby="policy-form-error"{{end}}><input type="hidden" name="csrf" value="{{.CSRF}}">
+  <fieldset class="form-section"><legend><span class="section-number">1</span>기반 정책과 배포 대상</legend>
+    <label><span class="help-term" tabindex="0" aria-describedby="tip-system-policy-form">시스템 정책<span id="tip-system-policy-form" role="tooltip">GitHub 서명 릴리스에서 게시되며 관리자 화면에서는 수정할 수 없는 불변 정책 버전입니다.</span></span><select name="template_key" required>{{range .PolicyTemplates}}<option value="{{.Key}}" {{if eq .Key $.FormTemplateKey}}selected{{end}}>{{.Name}} · {{.Version}} · CRS {{.CRSVersion}}</option>{{end}}</select><small>게시된 시스템 정책 버전만 선택할 수 있습니다.</small></label>
+    <label>배포 대상<select name="target" required><option value="">선택하세요</option>{{range .Groups}}<option value="group:{{.ID}}" {{if eq (printf "group:%s" .ID) $.FormTarget}}selected{{end}}>그룹 · {{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}} ({{len .Members}}대)</option>{{end}}{{range .Servers}}{{if not .Revoked}}<option value="server:{{.ID}}" {{if eq (printf "server:%s" .ID) $.FormTarget}}selected{{end}}>서버 · {{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}}</option>{{end}}{{end}}</select><small>서버 &gt; 그룹 &gt; 기업 기본 정책 우선순위를 유지합니다.</small></label>
+  </fieldset>
+
+  <fieldset class="form-section"><legend><span class="section-number">2</span>정책 정보와 업데이트</legend>
+    <label>기업 정책 이름<input name="name" maxlength="255" value="{{.FormName}}" placeholder="운영 기본 정책" required></label>
+    <label>설명<textarea name="description" maxlength="1024" rows="2" placeholder="적용 목적과 변경 사유">{{.FormDescription}}</textarea></label>
+    <label><span class="help-term" tabindex="0" aria-describedby="tip-strategy-form">업데이트 전략<span id="tip-strategy-form" role="tooltip">새 시스템 정책 버전이 게시되었을 때 승인·자동 배포·고정 중 어떤 방식으로 처리할지 결정합니다.</span></span><select name="update_strategy" required><option value="MANUAL" {{if eq .FormStrategy "MANUAL"}}selected{{end}}>수동 승인 · 확인 후 적용</option><option value="AUTOMATIC" {{if eq .FormStrategy "AUTOMATIC"}}selected{{end}}>자동 채택 · 카나리부터 단계 배포</option><option value="PINNED" {{if eq .FormStrategy "PINNED"}}selected{{end}}>버전 고정 · 정보만 표시</option></select></label>
+  </fieldset>
+
+  <fieldset class="form-section"><legend><span class="section-number">3</span>탐지·차단과 CRS 설정</legend>
+    <div class="form-grid"><label><span class="help-term" tabindex="0" aria-describedby="tip-mode-form">동작 모드<span id="tip-mode-form" role="tooltip">탐지만은 요청을 기록하되 허용하고, 탐지 및 차단은 임계점수를 넘은 요청을 차단합니다.</span></span><select name="mode" required><option value="DetectionOnly" {{if eq .FormMode "DetectionOnly"}}selected{{end}}>탐지만</option><option value="On" {{if eq .FormMode "On"}}selected{{end}}>탐지 및 차단</option></select></label>
+    <label><span class="help-term" tabindex="0" aria-describedby="tip-paranoia-form">CRS 민감도<span id="tip-paranoia-form" role="tooltip">높을수록 더 많은 공격 패턴을 검사하지만 오탐 가능성도 커집니다.</span></span><select name="paranoia_level" required><option value="1" {{if eq .FormParanoia "1"}}selected{{end}}>1 · 기본</option><option value="2" {{if eq .FormParanoia "2"}}selected{{end}}>2 · 강화</option><option value="3" {{if eq .FormParanoia "3"}}selected{{end}}>3 · 높음</option><option value="4" {{if eq .FormParanoia "4"}}selected{{end}}>4 · 최고</option></select></label>
+    <label><span class="help-term" tabindex="0" aria-describedby="tip-score-form">차단 임계점수<span id="tip-score-form" role="tooltip">낮을수록 적은 탐지 점수로도 요청을 차단하므로 더 민감하게 동작합니다.</span></span><input type="number" name="inbound_score" min="1" max="100" value="{{.FormScore}}" required><small>허용 범위 1~100</small></label></div>
+    <label class="check-row"><input type="checkbox" name="request_body" {{if .FormRequestBody}}checked{{end}}> 요청 본문 검사</label>
+  </fieldset>
+
+  <fieldset class="form-section"><legend><span class="section-number">4</span>예외와 사용자 규칙</legend>
+    <div class="form-grid"><label>예외 URL 경로<textarea name="excluded_paths" rows="5" placeholder="/health&#10;/internal/callback">{{.FormExcludedPaths}}</textarea><small>한 줄에 하나씩 입력하며 해당 경로로 시작하는 요청은 WAF 검사를 건너뜁니다.</small></label>
+    <label>예외 IP/CIDR<textarea name="excluded_ips" rows="5" placeholder="192.0.2.10&#10;198.51.100.0/24">{{.FormExcludedIPs}}</textarea><small>신뢰 가능한 주소만 등록하세요.</small></label></div>
+    <label>추가 ModSecurity 규칙<textarea class="mono" name="custom_rules" rows="8" placeholder='SecRule REQUEST_HEADERS:User-Agent "@contains BadBot" "id:100001,phase:1,deny,status:403,log,msg:Bad bot"'>{{.FormCustomRules}}</textarea><small>한 줄짜리 SecRule만 허용합니다. ID는 100000~199999를 사용하며 외부 실행 계열 동작은 차단됩니다.</small></label>
+  </fieldset>
+  <div class="form-actions"><a class="button secondary" href="/policies">취소</a><button type="submit">서명 후 단계 배포</button></div>
+</form>{{else}}<div class="empty">먼저 보호 서버를 설치하고 등록하세요.<br><a class="button" href="/enrollments/new">설치 및 등록</a></div>{{end}}
 </section></main></body></html>
 {{end}}

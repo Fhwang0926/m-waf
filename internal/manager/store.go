@@ -105,9 +105,17 @@ func (s *Store) CreateEnrollmentToken(ctx context.Context, enterpriseID, label s
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	expires := time.Now().UTC().Add(ttl)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollment_tokens(id, enterprise_id, token_hash, label, expires_at) VALUES (?, ?, ?, ?, ?)`, randomID(), enterpriseID, tokenHash(token), label, expires)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO enrollment_tokens(id,enterprise_id,token_hash,label,expires_at)
+SELECT ?,e.id,?,?,? FROM enterprises e WHERE e.id=? AND e.status='ACTIVE'`, randomID(), tokenHash(token), label, expires, enterpriseID)
 	if err != nil {
 		return "", time.Time{}, err
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if created != 1 {
+		return "", time.Time{}, ErrEnterpriseNotActive
 	}
 	return token, expires, nil
 }
@@ -119,8 +127,9 @@ func (s *Store) ValidateEnrollmentToken(ctx context.Context, token string) error
 	var parentValid bool
 	err := s.db.QueryRowContext(ctx, `SELECT et.enterprise_id,et.expires_at,et.used_at,
 (et.install_token_id IS NULL OR (it.id IS NOT NULL AND it.revoked_at IS NULL AND it.expires_at > UTC_TIMESTAMP(6)))
-FROM enrollment_tokens et LEFT JOIN enterprise_install_tokens it ON it.id=et.install_token_id
-WHERE et.token_hash=?`, tokenHash(token)).Scan(&enterpriseID, &expires, &used, &parentValid)
+FROM enrollment_tokens et JOIN enterprises e ON e.id=et.enterprise_id
+LEFT JOIN enterprise_install_tokens it ON it.id=et.install_token_id
+WHERE et.token_hash=? AND e.status='ACTIVE'`, tokenHash(token)).Scan(&enterpriseID, &expires, &used, &parentValid)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrInvalidEnrollmentToken
@@ -143,7 +152,9 @@ WHERE token_hash=? AND used_at IS NULL AND expires_at > UTC_TIMESTAMP(6)
 AND (install_token_id IS NULL OR EXISTS (
   SELECT 1 FROM enterprise_install_tokens it
   WHERE it.id=enrollment_tokens.install_token_id AND it.revoked_at IS NULL AND it.expires_at > UTC_TIMESTAMP(6)
-))`, raw, tokenHash(token))
+)) AND EXISTS (
+  SELECT 1 FROM enterprises e WHERE e.id=enrollment_tokens.enterprise_id AND e.status='ACTIVE'
+)`, raw, tokenHash(token))
 	if err != nil {
 		return err
 	}
@@ -160,9 +171,10 @@ AND (install_token_id IS NULL OR EXISTS (
 func (s *Store) EnrollmentPackageAllowed(ctx context.Context, token, packageID string) (bool, error) {
 	var raw sql.NullString
 	err := s.db.QueryRowContext(ctx, `SELECT et.allowed_packages_json
-FROM enrollment_tokens et LEFT JOIN enterprise_install_tokens it ON it.id=et.install_token_id
+FROM enrollment_tokens et JOIN enterprises e ON e.id=et.enterprise_id
+LEFT JOIN enterprise_install_tokens it ON it.id=et.install_token_id
 WHERE et.token_hash=? AND et.used_at IS NULL AND et.expires_at > UTC_TIMESTAMP(6)
-AND (et.install_token_id IS NULL OR (it.revoked_at IS NULL AND it.expires_at > UTC_TIMESTAMP(6)))`, tokenHash(token)).Scan(&raw)
+AND e.status='ACTIVE' AND (et.install_token_id IS NULL OR (it.revoked_at IS NULL AND it.expires_at > UTC_TIMESTAMP(6)))`, tokenHash(token)).Scan(&raw)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, ErrInvalidEnrollmentToken
@@ -203,6 +215,9 @@ FROM enrollment_tokens WHERE token_hash=? FOR UPDATE`, tokenHash(token)).Scan(&e
 		return err
 	}
 	if !enterpriseID.Valid || enterpriseID.String == "" || used.Valid || !expires.After(time.Now().UTC()) {
+		return ErrInvalidEnrollmentToken
+	}
+	if err := lockActiveEnterprise(ctx, tx, enterpriseID.String); err != nil {
 		return ErrInvalidEnrollmentToken
 	}
 	if installTokenID.Valid {

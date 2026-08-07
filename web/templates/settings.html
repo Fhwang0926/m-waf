@@ -1,13 +1,13 @@
 {{define "settings.html"}}
 <!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 시스템 설정</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>{{template "navigation" .}}
-<main class="container narrow"><div class="page-head"><div><p class="eyebrow">SYSTEM SETTINGS</p><h1>로그 보존 설정</h1></div></div>
-{{if .Notice}}<div class="alert">{{.Notice}}</div>{{end}}
+<main class="container narrow"><div class="page-head"><div><p class="eyebrow">시스템 관리</p><h1>로그 보존 설정</h1><p class="muted">보안 이벤트와 관리자 감사 이력의 보존 기간을 관리합니다.</p></div></div>
+{{if .Notice}}<div class="alert success" role="status"><strong>설정 저장 완료</strong><div>{{.Notice}}</div></div>{{end}}{{if .Error}}<div id="settings-error" class="alert error" role="alert"><strong>설정을 저장하지 못했습니다</strong><div>{{.Error}}</div></div>{{end}}
 <section class="panel"><p class="muted">설정 기간보다 오래된 기록은 {{.CleanupInterval}} 간격의 백그라운드 정리 작업에서 순차 삭제됩니다.</p>
-  <form method="post" action="/settings"><input type="hidden" name="csrf" value="{{.CSRF}}">
+  <form method="post" action="/settings" {{if .Error}}aria-describedby="settings-error"{{end}}><input type="hidden" name="csrf" value="{{.CSRF}}">
     <label>WAF 이벤트 보존 기간(일)<input type="number" name="event_retention_days" min="1" max="3650" value="{{.Settings.EventDays}}" required><small>기본값 30일 · 허용 범위 1~3650일</small></label>
-    <label>관리자 감사 로그 보존 기간(일)<input type="number" name="audit_retention_days" min="30" max="3650" value="{{.Settings.AuditDays}}" required><small>기본값 365일 · 보안 감사 보호를 위해 최소 30일</small></label>
-    <button type="submit">보존 설정 저장</button>
+    <label><span class="help-term" tabindex="0" aria-describedby="tip-audit-retention">관리자 감사 로그 보존 기간(일)<span id="tip-audit-retention" role="tooltip">정책, 사용자와 서버 관련 관리 작업의 수행자와 결과를 추적하는 보안 기록입니다.</span></span><input type="number" name="audit_retention_days" min="30" max="3650" value="{{.Settings.AuditDays}}" required><small>기본값 365일 · 보안 감사 보호를 위해 최소 30일</small></label>
+    <div class="form-actions"><button type="submit">보존 설정 저장</button></div>
   </form>
 </section></main></body></html>
 {{end}}

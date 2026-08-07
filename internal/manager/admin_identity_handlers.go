@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
@@ -12,7 +13,7 @@ import (
 func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	hasUsers, err := s.store.HasAdminUsers(r.Context())
 	if err != nil {
-		http.Error(w, "load administrator configuration", http.StatusInternalServerError)
+		s.renderSetup(w, r, http.StatusInternalServerError, "시스템 관리자 설정 상태를 불러올 수 없습니다. 잠시 후 다시 시도하세요.")
 		return
 	}
 	if hasUsers {
@@ -24,11 +25,11 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.renderSetup(w, r, http.StatusBadRequest, "입력 내용을 읽을 수 없습니다. 다시 입력해 주세요.")
 		return
 	}
 	if !s.sessions.validSetupCSRFRequest(r) {
-		s.renderSetup(w, r, http.StatusForbidden, "설정 보안 정보가 만료되었거나 브라우저 쿠키가 차단되었습니다. 새 보안 정보로 갱신했습니다. 비밀번호를 다시 입력해 시도하세요. 인증서 경고가 계속 표시되면 M-WAF CA 인증서를 신뢰 저장소에 등록하세요.")
+		s.renderSetup(w, r, http.StatusForbidden, "설정 보안 정보가 만료되었거나 브라우저 쿠키가 차단되었습니다. 새 보안 정보로 갱신했으므로 비밀번호를 다시 입력해 시도하세요.")
 		return
 	}
 	username := strings.TrimSpace(r.FormValue("username"))
@@ -40,7 +41,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	}
 	passwordHash, err := hashPassword(password)
 	if err != nil {
-		http.Error(w, "setup unavailable", http.StatusInternalServerError)
+		s.renderSetup(w, r, http.StatusInternalServerError, "시스템 관리자 비밀번호를 안전하게 처리할 수 없습니다. 잠시 후 다시 시도하세요.")
 		return
 	}
 	user, err := s.store.CreateInitialSystemAdmin(r.Context(), username, displayName, passwordHash)
@@ -54,7 +55,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	}
 	token, session, err := s.sessions.create(user)
 	if err != nil {
-		http.Error(w, "session error", http.StatusInternalServerError)
+		s.renderLogin(w, r, http.StatusInternalServerError, "시스템 관리자는 생성되었지만 로그인 세션을 만들 수 없습니다. 로그인 화면에서 다시 시도하세요.", username)
 		return
 	}
 	clearSetupCSRFCookie(w)
@@ -67,7 +68,7 @@ func (s *Server) renderSetup(w http.ResponseWriter, r *http.Request, status int,
 	w.Header().Set("Cache-Control", "no-store")
 	token, err := s.sessions.setupCSRFForRequest(w, r)
 	if err != nil {
-		http.Error(w, "setup unavailable", http.StatusInternalServerError)
+		s.renderLogin(w, r, http.StatusInternalServerError, "최초 설정 보안 정보를 만들 수 없습니다. 잠시 후 다시 시도하세요.", "")
 		return
 	}
 	data := map[string]any{"CSRF": token, "Error": message, "Username": "", "DisplayName": ""}
@@ -82,32 +83,78 @@ func (s *Server) renderSetup(w http.ResponseWriter, r *http.Request, status int,
 }
 
 func (s *Server) enterprises(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListEnterprises(r.Context())
+	s.renderEnterprises(w, r, http.StatusOK, "", "")
+}
+
+func (s *Server) renderEnterprises(w http.ResponseWriter, r *http.Request, status int, pageError, formName string) {
+	items, err := s.store.ListEnterpriseManagement(r.Context())
 	if err != nil {
-		http.Error(w, "load enterprises", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	data := map[string]any{"Enterprises": items}
+	data := map[string]any{"Enterprises": items, "Error": pageError, "FormName": formName}
 	if r.URL.Query().Get("created") == "1" {
 		data["Notice"] = "기업이 등록되었습니다. 사용자 관리에서 기업 관리자를 추가하세요."
+	} else if r.URL.Query().Get("deleted") == "1" {
+		data["Notice"] = "연결 데이터가 없는 기업을 삭제했습니다."
+	} else if r.URL.Query().Get("terminated") == "1" {
+		data["Notice"] = "기업 운영을 종료했습니다. 사용자·신규 등록·Agent 연결은 차단되고 기존 이력은 보존됩니다."
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
 	}
 	_ = s.templates.ExecuteTemplate(w, "enterprises.html", s.viewData(r, "enterprises", data))
 }
 
+func (s *Server) deleteEnterprise(w http.ResponseWriter, r *http.Request) {
+	if !s.validCSRF(r) {
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
+		return
+	}
+	enterpriseID := strings.TrimSpace(r.PathValue("id"))
+	confirmName := strings.TrimSpace(r.FormValue("confirm_name"))
+	if enterpriseID == "" || confirmName == "" {
+		s.renderEnterprises(w, r, http.StatusBadRequest, "기업 삭제 또는 운영 종료를 위해 기업명을 정확히 입력하세요.", "")
+		return
+	}
+	session := sessionFrom(r)
+	result, err := s.store.DeleteOrTerminateEnterprise(r.Context(), enterpriseID, confirmName, session.UserID)
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			s.renderEnterprises(w, r, http.StatusNotFound, "기업을 찾을 수 없습니다.", "")
+		case errors.Is(err, ErrEnterpriseNotActive):
+			s.renderEnterprises(w, r, http.StatusConflict, "이미 운영 종료된 기업입니다.", "")
+		case errors.Is(err, ErrEnterpriseConfirmation):
+			s.renderEnterprises(w, r, http.StatusBadRequest, "입력한 기업명이 일치하지 않습니다.", "")
+		default:
+			s.renderEnterprises(w, r, http.StatusInternalServerError, "기업 삭제 또는 운영 종료를 처리할 수 없습니다.", "")
+		}
+		return
+	}
+	if result == EnterpriseDeleted {
+		s.audit(r, session.Username, "enterprise.delete", enterpriseID, "success")
+		http.Redirect(w, r, "/enterprises?deleted=1", http.StatusSeeOther)
+		return
+	}
+	s.audit(r, session.Username, "enterprise.terminate", enterpriseID, "success")
+	http.Redirect(w, r, "/enterprises?terminated=1", http.StatusSeeOther)
+}
+
 func (s *Server) createEnterprise(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
 		return
 	}
 	name := truncate(strings.TrimSpace(r.FormValue("name")), 255)
 	if name == "" {
-		http.Error(w, "enterprise name is required", http.StatusBadRequest)
+		s.renderEnterprises(w, r, http.StatusBadRequest, "기업명을 입력하세요.", name)
 		return
 	}
 	session := sessionFrom(r)
 	item, err := s.store.CreateEnterprise(r.Context(), name, session.UserID)
 	if err != nil {
-		http.Error(w, "기업 생성에 실패했습니다. 같은 이름이 등록되어 있는지 확인하세요.", http.StatusConflict)
+		s.renderEnterprises(w, r, http.StatusConflict, "기업 생성에 실패했습니다. 같은 이름이 등록되어 있는지 확인하세요.", name)
 		return
 	}
 	s.audit(r, session.Username, "enterprise.create", item.ID, "success")
@@ -115,33 +162,43 @@ func (s *Server) createEnterprise(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) systemSettings(w http.ResponseWriter, r *http.Request) {
+	s.renderSystemSettings(w, r, http.StatusOK, "", nil)
+}
+
+func (s *Server) renderSystemSettings(w http.ResponseWriter, r *http.Request, status int, pageError string, submitted *LogRetentionSettings) {
 	settings, err := s.store.LogRetentionSettings(r.Context(), DefaultLogRetentionSettings(s.cfg.EventRetention))
 	if err != nil {
-		http.Error(w, "load system settings", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "시스템 설정을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	data := map[string]any{"Settings": settings, "CleanupInterval": s.cfg.CleanupInterval}
+	if submitted != nil {
+		settings = *submitted
+	}
+	data := map[string]any{"Settings": settings, "CleanupInterval": s.cfg.CleanupInterval, "Error": pageError}
 	if r.URL.Query().Get("saved") == "1" {
 		data["Notice"] = "로그 보존 설정이 저장되었습니다. 다음 정리 주기부터 적용됩니다."
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
 	}
 	_ = s.templates.ExecuteTemplate(w, "settings.html", s.viewData(r, "settings", data))
 }
 
 func (s *Server) updateSystemSettings(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
 		return
 	}
 	eventDays, eventErr := strconv.Atoi(strings.TrimSpace(r.FormValue("event_retention_days")))
 	auditDays, auditErr := strconv.Atoi(strings.TrimSpace(r.FormValue("audit_retention_days")))
 	settings := LogRetentionSettings{EventDays: eventDays, AuditDays: auditDays}
 	if eventErr != nil || auditErr != nil || !settings.Valid() {
-		http.Error(w, "event retention must be 1..3650 days and audit retention must be 30..3650 days", http.StatusBadRequest)
+		s.renderSystemSettings(w, r, http.StatusBadRequest, "WAF 이벤트는 1~3650일, 관리자 감사 로그는 30~3650일 범위로 입력하세요.", &settings)
 		return
 	}
 	session := sessionFrom(r)
 	if err := s.store.UpdateLogRetentionSettings(r.Context(), settings, session.UserID); err != nil {
-		http.Error(w, "save system settings", http.StatusInternalServerError)
+		s.renderSystemSettings(w, r, http.StatusInternalServerError, "로그 보존 설정을 저장할 수 없습니다. 잠시 후 다시 시도하세요.", &settings)
 		return
 	}
 	s.audit(r, session.Username, "system_settings.update", "log_retention", "success")
@@ -153,20 +210,27 @@ func (s *Server) users(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) renderUsers(w http.ResponseWriter, r *http.Request, pageError string) {
+	s.renderUsersWithForm(w, r, http.StatusOK, pageError, nil)
+}
+
+func (s *Server) renderUsersWithForm(w http.ResponseWriter, r *http.Request, status int, pageError string, form map[string]any) {
 	session := sessionFrom(r)
 	items, err := s.store.ListUsers(r.Context(), session.ScopeEnterpriseID())
 	if err != nil {
-		http.Error(w, "load users", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "사용자 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	for i := range items {
 		items[i].Manageable = sessionCanManageUser(session, items[i])
 	}
 	data := map[string]any{"Users": items, "Error": pageError}
+	for key, value := range form {
+		data[key] = value
+	}
 	if session.IsSystemAdmin() {
 		enterprises, err := s.store.ListEnterprises(r.Context())
 		if err != nil {
-			http.Error(w, "load enterprises", http.StatusInternalServerError)
+			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 			return
 		}
 		data["Enterprises"] = enterprises
@@ -178,28 +242,42 @@ func (s *Server) renderUsers(w http.ResponseWriter, r *http.Request, pageError s
 	} else if r.URL.Query().Get("deleted") == "1" {
 		data["Notice"] = "사용자가 삭제 처리되었으며 로그인할 수 없습니다."
 	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
 	_ = s.templates.ExecuteTemplate(w, "users.html", s.viewData(r, "users", data))
 }
 
 func (s *Server) editUser(w http.ResponseWriter, r *http.Request) {
+	s.renderUserEdit(w, r, http.StatusOK, "", nil)
+}
+
+func (s *Server) renderUserEdit(w http.ResponseWriter, r *http.Request, status int, pageError string, form map[string]any) {
 	session := sessionFrom(r)
 	user, err := s.store.UserByID(r.Context(), r.PathValue("id"))
 	if err != nil || !sessionCanManageUser(session, user) {
-		http.Error(w, "user not found", http.StatusNotFound)
+		s.renderAdminError(w, r, http.StatusNotFound, "사용자를 찾을 수 없습니다", "삭제되었거나 관리 권한이 없는 사용자입니다.")
 		return
 	}
-	_ = s.templates.ExecuteTemplate(w, "user-edit.html", s.viewData(r, "users", map[string]any{"User": user, "IsSelf": user.ID == session.UserID}))
+	data := map[string]any{"User": user, "IsSelf": user.ID == session.UserID, "Error": pageError, "FormDisplayName": user.DisplayName, "FormRole": string(user.Role), "FormActive": user.Active}
+	for key, value := range form {
+		data[key] = value
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	_ = s.templates.ExecuteTemplate(w, "user-edit.html", s.viewData(r, "users", data))
 }
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
 		return
 	}
 	session := sessionFrom(r)
 	user, err := s.store.UserByID(r.Context(), r.PathValue("id"))
 	if err != nil || !sessionCanManageUser(session, user) {
-		http.Error(w, "user not found", http.StatusNotFound)
+		s.renderAdminError(w, r, http.StatusNotFound, "사용자를 찾을 수 없습니다", "삭제되었거나 관리 권한이 없는 사용자입니다.")
 		return
 	}
 	displayName := truncate(strings.TrimSpace(r.FormValue("display_name")), 255)
@@ -208,30 +286,30 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 	passwordHash := ""
 	if displayName == "" || !validEnterpriseRole(role) {
-		http.Error(w, "표시 이름과 권한을 확인하세요.", http.StatusBadRequest)
+		s.renderUserEdit(w, r, http.StatusBadRequest, "표시 이름과 권한을 확인하세요.", map[string]any{"FormDisplayName": displayName, "FormRole": string(role), "FormActive": active})
 		return
 	}
 	if user.ID == session.UserID && (role != RoleEnterpriseAdmin || !active) {
-		http.Error(w, "자기 자신의 기업 관리자 권한이나 로그인 상태는 해제할 수 없습니다.", http.StatusConflict)
+		s.renderUserEdit(w, r, http.StatusConflict, "자기 자신의 기업 관리자 권한이나 로그인 상태는 해제할 수 없습니다.", map[string]any{"FormDisplayName": displayName, "FormRole": string(role), "FormActive": active})
 		return
 	}
 	if password != "" {
 		if len([]rune(password)) < 12 || len([]rune(password)) > 256 || password != r.FormValue("password_confirm") {
-			http.Error(w, "새 비밀번호는 12자 이상이며 확인 값과 같아야 합니다.", http.StatusBadRequest)
+			s.renderUserEdit(w, r, http.StatusBadRequest, "새 비밀번호는 12자 이상이며 확인 값과 같아야 합니다.", map[string]any{"FormDisplayName": displayName, "FormRole": string(role), "FormActive": active})
 			return
 		}
 		passwordHash, err = hashPassword(password)
 		if err != nil {
-			http.Error(w, "password update unavailable", http.StatusInternalServerError)
+			s.renderUserEdit(w, r, http.StatusInternalServerError, "비밀번호 변경을 처리할 수 없습니다.", map[string]any{"FormDisplayName": displayName, "FormRole": string(role), "FormActive": active})
 			return
 		}
 	}
 	if err := s.store.UpdateEnterpriseUser(r.Context(), user.EnterpriseID, user.ID, displayName, passwordHash, role, active); err != nil {
 		if errors.Is(err, ErrLastEnterpriseAdmin) {
-			http.Error(w, "기업에는 활성 기업 관리자가 한 명 이상 필요합니다.", http.StatusConflict)
+			s.renderUserEdit(w, r, http.StatusConflict, "기업에는 활성 기업 관리자가 한 명 이상 필요합니다.", map[string]any{"FormDisplayName": displayName, "FormRole": string(role), "FormActive": active})
 			return
 		}
-		http.Error(w, "사용자를 수정할 수 없습니다.", http.StatusConflict)
+		s.renderUserEdit(w, r, http.StatusConflict, "사용자를 수정할 수 없습니다.", map[string]any{"FormDisplayName": displayName, "FormRole": string(role), "FormActive": active})
 		return
 	}
 	s.audit(r, session.Username, "user.update", user.ID+":"+string(role), "success")
@@ -240,29 +318,29 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
 		return
 	}
 	if r.FormValue("confirm") != "confirmed" {
-		http.Error(w, "confirmation is required", http.StatusBadRequest)
+		s.renderUserEdit(w, r, http.StatusBadRequest, "사용자 삭제 내용을 확인해야 합니다.", nil)
 		return
 	}
 	session := sessionFrom(r)
 	user, err := s.store.UserByID(r.Context(), r.PathValue("id"))
 	if err != nil || !sessionCanManageUser(session, user) {
-		http.Error(w, "user not found", http.StatusNotFound)
+		s.renderAdminError(w, r, http.StatusNotFound, "사용자를 찾을 수 없습니다", "삭제되었거나 관리 권한이 없는 사용자입니다.")
 		return
 	}
 	if user.ID == session.UserID {
-		http.Error(w, "자기 자신의 기업 관리자 계정은 삭제할 수 없습니다.", http.StatusConflict)
+		s.renderUserEdit(w, r, http.StatusConflict, "자기 자신의 기업 관리자 계정은 삭제할 수 없습니다.", nil)
 		return
 	}
 	if err := s.store.DeleteEnterpriseUser(r.Context(), user.EnterpriseID, user.ID); err != nil {
 		if errors.Is(err, ErrLastEnterpriseAdmin) {
-			http.Error(w, "기업에는 활성 기업 관리자가 한 명 이상 필요합니다.", http.StatusConflict)
+			s.renderUserEdit(w, r, http.StatusConflict, "기업에는 활성 기업 관리자가 한 명 이상 필요합니다.", nil)
 			return
 		}
-		http.Error(w, "사용자를 삭제할 수 없습니다.", http.StatusConflict)
+		s.renderUserEdit(w, r, http.StatusConflict, "사용자를 삭제할 수 없습니다.", nil)
 		return
 	}
 	s.audit(r, session.Username, "user.delete", user.ID, "success")
@@ -281,7 +359,7 @@ func sessionCanManageUser(session sessionData, user UserRecord) bool {
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
 		return
 	}
 	session := sessionFrom(r)
@@ -294,21 +372,21 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		enterpriseID = session.EnterpriseID
 	}
 	if !validUsername(username) || displayName == "" || len([]rune(password)) < 12 || len([]rune(password)) > 256 || password != r.FormValue("password_confirm") || !validEnterpriseRole(role) {
-		s.renderUsers(w, r, "사용자명, 표시 이름, 역할과 12자 이상의 동일한 비밀번호를 확인하세요.")
+		s.renderUsersWithForm(w, r, http.StatusBadRequest, "사용자명, 표시 이름, 역할과 12자 이상의 동일한 비밀번호를 확인하세요.", map[string]any{"FormEnterpriseID": enterpriseID, "FormRole": string(role), "FormUsername": username, "FormDisplayName": displayName})
 		return
 	}
 	if exists, err := s.store.EnterpriseExists(r.Context(), enterpriseID); err != nil || !exists {
-		s.renderUsers(w, r, "유효한 기업을 선택하세요.")
+		s.renderUsersWithForm(w, r, http.StatusBadRequest, "유효한 기업을 선택하세요.", map[string]any{"FormEnterpriseID": enterpriseID, "FormRole": string(role), "FormUsername": username, "FormDisplayName": displayName})
 		return
 	}
 	passwordHash, err := hashPassword(password)
 	if err != nil {
-		http.Error(w, "create user", http.StatusInternalServerError)
+		s.renderUsersWithForm(w, r, http.StatusInternalServerError, "사용자 비밀번호를 안전하게 처리할 수 없습니다. 잠시 후 다시 시도하세요.", map[string]any{"FormEnterpriseID": enterpriseID, "FormRole": string(role), "FormUsername": username, "FormDisplayName": displayName})
 		return
 	}
 	user, err := s.store.CreateEnterpriseUser(r.Context(), enterpriseID, username, displayName, passwordHash, role, session.UserID)
 	if err != nil {
-		s.renderUsers(w, r, "사용자 생성에 실패했습니다. 같은 사용자명이 등록되어 있는지 확인하세요.")
+		s.renderUsersWithForm(w, r, http.StatusConflict, "사용자 생성에 실패했습니다. 같은 사용자명이 등록되어 있는지 확인하세요.", map[string]any{"FormEnterpriseID": enterpriseID, "FormRole": string(role), "FormUsername": username, "FormDisplayName": displayName})
 		return
 	}
 	s.audit(r, session.Username, "user.create", user.ID+":"+string(user.Role), "success")

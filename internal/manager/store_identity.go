@@ -8,10 +8,30 @@ import (
 )
 
 type EnterpriseRecord struct {
-	ID        string
-	Name      string
-	CreatedAt time.Time
+	ID                   string
+	Name                 string
+	Status               string
+	TerminatedAt         sql.NullTime
+	UserCount            uint64
+	ServerCount          uint64
+	PolicyCount          uint64
+	GroupCount           uint64
+	EnrollmentTokenCount uint64
+	InstallTokenCount    uint64
+	CreatedAt            time.Time
 }
+
+func (e EnterpriseRecord) Active() bool { return e.Status == "ACTIVE" }
+func (e EnterpriseRecord) StatusLabel() string {
+	if e.Active() {
+		return "운영 중"
+	}
+	return "운영 종료"
+}
+func (e EnterpriseRecord) DependencyCount() uint64 {
+	return e.UserCount + e.ServerCount + e.PolicyCount + e.GroupCount + e.EnrollmentTokenCount + e.InstallTokenCount
+}
+func (e EnterpriseRecord) CanDeletePermanently() bool { return e.DependencyCount() == 0 }
 
 type UserRecord struct {
 	ID             string
@@ -57,12 +77,14 @@ SELECT ?,?,?,?,'system_admin',TRUE,1 FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM a
 
 func (s *Store) UserByUsername(ctx context.Context, username string) (UserRecord, error) {
 	return scanUser(s.db.QueryRowContext(ctx, `SELECT u.id,COALESCE(u.enterprise_id,''),COALESCE(e.name,''),u.username,u.display_name,u.password_hash,u.role,u.is_active,u.last_login_at,u.created_at
-FROM admin_users u LEFT JOIN enterprises e ON e.id=u.enterprise_id WHERE u.username=? AND u.deleted_at IS NULL`, username))
+FROM admin_users u LEFT JOIN enterprises e ON e.id=u.enterprise_id
+WHERE u.username=? AND u.deleted_at IS NULL AND (u.enterprise_id IS NULL OR e.status='ACTIVE')`, username))
 }
 
 func (s *Store) UserByID(ctx context.Context, id string) (UserRecord, error) {
 	return scanUser(s.db.QueryRowContext(ctx, `SELECT u.id,COALESCE(u.enterprise_id,''),COALESCE(e.name,''),u.username,u.display_name,u.password_hash,u.role,u.is_active,u.last_login_at,u.created_at
-FROM admin_users u LEFT JOIN enterprises e ON e.id=u.enterprise_id WHERE u.id=? AND u.deleted_at IS NULL`, id))
+FROM admin_users u LEFT JOIN enterprises e ON e.id=u.enterprise_id
+WHERE u.id=? AND u.deleted_at IS NULL AND (u.enterprise_id IS NULL OR e.status='ACTIVE')`, id))
 }
 
 type rowScanner interface {
@@ -130,7 +152,7 @@ VALUES (?,?,?,?,?,?)`, randomID(), "system-recovery", "system_admin.password_res
 }
 
 func (s *Store) ListEnterprises(ctx context.Context) ([]EnterpriseRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,created_at FROM enterprises ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,status,terminated_at,created_at FROM enterprises WHERE status='ACTIVE' ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +160,7 @@ func (s *Store) ListEnterprises(ctx context.Context) ([]EnterpriseRecord, error)
 	items := make([]EnterpriseRecord, 0)
 	for rows.Next() {
 		var item EnterpriseRecord
-		if err := rows.Scan(&item.ID, &item.Name, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Status, &item.TerminatedAt, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -148,7 +170,7 @@ func (s *Store) ListEnterprises(ctx context.Context) ([]EnterpriseRecord, error)
 
 func (s *Store) EnterpriseExists(ctx context.Context, id string) (bool, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM enterprises WHERE id=?`, id).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM enterprises WHERE id=? AND status='ACTIVE'`, id).Scan(&count)
 	return count == 1, err
 }
 
@@ -159,7 +181,7 @@ func (s *Store) CreateEnterprise(ctx context.Context, name, creatorID string) (E
 		return EnterpriseRecord{}, err
 	}
 	var item EnterpriseRecord
-	err = s.db.QueryRowContext(ctx, `SELECT id,name,created_at FROM enterprises WHERE id=?`, id).Scan(&item.ID, &item.Name, &item.CreatedAt)
+	err = s.db.QueryRowContext(ctx, `SELECT id,name,status,terminated_at,created_at FROM enterprises WHERE id=?`, id).Scan(&item.ID, &item.Name, &item.Status, &item.TerminatedAt, &item.CreatedAt)
 	return item, err
 }
 
@@ -195,9 +217,17 @@ func (s *Store) CreateEnterpriseUser(ctx context.Context, enterpriseID, username
 		return UserRecord{}, errors.New("valid enterprise and role are required")
 	}
 	id := randomID()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO admin_users(id,enterprise_id,username,display_name,password_hash,role,is_active,created_by) VALUES (?,?,?,?,?,?,TRUE,?)`, id, enterpriseID, username, displayName, passwordHash, role, creatorID)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO admin_users(id,enterprise_id,username,display_name,password_hash,role,is_active,created_by)
+SELECT ?,e.id,?,?,?,?,TRUE,? FROM enterprises e WHERE e.id=? AND e.status='ACTIVE'`, id, username, displayName, passwordHash, role, creatorID, enterpriseID)
 	if err != nil {
 		return UserRecord{}, err
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return UserRecord{}, err
+	}
+	if created != 1 {
+		return UserRecord{}, ErrEnterpriseNotActive
 	}
 	return s.UserByID(ctx, id)
 }

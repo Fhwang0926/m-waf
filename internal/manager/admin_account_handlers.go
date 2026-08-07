@@ -10,11 +10,11 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateOwnPassword(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.renderAccountError(w, r, "입력 내용을 읽을 수 없습니다. 다시 입력하세요.")
 		return
 	}
 	session := sessionFrom(r)
@@ -30,11 +30,11 @@ func (s *Server) updateOwnPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	passwordHash, err := hashPassword(password)
 	if err != nil {
-		http.Error(w, "password change unavailable", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "비밀번호를 변경할 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	if err := s.store.UpdateOwnPassword(r.Context(), session.UserID, passwordHash); err != nil {
-		http.Error(w, "password change unavailable", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "비밀번호를 변경할 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	s.audit(r, session.Username, "account.password_change", session.UserID, "success")

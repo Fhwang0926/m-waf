@@ -1,0 +1,7 @@
+{{define "error.html"}}
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 오류</title><link rel="stylesheet" href="/static/app.css"></head>
+<body>{{template "navigation" .}}<main class="container narrow">
+  <div class="page-head"><div><p class="eyebrow">요청 처리 오류</p><h1>{{.Title}}</h1><p class="muted">HTTP {{.Status}}</p></div></div>
+  <section class="panel"><div class="alert error" role="alert"><strong>{{.Title}}</strong><div>{{.Message}}</div></div><div class="actions"><a class="button" href="/">대시보드로 이동</a></div></section>
+</main></body></html>
+{{end}}

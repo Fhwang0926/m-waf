@@ -15,31 +15,35 @@ import (
 func (s *Server) systemPolicies(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListSystemPolicyVersions(r.Context())
 	if err != nil {
-		http.Error(w, "load system policies", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "시스템 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	_ = s.templates.ExecuteTemplate(w, "system-policies.html", s.viewData(r, "system-policies", map[string]any{"Policies": items}))
 }
 
 func (s *Server) enterprisePolicyDetail(w http.ResponseWriter, r *http.Request) {
+	s.renderEnterprisePolicyDetail(w, r, http.StatusOK, "")
+}
+
+func (s *Server) renderEnterprisePolicyDetail(w http.ResponseWriter, r *http.Request, status int, pageError string) {
 	session := sessionFrom(r)
 	policy, err := s.store.EnterprisePolicyByID(r.Context(), session.ScopeEnterpriseID(), r.PathValue("id"))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			http.NotFound(w, r)
+			s.renderAdminError(w, r, http.StatusNotFound, "기업 정책을 찾을 수 없습니다", "삭제되었거나 현재 기업 범위에서 접근할 수 없는 정책입니다.")
 			return
 		}
-		http.Error(w, "load enterprise policy", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	rollouts, err := s.store.ListPolicyRollouts(r.Context(), session.ScopeEnterpriseID(), policy.ID, 50)
 	if err != nil {
-		http.Error(w, "load policy rollouts", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "단계 배포 이력을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	revisions, err := s.store.ListPolicyRevisions(r.Context(), session.ScopeEnterpriseID(), policy.ID, 50)
 	if err != nil {
-		http.Error(w, "load policy revisions", http.StatusInternalServerError)
+		s.renderAdminError(w, r, http.StatusInternalServerError, "정책 개정본을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
 	rollbackAvailable := false
@@ -53,7 +57,10 @@ func (s *Server) enterprisePolicyDetail(w http.ResponseWriter, r *http.Request) 
 	}
 	data := map[string]any{
 		"Policy": policy, "Rollouts": rollouts, "Revisions": revisions, "RollbackAvailable": rollbackAvailable,
-		"Notice": r.URL.Query().Get("notice"),
+		"Notice": r.URL.Query().Get("notice"), "Error": pageError,
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
 	}
 	_ = s.templates.ExecuteTemplate(w, "enterprise-policy.html", s.viewData(r, "policies", data))
 }
@@ -67,7 +74,7 @@ func (s *Server) updateEnterprisePolicyStrategy(w http.ResponseWriter, r *http.R
 	expectedRevisionID := strings.TrimSpace(r.FormValue("expected_revision_id"))
 	strategy := strings.TrimSpace(r.FormValue("update_strategy"))
 	if err := s.store.UpdateEnterprisePolicyStrategy(r.Context(), session.ScopeEnterpriseID(), policyID, expectedRevisionID, strategy, session.UserID); err != nil {
-		s.writePolicyMutationError(w, err)
+		s.writePolicyMutationError(w, r, policyID, err)
 		return
 	}
 	s.audit(r, session.Username, "enterprise_policy.strategy", policyID+":"+strategy, "success")
@@ -84,7 +91,7 @@ func (s *Server) approveEnterprisePolicyRollout(w http.ResponseWriter, r *http.R
 	rolloutID := r.PathValue("rollout_id")
 	expectedRevisionID := strings.TrimSpace(r.FormValue("expected_revision_id"))
 	if err := s.store.ApprovePolicyRollout(r.Context(), session.ScopeEnterpriseID(), policyID, rolloutID, expectedRevisionID, session.UserID); err != nil {
-		s.writePolicyMutationError(w, err)
+		s.writePolicyMutationError(w, r, policyID, err)
 		return
 	}
 	s.audit(r, session.Username, "enterprise_policy.rollout_approve", policyID+":"+rolloutID, "success")
@@ -101,7 +108,7 @@ func (s *Server) retryEnterprisePolicyRollout(w http.ResponseWriter, r *http.Req
 	rolloutID := r.PathValue("rollout_id")
 	expectedRevisionID := strings.TrimSpace(r.FormValue("expected_revision_id"))
 	if err := s.store.RetryPolicyRollout(r.Context(), session.ScopeEnterpriseID(), policyID, rolloutID, expectedRevisionID, session.UserID); err != nil {
-		s.writePolicyMutationError(w, err)
+		s.writePolicyMutationError(w, r, policyID, err)
 		return
 	}
 	s.audit(r, session.Username, "enterprise_policy.rollout_retry", policyID+":"+rolloutID, "success")
@@ -115,14 +122,18 @@ func (s *Server) convertLegacyEnterprisePolicy(w http.ResponseWriter, r *http.Re
 	}
 	session := sessionFrom(r)
 	policyID := r.PathValue("id")
+	if r.FormValue("confirm") != "confirmed" {
+		s.renderEnterprisePolicyDetail(w, r, http.StatusBadRequest, "시스템 정책 기반 전환 내용을 확인해야 합니다.")
+		return
+	}
 	expectedRevisionID := strings.TrimSpace(r.FormValue("expected_revision_id"))
 	policy, err := s.store.EnterprisePolicyByID(r.Context(), session.ScopeEnterpriseID(), policyID)
 	if err != nil {
-		s.writePolicyMutationError(w, err)
+		s.writePolicyMutationError(w, r, policyID, err)
 		return
 	}
 	if policy.Status != EnterprisePolicyLegacyLocked || policy.CurrentRevisionID != expectedRevisionID {
-		s.writePolicyMutationError(w, errors.New("enterprise policy revision changed"))
+		s.writePolicyMutationError(w, r, policyID, errors.New("enterprise policy revision changed"))
 		return
 	}
 	targetTemplate := s.policyCatalog.Default()
@@ -149,12 +160,12 @@ func (s *Server) convertLegacyEnterprisePolicy(w http.ResponseWriter, r *http.Re
 	}
 	servers, err := s.store.ListServers(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
 	if err != nil {
-		http.Error(w, "load policy target servers", http.StatusInternalServerError)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 대상 서버를 불러올 수 없습니다.")
 		return
 	}
 	policies, err := s.store.ListEnterprisePolicies(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
 	if err != nil {
-		http.Error(w, "load enterprise policies", http.StatusInternalServerError)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다.")
 		return
 	}
 	candidate := policy
@@ -170,24 +181,24 @@ func (s *Server) convertLegacyEnterprisePolicy(w http.ResponseWriter, r *http.Re
 	eligiblePolicies = append(eligiblePolicies, candidate)
 	winners, err := s.enterprisePolicyWinners(r.Context(), eligiblePolicies, servers)
 	if err != nil {
-		http.Error(w, "resolve policy priority", http.StatusInternalServerError)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 우선순위를 계산할 수 없습니다.")
 		return
 	}
 	serverIDs := winners[policy.ID]
 	if len(serverIDs) == 0 {
-		http.Error(w, "기존 정책 대상을 전환할 수 없습니다.", http.StatusConflict)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "현재 우선순위에서 이 정책이 적용되는 서버가 없어 전환할 수 없습니다.")
 		return
 	}
 	serverIDs = orderIDsByServers(serverIDs, servers)
 	revision, fullPath, err := s.preparePolicyRevision(targetTemplate, policy.Name, policy.Description, mode, settings, policy.CurrentRevisionID, "legacy-conversion")
 	if err != nil {
-		http.Error(w, "기존 정책 설정을 전환할 수 없습니다: "+err.Error(), http.StatusConflict)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "기존 정책 설정을 전환할 수 없습니다: "+err.Error())
 		return
 	}
 	rolloutID, err := s.store.ConvertLegacyEnterprisePolicy(r.Context(), policy, expectedRevisionID, targetTemplate.Key, session.UserID, revision, serverIDs)
 	if err != nil {
 		_ = os.Remove(fullPath)
-		s.writePolicyMutationError(w, err)
+		s.writePolicyMutationError(w, r, policyID, err)
 		return
 	}
 	s.audit(r, session.Username, "enterprise_policy.legacy_convert", policyID+":"+rolloutID, "success")
@@ -201,44 +212,48 @@ func (s *Server) rollbackEnterprisePolicy(w http.ResponseWriter, r *http.Request
 	}
 	session := sessionFrom(r)
 	policyID := r.PathValue("id")
+	if r.FormValue("confirm") != "confirmed" {
+		s.renderEnterprisePolicyDetail(w, r, http.StatusBadRequest, "정책과 패키지 롤백 내용을 확인해야 합니다.")
+		return
+	}
 	expectedRevisionID := strings.TrimSpace(r.FormValue("expected_revision_id"))
 	policy, err := s.store.EnterprisePolicyByID(r.Context(), session.ScopeEnterpriseID(), policyID)
 	if err != nil {
-		s.writePolicyMutationError(w, err)
+		s.writePolicyMutationError(w, r, policyID, err)
 		return
 	}
 	if policy.Status != EnterprisePolicyActive || policy.CurrentRevisionID != expectedRevisionID || policy.PreviousRevisionID == "" {
-		s.writePolicyMutationError(w, errors.New("enterprise policy revision changed"))
+		s.writePolicyMutationError(w, r, policyID, errors.New("enterprise policy revision changed"))
 		return
 	}
 	previous, err := s.store.PolicyRevisionByID(r.Context(), policy.ID, policy.PreviousRevisionID)
 	if err != nil {
-		s.writePolicyMutationError(w, err)
+		s.writePolicyMutationError(w, r, policyID, err)
 		return
 	}
 	targetTemplate, ok := splitSystemPolicyReference(s.policyCatalog, previous.SystemPolicyVersionID)
 	if !ok || targetTemplate.Status == systempolicy.StatusWithdrawn {
-		http.Error(w, "회수되었거나 알 수 없는 시스템 정책 버전으로는 롤백할 수 없습니다.", http.StatusConflict)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "회수되었거나 알 수 없는 시스템 정책 버전으로는 롤백할 수 없습니다.")
 		return
 	}
 	servers, err := s.store.ListServers(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
 	if err != nil {
-		http.Error(w, "load policy target servers", http.StatusInternalServerError)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 대상 서버를 불러올 수 없습니다.")
 		return
 	}
 	policies, err := s.store.ListEnterprisePolicies(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
 	if err != nil {
-		http.Error(w, "load enterprise policies", http.StatusInternalServerError)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다.")
 		return
 	}
 	winners, err := s.enterprisePolicyWinners(r.Context(), policies, servers)
 	if err != nil {
-		http.Error(w, "resolve policy targets", http.StatusInternalServerError)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 우선순위를 계산할 수 없습니다.")
 		return
 	}
 	serverIDs := orderIDsByServers(winners[policy.ID], servers)
 	if len(serverIDs) == 0 {
-		http.Error(w, "현재 이 정책이 우선 적용되는 서버가 없습니다.", http.StatusConflict)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "현재 이 정책이 우선 적용되는 서버가 없습니다.")
 		return
 	}
 	serverByID := make(map[string]ServerRecord, len(servers))
@@ -251,17 +266,17 @@ func (s *Server) rollbackEnterprisePolicy(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		if s.catalog == nil {
-			http.Error(w, "서명된 롤백 패키지 bundle을 사용할 수 없습니다.", http.StatusConflict)
+			s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "서명된 롤백 패키지 bundle을 사용할 수 없습니다.")
 			return
 		}
 		if _, _, err := s.catalog.ResolveCRS(server.Inventory, targetTemplate.CRSVersion); err != nil {
-			http.Error(w, "호환되는 롤백 패키지가 없어 실행할 수 없습니다: "+err.Error(), http.StatusConflict)
+			s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "호환되는 롤백 패키지가 없어 실행할 수 없습니다: "+err.Error())
 			return
 		}
 	}
 	rolloutID, err := s.store.CreatePolicyRollout(r.Context(), policy, expectedRevisionID, "ROLLBACK", "QUEUED", session.UserID, nil, previous.ID, previous.SystemPolicyVersionID, serverIDs)
 	if err != nil {
-		s.writePolicyMutationError(w, err)
+		s.writePolicyMutationError(w, r, policyID, err)
 		return
 	}
 	s.audit(r, session.Username, "enterprise_policy.rollback", policyID+":"+rolloutID, "success")
@@ -271,22 +286,31 @@ func (s *Server) rollbackEnterprisePolicy(w http.ResponseWriter, r *http.Request
 
 func (s *Server) requirePolicyForm(w http.ResponseWriter, r *http.Request) bool {
 	if !s.validCSRF(r) {
-		http.Error(w, "invalid csrf token", http.StatusForbidden)
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
 		return false
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form", http.StatusBadRequest)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusBadRequest, "입력 내용을 읽을 수 없습니다. 다시 시도하세요.")
+		return false
+	}
+	active, err := s.store.EnterprisePolicyActive(r.Context(), sessionFrom(r).ScopeEnterpriseID(), r.PathValue("id"))
+	if err != nil {
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "기업 상태를 확인할 수 없습니다.")
+		return false
+	}
+	if !active {
+		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "운영 종료된 기업의 정책은 변경할 수 없습니다.")
 		return false
 	}
 	return true
 }
 
-func (s *Server) writePolicyMutationError(w http.ResponseWriter, err error) {
+func (s *Server) writePolicyMutationError(w http.ResponseWriter, r *http.Request, policyID string, err error) {
 	if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "revision changed") || strings.Contains(err.Error(), "active rollout") {
-		http.Error(w, "정책 개정본 또는 rollout 상태가 변경되었습니다. 화면을 새로고침한 뒤 다시 시도하세요.", http.StatusConflict)
+		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "정책 개정본 또는 단계 배포 상태가 변경되었습니다. 새로고침 후 최신 상태를 확인하고 다시 시도하세요.")
 		return
 	}
-	http.Error(w, "정책 작업을 처리할 수 없습니다.", http.StatusInternalServerError)
+	s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 작업을 처리할 수 없습니다. 잠시 후 다시 시도하세요.")
 }
 
 func (s *Server) redirectEnterprisePolicy(w http.ResponseWriter, r *http.Request, policyID, notice string) {

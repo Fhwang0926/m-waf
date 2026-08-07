@@ -72,10 +72,17 @@ func (s *Store) CreateEnterpriseInstallToken(ctx context.Context, enterpriseID, 
 		maximum = maxEnrollments
 		maximumValue = sql.NullInt64{Int64: int64(maxEnrollments), Valid: true}
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO enterprise_install_tokens(id,enterprise_id,name,token_prefix,token_hash,expires_at,max_enrollments,created_by)
-VALUES (?,?,?,?,?,?,?,?)`, id, enterpriseID, name, installTokenPrefix(token), tokenHash(token), expiresAt, maximum, createdBy)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO enterprise_install_tokens(id,enterprise_id,name,token_prefix,token_hash,expires_at,max_enrollments,created_by)
+SELECT ?,e.id,?,?,?,?,?,? FROM enterprises e WHERE e.id=? AND e.status='ACTIVE'`, id, name, installTokenPrefix(token), tokenHash(token), expiresAt, maximum, createdBy, enterpriseID)
 	if err != nil {
 		return EnterpriseInstallTokenRecord{}, "", err
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return EnterpriseInstallTokenRecord{}, "", err
+	}
+	if created != 1 {
+		return EnterpriseInstallTokenRecord{}, "", ErrEnterpriseNotActive
 	}
 	return EnterpriseInstallTokenRecord{ID: id, EnterpriseID: enterpriseID, Name: name, TokenPrefix: installTokenPrefix(token), ExpiresAt: expiresAt, MaxEnrollments: maximumValue, CreatedAt: createdAt}, token, nil
 }
@@ -141,8 +148,9 @@ func (s *Store) ExchangeEnterpriseInstallToken(ctx context.Context, installToken
 	var revokedAt sql.NullTime
 	var maximum sql.NullInt64
 	var enrollmentCount uint64
-	if err := tx.QueryRowContext(ctx, `SELECT id,enterprise_id,expires_at,revoked_at,max_enrollments,enrollment_count
-FROM enterprise_install_tokens WHERE token_hash=? FOR UPDATE`, tokenHash(installToken)).Scan(&id, &enterpriseID, &expiresAt, &revokedAt, &maximum, &enrollmentCount); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT t.id,t.enterprise_id,t.expires_at,t.revoked_at,t.max_enrollments,t.enrollment_count
+FROM enterprise_install_tokens t JOIN enterprises e ON e.id=t.enterprise_id
+WHERE t.token_hash=? AND e.status='ACTIVE' FOR UPDATE`, tokenHash(installToken)).Scan(&id, &enterpriseID, &expiresAt, &revokedAt, &maximum, &enrollmentCount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", time.Time{}, ErrInvalidInstallToken
 		}

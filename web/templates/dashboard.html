@@ -10,15 +10,16 @@
 <body>
   {{template "navigation" .}}
   <main class="container">
-    <div class="page-head"><div><p class="eyebrow">CONTROL PLANE</p><h1>운영 현황</h1></div><span class="badge {{if .Ready}}ok{{else}}warn{{end}}">{{if .Ready}}정상{{else}}점검 필요{{end}}</span></div>
-    {{if .Notice}}<div class="alert">{{.Notice}}</div>{{end}}
+    <div class="page-head"><div><p class="eyebrow">대시보드</p><h1>운영 현황</h1><p class="muted">보호 서버와 최근 24시간 보안 이벤트를 확인합니다.</p></div><div class="actions"><span class="badge ok">Manager 정상</span><span class="badge {{if .Ready}}info{{else}}warn{{end}}">Package bundle {{if .Ready}}{{.BundleVersion}}{{else}}준비 필요{{end}}</span></div></div>
+    {{if .Notice}}<div class="alert warn" role="alert"><strong>운영 확인 필요</strong><div>{{.Notice}}</div></div>{{end}}
     <section class="stats">
-      <article><span>등록 서버</span><strong>{{len .Servers}}</strong></article>
-      <article><span>최근 이벤트</span><strong>{{len .Events}}</strong></article>
-      <article><span>Package bundle</span><strong class="small">{{.BundleVersion}}</strong></article>
+      <article><span>활성 서버</span><strong>{{.Summary.ActiveServers}}</strong><small>등록 해제 서버 제외</small></article>
+      <article><span>온라인 서버</span><strong>{{.Summary.OnlineServers}}</strong><small>2분 이내 heartbeat</small></article>
+      <article><span>24시간 이벤트</span><strong>{{.Summary.Events24Hours}}</strong><small>탐지와 차단 합계</small></article>
+      <article><span>24시간 차단</span><strong>{{.Summary.Blocked24Hours}}</strong><small>차단 처리된 요청</small></article>
     </section>
-    <section class="panel"><div class="panel-head"><h2>보호 서버</h2><a href="/servers">전체 보기</a></div>
-      {{if .Servers}}<table><thead><tr>{{if .IsSystemAdmin}}<th>기업</th>{{end}}<th>서버</th><th>웹서버</th><th>상태</th><th>마지막 연결</th></tr></thead><tbody>{{range .Servers}}<tr>{{if $.IsSystemAdmin}}<td>{{.EnterpriseName}}</td>{{end}}<td>{{.Name}}</td><td>{{.Inventory.WebServer}} {{.Inventory.WebServerVersion}} / {{if .Inventory.IntegrationMode}}{{.Inventory.IntegrationMode}}{{else}}distro{{end}}</td><td><span class="badge {{if eq .Status "ONLINE"}}ok{{else}}warn{{end}}">{{.Status}}</span></td><td>{{if .LastHeartbeatAt.Valid}}{{.LastHeartbeatAt.Time.Format "2006-01-02 15:04:05"}}{{else}}대기 중{{end}}</td></tr>{{end}}</tbody></table>{{else}}<div class="empty">등록된 서버가 없습니다. {{if .CanOperate}}<a href="/enrollments/new">첫 서버를 등록하세요.</a>{{end}}</div>{{end}}
+    <section class="panel"><div class="panel-head"><h2>최근 등록 서버</h2><a href="/servers">전체 보기</a></div>
+      {{if .Servers}}<div class="table-scroll"><table class="table-wide"><thead><tr>{{if .IsSystemAdmin}}<th>기업</th>{{end}}<th>서버</th><th>웹서버</th><th>상태</th><th>마지막 연결</th></tr></thead><tbody>{{range .Servers}}<tr>{{if $.IsSystemAdmin}}<td>{{.EnterpriseName}}</td>{{end}}<td><strong>{{.Name}}</strong></td><td>{{.Inventory.WebServer}} {{.Inventory.WebServerVersion}}<small>{{if .Inventory.IntegrationMode}}{{.Inventory.IntegrationMode}}{{else}}distro{{end}}</small></td><td><span class="badge {{.StatusClass}}" title="{{.Status}}">{{.StatusLabel}}</span></td><td>{{if .LastHeartbeatAt.Valid}}{{.LastHeartbeatAt.Time.Format "2006-01-02 15:04:05"}} UTC{{else}}대기 중{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<div class="empty">등록된 서버가 없습니다.{{if .CanOperate}}<br><a class="button" href="/enrollments/new">첫 서버 설치 및 등록</a>{{end}}</div>{{end}}
     </section>
   </main>
 </body>
