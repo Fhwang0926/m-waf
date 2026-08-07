@@ -262,7 +262,8 @@ footer { padding: 34px 0; border-top: 1px solid #253847; background: var(--navy-
   .terminal-result { grid-template-columns: 1fr; gap: 5px; }
   .support-layout { grid-template-columns: minmax(0, 1fr); }
   .support-table-wrap, .comparison-table-wrap { overflow-x: auto; }
-  .support-table-wrap table, .comparison-table-wrap table { min-width: 720px; }
+  .support-table-wrap table { min-width: 720px; }
+  .comparison-table-wrap table { min-width: 1080px; }
   .closing { padding: 70px 0; }
   .closing-inner { grid-template-columns: minmax(0, 1fr); gap: 30px; }
   .footer-inner, .footer-inner > div:first-child { align-items: flex-start; flex-direction: column; }

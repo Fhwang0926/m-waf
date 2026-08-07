@@ -14,7 +14,7 @@
   <title>M-WAF | 호스팅사를 위한 self-hosted 웹방화벽</title>
   <link rel="canonical" href="https://fhwang0926.github.io/m-waf/">
   <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./assets/styles.css?v=20260807-3">
+  <link rel="stylesheet" href="./assets/styles.css?v=20260807-4">
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -236,21 +236,21 @@ sudo sh /tmp/mwaf-install.sh \
     <section class="section comparison" id="comparison">
       <div class="shell">
         <details class="comparison-details">
-          <summary><span><small>DEPLOYMENT MODEL REVIEW</small><strong>DeepFinder 공개 자료와 설치·운영 모델 비교</strong></span></summary>
+          <summary><span><small>OPEN-SOURCE WAF REVIEW</small><strong>공개 오픈소스 WAF 프로젝트와 운영 모델 비교</strong></span></summary>
           <div class="comparison-body">
-            <p>DeepFinder와 M-WAF는 모두 보호 서버에서 요청을 검사하고 Manager에서 여러 서버를 관리하는 소프트웨어 WAF 구조입니다. 아래 내용은 공급사 공개 설명의 정보 항목을 M-WAF의 현재 구현 범위와 대조한 것이며, 동일 환경의 제품 성능 비교가 아닙니다.</p>
-            <div class="comparison-table-wrap" tabindex="0" aria-label="DeepFinder와 M-WAF 비교 표">
+            <p>M-WAF는 새로운 탐지 엔진을 만드는 프로젝트가 아닙니다. ModSecurity와 OWASP CRS를 고객 웹서버에 적용하고, 호스팅사가 여러 서버의 정책·상태·이벤트를 자체 Manager에서 운영하도록 관리 계층을 더한 MVP입니다.</p>
+            <div class="comparison-table-wrap" tabindex="0" aria-label="M-WAF와 공개 오픈소스 WAF 프로젝트 비교 표">
               <table>
-                <thead><tr><th>판단 기준</th><th>M-WAF MVP</th><th>DeepFinder 공개 자료</th></tr></thead>
+                <thead><tr><th>프로젝트</th><th>검사·배치 방식</th><th>정책 기반</th><th>다중 서버 운영</th><th>M-WAF와의 차이</th></tr></thead>
                 <tbody>
-                  <tr><th scope="row">차별성</th><td>ModSecurity·OWASP CRS 기반의 공개 구성, 자체 호스팅 Manager, 고객 서버 패키지 2개</td><td>기존 네트워크 변경을 줄이는 웹서버 내 필터와 상용 운영·관제 선택지</td></tr>
-                  <tr><th scope="row">보안 정책</th><td>CRS 기준의 탐지/차단, 민감도·점수, 요청 본문, URL·IP·Rule 예외</td><td>Low·Medium·High 정책 레벨과 공급사 보안 기능</td></tr>
-                  <tr><th scope="row">구성·구동</th><td>ModSecurity 통합 패키지 + 별도 Agent + Manager/MariaDB</td><td>보호 서버의 Agent 보안모듈 + 선택 가능한 통합 Manager</td></tr>
-                  <tr><th scope="row">웹서버·WAS</th><td>Ubuntu 24.04 amd64의 Apache 2.4.58·Nginx 1.24.0 직접 지원, WAS는 뒷단 연동</td><td>마켓플레이스에 IIS 6.0+, Apache 2.0+, Nginx 1.8.x+와 J2EE WAS 범위 기재</td></tr>
+                  <tr><th scope="row">M-WAF MVP</th><td>기존 Apache·Nginx 프로세스에서 검사</td><td>검증된 CRS 4.28.0 + 기업별 탐지·차단·예외 정책</td><td>Agent·Manager, 기업 격리, 단계 배포와 이벤트 수집</td><td>기존 웹서버를 유지하는 호스팅 서버군 운영에 집중</td></tr>
+                  <tr><th scope="row">ModSecurity + OWASP CRS</th><td>Apache 모듈 또는 웹서버 Connector로 직접 내장</td><td>SecLang과 CRS 파일을 운영자가 직접 구성</td><td>엔진·규칙 프로젝트 외의 관리 체계는 별도 구축</td><td>M-WAF가 그대로 사용하는 검사 엔진과 기본 규칙</td></tr>
+                  <tr><th scope="row">BunkerWeb</th><td>NGINX 기반 WAF를 리버스 프록시로 배치</td><td>내장 ModSecurity·CRS와 설정·사용자 구성</td><td>Web UI, Scheduler, DB와 다중 서비스 구성 제공</td><td>기존 웹서버 모듈이 아니라 보호 프록시 계층을 추가</td></tr>
+                  <tr><th scope="row">Coraza</th><td>Go 애플리케이션 또는 지원 Connector에 내장</td><td>ModSecurity SecLang과 OWASP CRS v4 호환</td><td>라이브러리 중심이며 운영 계층은 연동 프로젝트가 담당</td><td>대체 가능한 Go WAF 엔진으로, 현재 M-WAF에는 포함하지 않음</td></tr>
                 </tbody>
               </table>
             </div>
-            <p class="comparison-source">2026-08-07 확인: NAVER Cloud 공공기관용 <a href="https://www.gov-ncloud.com/marketplace/deepfinder">DeepFinder 마켓플레이스</a>, 공급사 <a href="https://www.deepfinder.co.kr/">제품 소개</a>와 <a href="https://docs.deepfinder.co.kr/ko/operation/part1/Architecture/">공개 구성 매뉴얼</a>. 공급사 공개 내용의 요약이며 독립적인 호환성·성능 인증이 아닙니다.</p>
+            <p class="comparison-source">2026-08-07 공식 자료 확인: <a href="https://github.com/owasp-modsecurity/ModSecurity">OWASP ModSecurity</a>, <a href="https://github.com/coreruleset/coreruleset">OWASP Core Rule Set</a>, <a href="https://docs.bunkerweb.io/">BunkerWeb</a>, <a href="https://www.coraza.io/docs/">OWASP Coraza</a>. 각 프로젝트의 현재 구조를 요약한 것으로 동일 환경의 성능·탐지율 비교가 아닙니다.</p>
           </div>
         </details>
       </div>

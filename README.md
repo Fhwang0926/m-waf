@@ -15,7 +15,7 @@ The no-build static introduction page is published with GitHub Pages:
 - Page source: `site/`
 - Deployment workflow: `.github/workflows/pages.yml`
 - Trigger: a `dev` push that changes `site/**` or the Pages workflow, and manual workflow dispatch
-- Product positioning: enterprise-oriented architecture, support scope, and a source-attributed comparison with the DeepFinder software WAF
+- Product positioning: enterprise-oriented architecture, support scope, and a source-attributed comparison with publicly documented open-source WAF projects
 
 Before the first publication, set **Repository Settings → Pages → Build and deployment → Source** to **GitHub Actions**. The workflow uploads only the `site/` directory and uses the minimum Pages deployment permissions. Until the workflow has been pushed and completed successfully, the public URL may return 404.
 
