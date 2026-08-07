@@ -24,7 +24,8 @@ ARG COMMIT=unknown
 LABEL org.opencontainers.image.source=${SOURCE_URL} \
       org.opencontainers.image.revision=${COMMIT} \
       org.opencontainers.image.title="M-WAF Manager" \
-      org.opencontainers.image.description="M-WAF control plane with embedded Agent and ModSecurity package bundle"
+      org.opencontainers.image.description="M-WAF control plane with embedded Agent and ModSecurity package bundle" \
+      io.mwaf.feature.system-admin-password-reset="true"
 COPY --from=builder --chown=65532:65532 /out/mwaf-manager /usr/local/bin/mwaf-manager
 COPY --chown=65532:65532 dist/bundle/ /opt/mwaf/bundles/current/
 COPY --chown=65532:65532 dist/package-signing.pub /etc/mwaf-manager/package-signing.pub

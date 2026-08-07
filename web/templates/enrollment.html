@@ -1,9 +1,41 @@
 {{define "enrollment.html"}}
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 서버 등록</title><link rel="stylesheet" href="/static/app.css"></head>
-	<body>{{template "navigation" .}}
-<main class="container narrow"><div class="page-head"><div><p class="eyebrow">BOOTSTRAP</p><h1>보호 서버 등록</h1></div></div>
-{{if .Token}}<section class="panel"><div class="alert warn">이 토큰은 한 번만 표시되며 {{.ExpiresAt.Format "2006-01-02 15:04:05"}} UTC에 만료됩니다.</div><h2>등록 토큰</h2><pre>{{.Token}}</pre><h2>Bootstrap 예시</h2><pre>curl --fail --cacert /path/to/manager-ca.crt {{.AgentURL}}/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
-sudo sh /tmp/mwaf-install.sh --manager {{.AgentURL}} --token {{.Token}} --ca /path/to/manager-ca.crt</pre><p class="muted">설치 전 script 내용을 검토하세요. 대상 inventory에 맞는 Agent와 모듈 두 패키지만 Manager에서 내려받습니다.</p><a class="button" href="/servers">서버 목록</a></section>
-	{{else}}<section class="panel">{{if and .IsSystemAdmin (not .Enterprises)}}<div class="empty">먼저 <a href="/enterprises">기업을 등록하세요.</a></div>{{else}}<form method="post" action="/enrollments"><input type="hidden" name="csrf" value="{{.CSRF}}">{{if .IsSystemAdmin}}<label>기업<select name="enterprise_id" required>{{range .Enterprises}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>{{end}}<label>서버 식별 이름<input name="label" maxlength="255" placeholder="web-prod-01" required></label><button type="submit">일회용 등록 토큰 생성</button></form>{{end}}</section>{{end}}
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 설치 및 등록</title><link rel="stylesheet" href="/static/app.css"></head>
+<body>{{template "navigation" .}}
+<main class="container"><div class="page-head"><div><p class="eyebrow">BOOTSTRAP</p><h1>설치 및 등록</h1><p class="muted">기업 설치 토큰 하나로 여러 웹 서버를 설치하면 Agent가 서버 정보를 수집해 자동 등록합니다.</p></div></div>
+{{if .Notice}}<div class="alert">{{.Notice}}</div>{{end}}
+
+{{if .InstallToken}}<section class="panel"><div class="alert warn">기업 설치 토큰은 지금 한 번만 표시됩니다. {{.InstallTokenRecord.ExpiresAt.Format "2006-01-02 15:04:05"}} UTC까지 사용할 수 있으며 안전한 비밀 저장소에 보관하세요.</div>
+  <h2>기업 설치 토큰</h2><pre>{{.InstallToken}}</pre>
+  <h2>고객 웹 서버에서 실행</h2><p class="muted">첫 블록을 실행한 뒤 토큰 입력 프롬프트에 위 토큰을 붙여넣습니다. 토큰은 명령줄 인자와 셸 기록에 남지 않습니다.</p>
+  <pre>umask 077
+printf '%s' '{{.CABase64}}' | base64 -d &gt; /tmp/mwaf-manager-ca.crt
+curl --fail --cacert /tmp/mwaf-manager-ca.crt {{.AgentURL}}/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
+sudo sh /tmp/mwaf-install.sh --manager {{.AgentURL}} --ca /tmp/mwaf-manager-ca.crt --install-token-stdin</pre>
+  <p class="muted">자동 배포에서는 토큰을 권한 0600 파일에 저장하고 <span class="mono">--install-token-file /secure/path/token</span>을 사용하세요. 설치 전에 스크립트를 검토하세요.</p>
+</section>{{end}}
+
+<div class="admin-grid">
+  <section class="panel"><h2>기업 설치 토큰 생성</h2>
+  {{if and .IsSystemAdmin (not .Enterprises)}}<div class="empty">먼저 <a href="/enterprises">기업을 등록하세요.</a></div>{{else}}
+  <form method="post" action="/install-tokens"><input type="hidden" name="csrf" value="{{.CSRF}}">
+    {{if .IsSystemAdmin}}<label>기업<select name="enterprise_id" required>{{range .Enterprises}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>{{end}}
+    <label>토큰 이름<input name="name" maxlength="255" placeholder="서울 IDC 설치" required><small>설치 범위나 배포 기간을 구분할 수 있는 이름을 사용하세요.</small></label>
+    <div class="form-grid"><label>유효 기간(일)<input type="number" name="expires_in_days" min="1" max="90" value="30" required></label><label>최대 등록 서버 수<input type="number" name="max_enrollments" min="1" max="10000" placeholder="비워두면 제한 없음"></label></div>
+    <button type="submit">기업 설치 토큰 생성</button>
+  </form>{{end}}</section>
+
+  <section class="panel"><h2>동작 방식</h2><ol><li>설치기가 서버 OS와 Apache/Nginx 정보를 확인합니다.</li><li>기업 토큰을 짧은 일회용 등록 세션으로 교환합니다.</li><li>Manager에 포함된 Agent와 호환 모듈만 검증해 설치합니다.</li><li>서버별 고유 mTLS 인증서를 발급하고 서버 목록에 자동 등록합니다.</li></ol><p class="muted">기업 토큰 폐기는 새 설치만 차단합니다. 이미 등록된 Agent는 고유 인증서로 계속 동작합니다.</p></section>
+</div>
+
+<section class="panel"><div class="panel-head"><h2>기업 설치 토큰</h2><span class="badge">{{len .InstallTokens}}개</span></div>
+{{if .InstallTokens}}<table><thead><tr>{{if .IsSystemAdmin}}<th>기업</th>{{end}}<th>이름</th><th>식별 접두어</th><th>상태</th><th>등록 수</th><th>만료</th><th>마지막 사용</th><th>관리</th></tr></thead><tbody>
+{{range .InstallTokens}}<tr>{{if $.IsSystemAdmin}}<td>{{.EnterpriseName}}</td>{{end}}<td>{{.Name}}</td><td><span class="mono">{{.TokenPrefix}}…</span></td><td><span class="badge {{if .Active}}ok{{else}}warn{{end}}">{{.StatusLabel}}</span></td><td>{{.EnrollmentCount}}{{if .MaxEnrollments.Valid}} / {{.MaxEnrollments.Int64}}{{else}} / 제한 없음{{end}}</td><td>{{.ExpiresAt.Format "2006-01-02 15:04"}}</td><td>{{if .LastUsedAt.Valid}}{{.LastUsedAt.Time.Format "2006-01-02 15:04"}}{{else}}미사용{{end}}</td><td>{{if .Active}}<form method="post" action="/install-tokens/{{.ID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><button class="danger" type="submit">폐기</button></form>{{else}}-{{end}}</td></tr>{{end}}
+</tbody></table>{{else}}<div class="empty">생성된 기업 설치 토큰이 없습니다.</div>{{end}}</section>
+
+<details class="panel"><summary>단일 서버용 일회용 토큰</summary><p class="muted">기존 자동화와 복구 작업을 위한 호환 기능입니다. 일반적인 다수 서버 설치에는 기업 설치 토큰을 사용하세요.</p>
+{{if .Token}}<div class="alert warn">이 토큰은 한 번만 표시되며 {{.ExpiresAt.Format "2006-01-02 15:04:05"}} UTC에 만료됩니다.</div><pre>{{.Token}}</pre><pre>curl --fail --cacert /path/to/manager-ca.crt {{.AgentURL}}/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
+sudo sh /tmp/mwaf-install.sh --manager {{.AgentURL}} --token {{.Token}} --ca /path/to/manager-ca.crt</pre>{{else}}
+{{if and .IsSystemAdmin (not .Enterprises)}}<div class="empty">먼저 기업을 등록하세요.</div>{{else}}<form method="post" action="/enrollments"><input type="hidden" name="csrf" value="{{.CSRF}}">{{if .IsSystemAdmin}}<label>기업<select name="enterprise_id" required>{{range .Enterprises}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>{{end}}<label>서버 식별 이름<input name="label" maxlength="255" placeholder="web-prod-01" required></label><button type="submit">일회용 등록 토큰 생성</button></form>{{end}}{{end}}
+</details>
 </main></body></html>
 {{end}}

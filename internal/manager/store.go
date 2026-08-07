@@ -116,14 +116,18 @@ func (s *Store) ValidateEnrollmentToken(ctx context.Context, token string) error
 	var used sql.NullTime
 	var enterpriseID sql.NullString
 	var expires time.Time
-	err := s.db.QueryRowContext(ctx, `SELECT enterprise_id, expires_at, used_at FROM enrollment_tokens WHERE token_hash = ?`, tokenHash(token)).Scan(&enterpriseID, &expires, &used)
+	var parentValid bool
+	err := s.db.QueryRowContext(ctx, `SELECT et.enterprise_id,et.expires_at,et.used_at,
+(et.install_token_id IS NULL OR (it.id IS NOT NULL AND it.revoked_at IS NULL AND it.expires_at > UTC_TIMESTAMP(6)))
+FROM enrollment_tokens et LEFT JOIN enterprise_install_tokens it ON it.id=et.install_token_id
+WHERE et.token_hash=?`, tokenHash(token)).Scan(&enterpriseID, &expires, &used, &parentValid)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrInvalidEnrollmentToken
 		}
 		return err
 	}
-	if !enterpriseID.Valid || enterpriseID.String == "" || used.Valid || !expires.After(time.Now().UTC()) {
+	if !enterpriseID.Valid || enterpriseID.String == "" || used.Valid || !expires.After(time.Now().UTC()) || !parentValid {
 		return ErrInvalidEnrollmentToken
 	}
 	return nil
@@ -134,7 +138,12 @@ func (s *Store) AllowEnrollmentPackages(ctx context.Context, token string, packa
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE enrollment_tokens SET allowed_packages_json = ? WHERE token_hash = ? AND used_at IS NULL AND expires_at > UTC_TIMESTAMP(6)`, raw, tokenHash(token))
+	result, err := s.db.ExecContext(ctx, `UPDATE enrollment_tokens SET allowed_packages_json=?
+WHERE token_hash=? AND used_at IS NULL AND expires_at > UTC_TIMESTAMP(6)
+AND (install_token_id IS NULL OR EXISTS (
+  SELECT 1 FROM enterprise_install_tokens it
+  WHERE it.id=enrollment_tokens.install_token_id AND it.revoked_at IS NULL AND it.expires_at > UTC_TIMESTAMP(6)
+))`, raw, tokenHash(token))
 	if err != nil {
 		return err
 	}
@@ -150,7 +159,10 @@ func (s *Store) AllowEnrollmentPackages(ctx context.Context, token string, packa
 
 func (s *Store) EnrollmentPackageAllowed(ctx context.Context, token, packageID string) (bool, error) {
 	var raw sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT allowed_packages_json FROM enrollment_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > UTC_TIMESTAMP(6)`, tokenHash(token)).Scan(&raw)
+	err := s.db.QueryRowContext(ctx, `SELECT et.allowed_packages_json
+FROM enrollment_tokens et LEFT JOIN enterprise_install_tokens it ON it.id=et.install_token_id
+WHERE et.token_hash=? AND et.used_at IS NULL AND et.expires_at > UTC_TIMESTAMP(6)
+AND (et.install_token_id IS NULL OR (it.revoked_at IS NULL AND it.expires_at > UTC_TIMESTAMP(6)))`, tokenHash(token)).Scan(&raw)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, ErrInvalidEnrollmentToken
@@ -182,7 +194,9 @@ func (s *Store) ConsumeEnrollment(ctx context.Context, token, serverID, serverNa
 	var used sql.NullTime
 	var allowedJSON sql.NullString
 	var enterpriseID sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT enterprise_id, expires_at, used_at, allowed_packages_json FROM enrollment_tokens WHERE token_hash = ? FOR UPDATE`, tokenHash(token)).Scan(&enterpriseID, &expires, &used, &allowedJSON); err != nil {
+	var installTokenID sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT enterprise_id,install_token_id,expires_at,used_at,allowed_packages_json
+FROM enrollment_tokens WHERE token_hash=? FOR UPDATE`, tokenHash(token)).Scan(&enterpriseID, &installTokenID, &expires, &used, &allowedJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrInvalidEnrollmentToken
 		}
@@ -190,6 +204,22 @@ func (s *Store) ConsumeEnrollment(ctx context.Context, token, serverID, serverNa
 	}
 	if !enterpriseID.Valid || enterpriseID.String == "" || used.Valid || !expires.After(time.Now().UTC()) {
 		return ErrInvalidEnrollmentToken
+	}
+	if installTokenID.Valid {
+		var installExpires time.Time
+		var revoked sql.NullTime
+		var maximum sql.NullInt64
+		var enrollmentCount uint64
+		if err := tx.QueryRowContext(ctx, `SELECT expires_at,revoked_at,max_enrollments,enrollment_count
+FROM enterprise_install_tokens WHERE id=? FOR UPDATE`, installTokenID.String).Scan(&installExpires, &revoked, &maximum, &enrollmentCount); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrInvalidEnrollmentToken
+			}
+			return err
+		}
+		if revoked.Valid || !installExpires.After(time.Now().UTC()) || (maximum.Valid && enrollmentCount >= uint64(maximum.Int64)) {
+			return ErrInvalidEnrollmentToken
+		}
 	}
 	raw, err := json.Marshal(inventory)
 	if err != nil {
@@ -211,6 +241,12 @@ func (s *Store) ConsumeEnrollment(ctx context.Context, token, serverID, serverNa
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET used_at = UTC_TIMESTAMP(6) WHERE token_hash = ?`, tokenHash(token)); err != nil {
 		return err
+	}
+	if installTokenID.Valid {
+		if _, err := tx.ExecContext(ctx, `UPDATE enterprise_install_tokens
+SET enrollment_count=enrollment_count+1,last_used_at=UTC_TIMESTAMP(6) WHERE id=?`, installTokenID.String); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

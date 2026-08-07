@@ -290,7 +290,7 @@ flowchart LR
     Agent -->|정책 검증 및 적용| Engine
 
     Bundle[Manager image 내장 Agent 및 모듈 bundle] --> Manager
-    Installer[일회용 bootstrap installer] -->|Inventory 및 등록 token| Manager
+    Installer[검토 가능한 bootstrap installer] -->|기업 설치 token 및 Inventory| Manager
     Manager -->|호환 Agent + 웹서버 모듈 2개 package| Installer
     Installer --> Agent
     Installer --> Module
@@ -331,7 +331,7 @@ flowchart LR
 
 | 출발지 | 목적지 | 포트 | 용도 | 비고 |
 |---|---|---:|---|---|
-| 보호 서버 bootstrap/Agent | Manager Agent API | TCP 10443 | 등록, package resolve/download, heartbeat, 정책과 이벤트 | 최초 bootstrap은 일회용 token, 등록 후 mTLS |
+| 보호 서버 bootstrap/Agent | Manager Agent API | TCP 10443 | 등록, package resolve/download, heartbeat, 정책과 이벤트 | 기업 설치 token을 단기 일회용 session으로 교환, 등록 후 mTLS |
 | 관리자 브라우저 | Manager Admin UI/API | TCP 8443 | 정책 및 서버 관리 | HTTPS, 관리망 접근 제한 |
 | Manager 컨테이너 | MariaDB 컨테이너 | TCP 3306 | 관리 데이터와 이벤트 저장 | Compose 내부 network 전용, host port 공개 금지 |
 | 외부 사용자 | 보호 서버 Apache/Nginx | 기존 80/443 | 고객 웹 트래픽 | M-WAF 관리 통신과 분리 |
@@ -464,13 +464,13 @@ ARM64와 사용자가 직접 빌드한 Apache/Nginx는 후속 지원으로 둔�
 
 ### 6.6 Manager 내장 package 선택과 bootstrap
 
-관리자가 Manager UI에서 서버 등록을 생성하면 1회용 bootstrap URL과 짧은 만료시간의 enrollment token을 발급한다. bootstrap installer는 저장소에 공개된 검토 가능한 script와 동일한 내용이며 설치 후 서버에 상주하지 않는다.
+관리자는 Manager UI에서 기업별 설치 토큰을 미리 생성한다. 같은 기업 토큰은 만료·폐기·선택적 등록 한도 전까지 여러 서버에 사용할 수 있고, 설치기는 서버 inventory와 함께 이를 Manager의 짧은 1회용 enrollment session으로 교환한다. bootstrap installer는 저장소에 공개된 검토 가능한 script와 동일한 내용이며 설치 후 서버에 상주하지 않는다.
 
 bootstrap 흐름은 다음과 같다.
 
 1. `/etc/os-release`, CPU architecture, 설치된 Apache/Nginx 종류와 version을 읽는다.
 2. Nginx는 전체 `nginx -V`, Apache는 `apachectl -V` 또는 `httpd -V`를 수집하고 정규화한 build/ABI hash를 계산한다.
-3. enrollment token과 inventory를 Manager `/bootstrap/v1/packages/resolve`에 제출한다.
+3. 기업 설치 token과 inventory를 `/bootstrap/v1/sessions`에 제출해 단기 enrollment token으로 교환한 뒤 `/bootstrap/v1/packages/resolve`에 제출한다.
 4. Manager는 자신의 image에 포함된 package catalog에서 정확히 호환되는 Agent 1개와 module 1개를 선택한다.
 5. 응답에는 `bundle_version`, package ID/version, URL, size, SHA-256, signature, 대상 조건과 만료시간을 포함한다.
 6. installer는 Manager `/bootstrap/v1/packages/{package_id}`에서 두 package를 임시 경로에 모두 내려받는다.
@@ -481,8 +481,8 @@ Manager가 제공하는 package repository는 image 안의 read-only OCI layer�
 
 ### 6.7 설치 순서
 
-1. 운영자가 Manager UI에서 1회용 bootstrap 명령을 생성한다.
-2. bootstrap installer가 서버 inventory를 수집하고 Manager에서 Agent와 module package를 resolve한다.
+1. 운영자가 Manager UI에서 기업 설치 token을 생성해 해당 기업의 설치 작업에 배포한다.
+2. bootstrap installer가 서버 inventory를 수집하고 기업 token을 단기 enrollment token으로 교환한 뒤 Agent와 module package를 resolve한다.
 3. 두 package를 모두 다운로드하여 서명, checksum과 호환 조건을 검증한다.
 4. 웹서버에 맞는 `mwaf-modsecurity-apache` 또는 `mwaf-modsecurity-nginx` package를 먼저 설치한다.
 5. package script가 변경 전 웹서버 상태를 기록하고 모듈과 전용 include를 설치한다.
@@ -1463,11 +1463,12 @@ mwaf-manager
 | Method | 경로 | 용도 |
 |---|---|---|
 | GET | `/bootstrap/v1/install.sh` | 공개 저장소와 동일 hash의 검토 가능한 bootstrap installer |
+| POST | `/bootstrap/v1/sessions` | 기업 설치 토큰과 inventory를 짧은 1회용 enrollment token으로 교환 |
 | POST | `/bootstrap/v1/packages/resolve` | enrollment token과 inventory로 Agent/module package 2개 선택 |
 | GET | `/bootstrap/v1/packages/{id}` | 만료 token으로 Manager 내장 signed package 다운로드 |
 | GET | `/packages/v1/keys` | package/bundle 검증 공개키와 fingerprint 조회 |
 
-Bootstrap API는 mTLS 발급 전 단계이므로 짧게 만료되는 1회용 enrollment token, 요청 횟수 제한, package ID allowlist와 감사 로그를 적용한다. Token은 지정 서버 등록 1건과 선택된 package 2개에만 사용할 수 있고 성공 등록 또는 만료 즉시 폐기한다. Installer 응답과 package download에는 cache 방지, 정확한 content length와 checksum header를 제공한다.
+Bootstrap API는 mTLS 발급 전 단계이므로 기업에 귀속되고 해시로만 저장되는 설치 토큰, 짧게 만료되는 1회용 enrollment token, 요청 횟수 제한, package ID allowlist와 감사 로그를 적용한다. 기업 토큰은 설치 시작 권한만 가지며 각 서버는 별도 enrollment token과 mTLS 인증서를 받는다. Enrollment token은 서버 등록 1건과 선택된 package 2개에만 사용할 수 있고 성공 등록 또는 만료 즉시 폐기한다. Installer 응답과 package download에는 cache 방지, 정확한 content length와 checksum header를 제공한다.
 
 ### 14.3 Agent API
 
@@ -1543,7 +1544,7 @@ MVP에서는 한 사용자가 여러 역할을 가질 수 있도록 한다. 2인
 
 ### 15.3 서버 관리
 
-- 신규 서버 등록과 1회용 bootstrap 명령 생성
+- 기업 설치 token 생성·폐기, 사용량 확인과 서버 자동 등록
 - 서버 검색과 필터
 - 서버 그룹 지정
 - OS, Apache/Nginx 종류와 버전, ModSecurity 엔진, Connector/모듈, CRS 버전
@@ -1626,7 +1627,8 @@ MVP에서는 한 사용자가 여러 역할을 가질 수 있도록 한다. 2인
 | `services` | 보호 대상 가상호스트/서비스 |
 | `server_services` | 서버-서비스 관계 |
 | `agent_certificates` | Agent 인증서 일련번호 및 상태 |
-| `enrollment_tokens` | 일회용 등록 토큰 해시 및 만료 |
+| `enterprise_install_tokens` | 기업별 재사용 설치 토큰 해시, 만료·폐기·등록 한도와 사용량 |
+| `enrollment_tokens` | 설치마다 발급되는 일회용 등록 세션 토큰 해시 및 만료 |
 | `policies` | 논리 정책 |
 | `policy_revisions` | 불변 정책 Revision |
 | `policy_bindings` | 정책과 대상의 연결 |

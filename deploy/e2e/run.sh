@@ -16,8 +16,8 @@ export MWAF_E2E_RUNTIME_DIR=$runtime_dir
 env_file="$runtime_dir/compose.env"
 secrets_dir="$runtime_dir/secrets"
 cookie_jar="$runtime_dir/admin.cookies"
-apache_enrollment_response="$runtime_dir/customer-apache-enrollment-$$.json"
-nginx_enrollment_response="$runtime_dir/customer-nginx-enrollment-$$.json"
+install_token_response="$runtime_dir/enterprise-install-token-$$.json"
+enterprise_install_token=""
 lock_dir="$runtime_dir/run.lock"
 lock_acquired=0
 result_dir=""
@@ -123,7 +123,7 @@ compose() {
 }
 
 cleanup_sensitive_files() {
-  rm -f "$apache_enrollment_response" "$nginx_enrollment_response"
+  rm -f "$install_token_response"
 }
 
 acquire_lock() {
@@ -441,21 +441,18 @@ ensure_enterprise() {
   [ -n "$enterprise_id" ] || fail "could not resolve the E2E enterprise ID"
 }
 
-create_enrollment_token() {
-  service=$1
-  label=$2
-  response_file=$3
+create_enterprise_install_token() {
   page="$runtime_dir/enrollment.html"
   admin_get /enrollments/new "$page"
   csrf=$(extract_csrf "$page")
   [ -n "$csrf" ] || fail "could not read enrollment CSRF token"
-  payload=$(jq -cn --arg enterprise_id "$enterprise_id" --arg label "$label" '{enterprise_id:$enterprise_id,label:$label}')
+  payload=$(jq -cn --arg enterprise_id "$enterprise_id" '{enterprise_id:$enterprise_id,name:"mwaf-e2e-install",expires_in_days:1,max_enrollments:10}')
   status=$(curl --silent --show-error --cacert "$secrets_dir/mwaf_ca_cert.pem" \
-    --cookie "$cookie_jar" --cookie-jar "$cookie_jar" -o "$response_file" -w '%{http_code}' \
+    --cookie "$cookie_jar" --cookie-jar "$cookie_jar" -o "$install_token_response" -w '%{http_code}' \
     -H 'Content-Type: application/json' -H "X-CSRF-Token: $csrf" --data "$payload" \
-    "$admin_url/api/v1/enrollment-tokens")
-  [ "$status" = 201 ] || fail "enrollment token creation for $service returned HTTP $status"
-  jq -er '.token' "$response_file"
+    "$admin_url/api/v1/enterprise-install-tokens")
+  [ "$status" = 201 ] || fail "enterprise install token creation returned HTTP $status"
+  jq -er '.token' "$install_token_response"
 }
 
 wait_customer_web() {
@@ -474,7 +471,6 @@ install_customer_agent() {
   service=$1
   web_server=$2
   label=$3
-  response_file=$4
   module_package="mwaf-modsecurity-$web_server"
 
   wait_customer_web "$service"
@@ -483,16 +479,17 @@ install_customer_agent() {
     return 0
   fi
 
-  token=$(create_enrollment_token "$service" "$label" "$response_file")
-  printf '%s\n' "$token" | compose exec -T "$service" sh -c 'umask 077; cat > /run/mwaf-e2e-token'
-  token=""
-  rm -f "$response_file"
+  if [ -z "$enterprise_install_token" ]; then
+    enterprise_install_token=$(create_enterprise_install_token)
+    rm -f "$install_token_response"
+  fi
+  printf '%s\n' "$enterprise_install_token" | compose exec -T "$service" sh -c 'umask 077; cat > /run/mwaf-e2e-install-token'
   compose exec -T "$service" sh -c '
     set -eu
-    trap '\''rm -f /run/mwaf-e2e-token /run/mwaf-install.sh'\'' EXIT INT TERM
+    trap '\''rm -f /run/mwaf-e2e-install-token /run/mwaf-install.sh'\'' EXIT INT TERM
     curl --fail --silent --show-error --cacert /run/secrets/mwaf_manager_ca "$1/bootstrap/v1/install.sh" -o /run/mwaf-install.sh
-    sh /run/mwaf-install.sh --manager "$1" --token "$(cat /run/mwaf-e2e-token)" --ca /run/secrets/mwaf_manager_ca --webserver "$2"
-  ' mwaf-e2e-install "$agent_url" "$web_server"
+    sh /run/mwaf-install.sh --manager "$1" --install-token-file /run/mwaf-e2e-install-token --ca /run/secrets/mwaf_manager_ca --webserver "$2" --name "$3"
+  ' mwaf-e2e-install "$agent_url" "$web_server" "$label"
 }
 
 fetch_servers() {
@@ -634,8 +631,9 @@ up_stack() {
   wait_manager
   login_admin
   ensure_enterprise
-  install_customer_agent customer-apache apache mwaf-e2e-apache "$apache_enrollment_response"
-  install_customer_agent customer-nginx nginx mwaf-e2e-nginx "$nginx_enrollment_response"
+  install_customer_agent customer-apache apache mwaf-e2e-apache
+  install_customer_agent customer-nginx nginx mwaf-e2e-nginx
+  enterprise_install_token=""
   wait_agents_online
   echo "Manager and both customer Agents are online."
   echo "Admin UI: $admin_url"

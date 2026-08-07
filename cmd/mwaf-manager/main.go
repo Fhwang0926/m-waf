@@ -21,6 +21,19 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "reset-system-admin-password":
+			if err := runSystemAdminPasswordReset(logger, os.Args[2:], os.Stdin); err != nil {
+				logger.Error("system_admin_password_reset_failed", "error", err)
+				os.Exit(1)
+			}
+		default:
+			logger.Error("unknown_command", "command", os.Args[1])
+			os.Exit(2)
+		}
+		return
+	}
 	cfg, err := config.LoadManager()
 	if err != nil {
 		logger.Error("load_config", "error", err)

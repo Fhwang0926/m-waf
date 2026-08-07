@@ -3,9 +3,13 @@ set -eu
 
 manager=""
 token=""
+install_token=""
+install_token_file=""
+install_token_stdin=0
 ca_file=""
 web_server=""
 web_server_binary=""
+server_name=""
 integration_mode="distro"
 integration_config=""
 audit_log="/var/log/modsecurity/audit.jsonl"
@@ -17,7 +21,10 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --manager) manager=$2; shift 2 ;;
     --token) token=$2; shift 2 ;;
+    --install-token-file) install_token_file=$2; shift 2 ;;
+    --install-token-stdin) install_token_stdin=1; shift ;;
     --ca) ca_file=$2; shift 2 ;;
+    --name) server_name=$2; shift 2 ;;
     --webserver) web_server=$2; shift 2 ;;
     --webserver-bin) web_server_binary=$2; shift 2 ;;
     --integration) integration_mode=$2; shift 2 ;;
@@ -31,7 +38,39 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
-[ -n "$manager" ] && [ -n "$token" ] && [ -r "$ca_file" ] || { echo "--manager, --token and readable --ca are required" >&2; exit 2; }
+[ -n "$manager" ] && [ -r "$ca_file" ] || { echo "--manager and readable --ca are required" >&2; exit 2; }
+if [ -n "$token" ] && { [ -n "$install_token_file" ] || [ "$install_token_stdin" -eq 1 ]; }; then
+  echo "use either legacy --token or an enterprise install token source" >&2
+  exit 2
+fi
+if [ -z "$token" ]; then
+  if [ -n "$install_token_file" ] && [ "$install_token_stdin" -eq 1 ]; then
+    echo "use either --install-token-file or --install-token-stdin" >&2
+    exit 2
+  elif [ -n "$install_token_file" ]; then
+    [ -r "$install_token_file" ] || { echo "enterprise install token file is not readable" >&2; exit 2; }
+    install_token=$(sed -n '1p' "$install_token_file")
+  elif [ "$install_token_stdin" -eq 1 ]; then
+    printf 'M-WAF enterprise install token: ' >&2
+    if [ -t 0 ]; then
+      stty -echo
+      if ! IFS= read -r install_token; then
+        stty echo
+        echo "could not read enterprise install token" >&2
+        exit 2
+      fi
+      stty echo
+    else
+      IFS= read -r install_token || { echo "could not read enterprise install token" >&2; exit 2; }
+    fi
+    printf '\n' >&2
+  else
+    echo "--token, --install-token-file or --install-token-stdin is required" >&2
+    exit 2
+  fi
+  [ -n "$install_token" ] || { echo "enterprise install token is empty" >&2; exit 2; }
+fi
+[ ! -s /var/lib/mwaf-agent/server-id ] || { echo "this server is already enrolled; use the existing M-WAF Agent identity" >&2; exit 1; }
 case "$integration_mode" in distro|external) ;; *) echo "--integration must be distro or external" >&2; exit 2 ;; esac
 if [ -n "$web_server_binary" ]; then
   [ -n "$web_server" ] || { echo "--webserver is required with --webserver-bin" >&2; exit 2; }
@@ -103,6 +142,19 @@ else
 fi
 
 hostname_value=$(hostname 2>/dev/null || printf 'unknown')
+[ -n "$server_name" ] || server_name=$hostname_value
+if [ -z "$token" ]; then
+  session_payload=$(printf '{"name":"%s","inventory":{"hostname":"%s","os_id":"%s","os_version":"%s","architecture":"%s","web_server":"%s","web_server_version":"%s","web_server_build_hash":"%s","integration_mode":"%s"}}' \
+    "$(json_escape "$server_name")" "$(json_escape "$hostname_value")" "$(json_escape "$os_id")" "$(json_escape "$os_version")" "$architecture" "$web_server" "$(json_escape "$web_version")" "$web_build" "$integration_mode")
+  install_auth_file=$(mktemp)
+  chmod 0600 "$install_auth_file"
+  trap 'rm -f "$install_auth_file"' EXIT INT TERM
+  printf 'Authorization: Bearer %s\n' "$install_token" > "$install_auth_file"
+  token=$(curl --fail --silent --show-error --cacert "$ca_file" -H "@$install_auth_file" -H 'Content-Type: application/json' -H 'Accept: text/plain' --data "$session_payload" "$manager/bootstrap/v1/sessions")
+  install_token=""
+  rm -f "$install_auth_file"
+  [ -n "$token" ] || { echo "Manager did not issue an enrollment session" >&2; exit 1; }
+fi
 payload=$(printf '{"token":"%s","inventory":{"hostname":"%s","os_id":"%s","os_version":"%s","architecture":"%s","web_server":"%s","web_server_version":"%s","web_server_build_hash":"%s","integration_mode":"%s"}}' \
   "$(json_escape "$token")" "$(json_escape "$hostname_value")" "$(json_escape "$os_id")" "$(json_escape "$os_version")" "$architecture" "$web_server" "$(json_escape "$web_version")" "$web_build" "$integration_mode")
 
@@ -148,7 +200,7 @@ chmod 0600 /etc/mwaf-agent/enrollment.token
 cat > /etc/mwaf-agent/agent.json <<EOF
 {
   "manager_url": "$(json_escape "$manager")",
-  "server_name": "$(json_escape "$hostname_value")",
+  "server_name": "$(json_escape "$server_name")",
   "web_server": "$(json_escape "$web_server")",
   "web_server_binary": "$(json_escape "$web_cmd")",
   "integration_mode": "$(json_escape "$integration_mode")",

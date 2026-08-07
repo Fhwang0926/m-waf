@@ -176,19 +176,23 @@ The generated TLS certificate is signed by the local M-WAF CA. Its DNS/IP identi
 ## Install a customer web server
 
 1. Sign in to Manager.
-2. Choose **서버 등록** and create a one-use enrollment token.
-3. Securely copy `mwaf_ca_cert.pem` to the customer server.
-4. Run the command shown by Manager after reviewing the downloaded script.
+2. Choose **설치 및 등록** and create an enterprise install token.
+3. Copy the generated installation block to each customer web server and review the downloaded script.
+4. Run it and paste the separately displayed token at the protected prompt.
 
 Example:
 
 ```sh
-curl --fail --cacert ./mwaf_ca_cert.pem https://manager.example.com:10443/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
+umask 077
+printf '%s' 'MANAGER_CA_BASE64_FROM_UI' | base64 -d > /tmp/mwaf-manager-ca.crt
+curl --fail --cacert /tmp/mwaf-manager-ca.crt https://manager.example.com:10443/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
 sudo sh /tmp/mwaf-install.sh \
   --manager https://manager.example.com:10443 \
-  --token 'ONE_USE_TOKEN' \
-  --ca ./mwaf_ca_cert.pem
+  --ca /tmp/mwaf-manager-ca.crt \
+  --install-token-stdin
 ```
+
+The same enterprise token can bootstrap multiple servers until it expires, is revoked, or reaches its optional registration limit. Manager exchanges it for a short-lived one-use enrollment session for each installation. The reusable token is never written to Agent configuration; after enrollment, each Agent authenticates with its own mTLS certificate. For unattended deployment, store the token in a mode `0600` secret file and use `--install-token-file /secure/path/token`. The legacy `--token` argument remains available under the advanced one-server enrollment section.
 
 If both Apache and Nginx are installed, add `--webserver apache` or `--webserver nginx`. The installer:
 
@@ -214,7 +218,7 @@ dpkg-query -W -f='${binary:Package}\t${db:Status-Abbrev}\t${Version}\n' \
   mwaf-modsecurity-nginx mwaf-modsecurity-nginx-external 2>/dev/null || true
 ```
 
-Resolve the reported lock, disk-space, repository, dependency, or interrupted-DPKG problem first, then rerun the same reviewed installer command. An enrollment token is consumed only when Agent enrollment succeeds; if it has expired or was already consumed, create a new one in Manager. Do not purge Apache/Nginx, delete `/etc/mwaf`, or force-install an incompatible package as a recovery shortcut.
+Resolve the reported lock, disk-space, repository, dependency, or interrupted-DPKG problem first, then rerun the same reviewed installer command. A fresh short-lived enrollment session is created from the enterprise install token on each retry. If the enterprise token expired, was revoked, or reached its limit, create a new one in Manager. Do not purge Apache/Nginx, delete `/etc/mwaf`, or force-install an incompatible package as a recovery shortcut.
 
 The current MVP has no supported `tar.gz`, manual-copy, or RPM installation path, and a failed bootstrap/APT transaction is not rolled back automatically. Systems that cannot use Ubuntu 24.04 amd64 DEBs remain unsupported. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation — DEB installation failure](docs/custom-webserver-installation.md#deb-설치가-실패한-경우).
 
@@ -258,6 +262,15 @@ make pull
 make down
 ```
 
+If the initial system administrator cannot log in, reset only that account through the Manager recovery command. This does not recreate the setup state, initialize MariaDB, change roles, or reactivate a disabled account. The new password file must contain exactly one line with 12 to 256 characters:
+
+```sh
+chmod 600 ./admin.password
+./deploy/compose/reset-system-admin-password.sh 3vi ./admin.password
+```
+
+The script requires the deployed MariaDB container to already be healthy. It starts a short-lived Manager container with the same deployed image, network, application database credential, and secrets; sends the password through standard input; updates only the named active `system_admin`; records `system_admin.password_reset` in the administrator audit log; and exits. The password is never placed in command arguments or printed. Existing browser sessions become invalid because session validation is tied to the stored password hash. Use a Manager image version that includes this recovery command, then log in again with the new password.
+
 Do not use `docker compose down -v` on an environment whose MariaDB data must be retained.
 
 ## Container deployment E2E
@@ -293,9 +306,9 @@ The default host endpoints are:
 
 The first run creates a random system-administrator password under `.local/mwaf-e2e/admin.password` with mode `0600`; it is not printed or copied into Compose. Set `MWAF_E2E_ADMIN_PASSWORD` before the first run if a chosen password is required. Runtime certificates, cookies, and evidence are also kept under the ignored `.local/mwaf-e2e` directory and are separate from `deploy/compose` production material.
 
-The `all` command verifies that both Agents become online, one enterprise-scoped group policy reaches `APPLIED` on both servers, normal and excluded requests return 200, a restricted custom test rule returns 403, and both blocked events arrive at Manager. Evidence and size-bounded diagnostic logs are written under `.local/mwaf-e2e/results/<run-id>` without enrollment tokens or passwords.
+The `all` command creates one enterprise install token, reuses it for the Apache and Nginx installations, verifies that both Agents become online, waits for one enterprise-scoped group policy to reach `APPLIED`, checks normal and excluded requests return 200, checks a restricted custom rule returns 403, and confirms both blocked events arrive at Manager. Evidence and size-bounded diagnostic logs are written under `.local/mwaf-e2e/results/<run-id>` without enrollment tokens or passwords.
 
-To run the same customer-container flow against the existing test Manager at `https://192.168.7.200:18443`, use its Agent API at `https://192.168.7.200:10443` and the CA certificate generated on that Manager host. The remote mode never starts MariaDB or another Manager and never performs first-time setup. It does create or reuse the named `mwaf-e2e` enterprise, group, policy, enrollment tokens, server records, and test events in the existing Manager:
+To run the same customer-container flow against the existing test Manager at `https://192.168.7.200:18443`, use its Agent API at `https://192.168.7.200:10443` and the CA certificate generated on that Manager host. The remote mode never starts MariaDB or another Manager and never performs first-time setup. It does create or reuse the named `mwaf-e2e` enterprise, group, and policy, and creates an enterprise install token, server records, and test events in the existing Manager:
 
 ```sh
 export MWAF_E2E_ADMIN_USERNAME='EXISTING_SYSTEM_ADMIN'

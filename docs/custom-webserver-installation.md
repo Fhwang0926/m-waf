@@ -68,7 +68,7 @@ Nginx의 기존 `modsecurity_rules_file`과 같은 컨텍스트에 M-WAF 설정�
 
 ## 공통 설치 파일 받기
 
-Manager의 **서버 등록**에서 일회용 토큰을 생성하고 CA 인증서를 고객 서버로 복사한다. 설치 스크립트를 내려받은 뒤 내용을 검토한다.
+Manager의 **설치 및 등록**에서 기업 설치 토큰을 생성한다. 화면에서 제공하는 CA 포함 설치 블록을 사용하거나 공개 CA 인증서를 고객 서버로 복사한 뒤 설치 스크립트를 내려받아 검토한다.
 
 ```sh
 curl --fail \
@@ -82,8 +82,8 @@ curl --fail \
 ```sh
 sudo sh /tmp/mwaf-install.sh \
   --manager https://manager.example.com:10443 \
-  --token 'ONE_USE_TOKEN' \
   --ca ./mwaf_ca_cert.pem \
+  --install-token-stdin \
   --webserver apache \
   --integration external \
   --webserver-bin /opt/hosting/apache/bin/apachectl \
@@ -106,8 +106,8 @@ Apache 기본 ModSecurity 설정이 다른 파일에 있고 기존 Apache 설정
 ```sh
 sudo sh /tmp/mwaf-install.sh \
   --manager https://manager.example.com:10443 \
-  --token 'ONE_USE_TOKEN' \
   --ca ./mwaf_ca_cert.pem \
+  --install-token-stdin \
   --webserver nginx \
   --integration external \
   --webserver-bin /opt/hosting/nginx/sbin/nginx \
@@ -124,6 +124,9 @@ sudo sh /tmp/mwaf-install.sh \
 
 | 옵션 | 의미 |
 |---|---|
+| `--install-token-stdin` | 기업 설치 토큰을 터미널에서 숨김 입력한다. 일반 수동 설치에 권장한다. |
+| `--install-token-file` | 자동화 도구가 권한 0600 비밀 파일로 제공한 기업 설치 토큰을 읽는다. |
+| `--name` | Manager에 자동 등록할 서버 이름을 지정한다. 생략하면 호스트명을 사용한다. |
 | `--integration external` | 배포판 웹서버·Connector 패키지를 설치하지 않고 기존 Connector를 사용한다. |
 | `--webserver apache\|nginx` | 한 Agent가 관리할 웹서버 종류를 고정한다. |
 | `--webserver-bin` | Agent가 inventory, configtest와 정책 reload에 사용할 절대 경로다. Apache는 `apachectl` 경로를 사용한다. |
@@ -183,7 +186,7 @@ Manager의 **서버** 화면에서 `integration_mode=external`, 웹서버 버전
 
 설치 스크립트는 다음 단계 중 하나라도 실패하면 즉시 종료한다.
 
-1. Manager 연결 또는 일회용 토큰 검증
+1. Manager 연결 또는 기업 설치 토큰·단기 등록 세션 검증
 2. 호환 패키지 조회와 다운로드
 3. SHA-256 검증
 4. APT/DPKG 설치
@@ -248,7 +251,7 @@ journalctl -u mwaf-agent -n 100 --no-pager || true
 
 원인을 해결한 다음 처음 검토했던 동일한 설치 명령을 다시 실행한다. external 설정 파일은 M-WAF 관리 marker가 있는 경우에만 갱신되므로 재실행할 수 있다.
 
-DEB 설치 단계에서 실패해 Agent 등록이 시작되지 않았다면 일회용 토큰은 소비되지 않는다. 다만 토큰이 만료되었거나 이전 실행에서 Agent 등록까지 성공했다면 Manager에서 새 토큰을 발급해야 한다. 재시도 전에 Manager의 **서버** 목록에 같은 서버가 이미 등록됐는지 확인한다.
+DEB 설치 단계에서 실패하면 같은 기업 설치 토큰으로 다시 실행할 수 있으며 Manager가 새 단기 등록 세션을 발급한다. 기업 설치 토큰이 만료·폐기됐거나 등록 한도에 도달했다면 Manager에서 새 토큰을 생성한다. 재시도 전에 Manager의 **서버** 목록과 `/var/lib/mwaf-agent/server-id`를 확인한다. 이미 등록된 서버에서는 설치기가 중복 등록을 거부한다.
 
 다음 복구 방식은 사용하지 않는다.
 

@@ -54,6 +54,7 @@ type Server struct {
 	sessions         *sessionManager
 	loginLimiter     *loginLimiter
 	bootstrapLimiter *requestLimiter
+	installLimiter   *requestLimiter
 	downloadLimiter  *requestLimiter
 	policySyncMu     sync.Mutex
 	policySyncSignal chan struct{}
@@ -81,7 +82,7 @@ func NewServer(cfg config.Manager, store *Store, logger *slog.Logger) (*Server, 
 	return &Server{
 		cfg: cfg, store: store, catalog: catalog, catalogErr: catalogErr, ca: ca, policySigner: policySigner, policyCatalog: policyCatalog, templates: templates,
 		sessions: newSessionManager(cfg.SessionKey), loginLimiter: newLoginLimiter(),
-		bootstrapLimiter: newRequestLimiter(60, time.Minute), downloadLimiter: newRequestLimiter(8, time.Minute), logger: logger,
+		bootstrapLimiter: newRequestLimiter(60, time.Minute), installLimiter: newRequestLimiter(60, time.Minute), downloadLimiter: newRequestLimiter(8, time.Minute), logger: logger,
 		policySyncSignal: make(chan struct{}, 1),
 	}, nil
 }
@@ -140,6 +141,8 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.Handle("POST /groups/{id}/delete", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.deleteGroup))))
 	mux.Handle("GET /enrollments/new", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.newEnrollment))))
 	mux.Handle("POST /enrollments", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.createEnrollment))))
+	mux.Handle("POST /install-tokens", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.createInstallToken))))
+	mux.Handle("POST /install-tokens/{id}/revoke", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.revokeInstallToken))))
 	mux.Handle("GET /enterprises", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.enterprises))))
 	mux.Handle("POST /enterprises", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.createEnterprise))))
 	mux.Handle("GET /settings", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.systemSettings))))
@@ -152,6 +155,7 @@ func (s *Server) AdminHandler() http.Handler {
 	mux.Handle("GET /api/v1/servers", s.requireAdmin(http.HandlerFunc(s.apiServers)))
 	mux.Handle("GET /api/v1/events", s.requireAdmin(http.HandlerFunc(s.apiEvents)))
 	mux.Handle("POST /api/v1/enrollment-tokens", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.apiCreateEnrollment))))
+	mux.Handle("POST /api/v1/enterprise-install-tokens", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.apiCreateInstallToken))))
 	return s.securityHeaders(s.requestLog(mux))
 }
 
@@ -160,6 +164,7 @@ func (s *Server) AgentHandler() http.Handler {
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
 	mux.Handle("GET /bootstrap/v1/install.sh", s.limitBootstrap(http.HandlerFunc(s.bootstrapInstaller)))
+	mux.Handle("POST /bootstrap/v1/sessions", s.limitBootstrap(http.HandlerFunc(s.createBootstrapSession)))
 	mux.Handle("POST /bootstrap/v1/packages/resolve", s.limitBootstrap(http.HandlerFunc(s.resolvePackages)))
 	mux.HandleFunc("GET /bootstrap/v1/packages/{id}", s.bootstrapPackage)
 	mux.Handle("GET /packages/v1/keys", s.limitBootstrap(http.HandlerFunc(s.packagePublicKey)))
@@ -489,16 +494,7 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) newEnrollment(w http.ResponseWriter, r *http.Request) {
-	data := map[string]any{}
-	if sessionFrom(r).IsSystemAdmin() {
-		enterprises, err := s.store.ListEnterprises(r.Context())
-		if err != nil {
-			http.Error(w, "load enterprises", http.StatusInternalServerError)
-			return
-		}
-		data["Enterprises"] = enterprises
-	}
-	_ = s.templates.ExecuteTemplate(w, "enrollment.html", s.viewData(r, "enrollments", data))
+	s.renderEnrollment(w, r, nil)
 }
 
 func (s *Server) createEnrollment(w http.ResponseWriter, r *http.Request) {
@@ -526,7 +522,7 @@ func (s *Server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, sessionFrom(r).Username, "enrollment.create", label, "success")
-	_ = s.templates.ExecuteTemplate(w, "enrollment.html", s.viewData(r, "enrollments", map[string]any{"Token": token, "ExpiresAt": expires, "AgentURL": s.cfg.AgentPublicURL}))
+	s.renderEnrollment(w, r, map[string]any{"Token": token, "ExpiresAt": expires})
 }
 
 func (s *Server) apiServers(w http.ResponseWriter, r *http.Request) {

@@ -28,6 +28,7 @@ type UserRecord struct {
 }
 
 var ErrLastEnterpriseAdmin = errors.New("at least one active enterprise administrator is required")
+var ErrActiveSystemAdminNotFound = errors.New("active system administrator not found")
 
 func (u UserRecord) RoleLabel() string { return u.Role.Label() }
 
@@ -91,6 +92,41 @@ func (s *Store) UpdateOwnPassword(ctx context.Context, userID, passwordHash stri
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (s *Store) ResetSystemAdminPassword(ctx context.Context, username, passwordHash string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var userID string
+	err = tx.QueryRowContext(ctx, `SELECT id FROM admin_users
+WHERE username=? AND role='system_admin' AND enterprise_id IS NULL AND is_active=TRUE AND deleted_at IS NULL FOR UPDATE`, username).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrActiveSystemAdminNotFound
+	}
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE admin_users SET password_hash=?
+WHERE id=? AND role='system_admin' AND enterprise_id IS NULL AND is_active=TRUE AND deleted_at IS NULL`, passwordHash, userID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrActiveSystemAdminNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO admin_audit_logs(request_id,actor,action,target,result,remote_addr)
+VALUES (?,?,?,?,?,?)`, randomID(), "system-recovery", "system_admin.password_reset", userID, "success", "local-container"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListEnterprises(ctx context.Context) ([]EnterpriseRecord, error) {

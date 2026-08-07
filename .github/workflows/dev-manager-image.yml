@@ -68,6 +68,7 @@ jobs:
           sh -n packaging/module/deb/build.sh
           sh -n packaging/module/external/configure.sh
           sh -n deploy/compose/prepare.sh
+          sh -n deploy/compose/reset-system-admin-password.sh
           sh -n deploy/compose/test-prepare.sh
           sh deploy/compose/test-prepare.sh
           grep -F 'agent_file="$tmp_dir/mwaf-agent.deb"' internal/manager/bootstrap-install.sh

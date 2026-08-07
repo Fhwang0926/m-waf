@@ -4,7 +4,7 @@
   <nav>
     <a class="{{if eq .Active "servers"}}active{{end}}" href="/servers">서버</a>
     <a class="{{if eq .Active "events"}}active{{end}}" href="/events">이벤트</a>
-    {{if .CanOperate}}<a class="{{if eq .Active "policies"}}active{{end}}" href="/policies">기업 정책</a><a class="{{if eq .Active "groups"}}active{{end}}" href="/groups">서버 그룹</a><a class="{{if eq .Active "enrollments"}}active{{end}}" href="/enrollments/new">서버 등록</a>{{end}}
+    {{if .CanOperate}}<a class="{{if eq .Active "policies"}}active{{end}}" href="/policies">기업 정책</a><a class="{{if eq .Active "groups"}}active{{end}}" href="/groups">서버 그룹</a><a class="{{if eq .Active "enrollments"}}active{{end}}" href="/enrollments/new">설치 및 등록</a>{{end}}
     {{if .IsSystemAdmin}}<a class="{{if eq .Active "system-policies"}}active{{end}}" href="/system-policies">시스템 정책</a><a class="{{if eq .Active "enterprises"}}active{{end}}" href="/enterprises">기업 관리</a><a class="{{if eq .Active "settings"}}active{{end}}" href="/settings">시스템 설정</a>{{end}}
     {{if .CanManageUsers}}<a class="{{if eq .Active "users"}}active{{end}}" href="/users">사용자 관리</a>{{end}}
     <a class="{{if eq .Active "account"}}active{{end}}" href="/account">내 계정</a>
