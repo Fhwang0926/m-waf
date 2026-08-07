@@ -3,20 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="M-WAF는 기존 Apache와 Nginx에 ModSecurity와 OWASP CRS를 연결하고 여러 서버의 정책과 보안 이벤트를 한 대의 Manager에서 관리하는 경량 웹방화벽입니다.">
-  <meta name="theme-color" content="#0b1f3a">
-  <meta property="og:title" content="M-WAF | 호스팅사를 위한 소프트웨어 웹방화벽">
-  <meta property="og:description" content="웹 요청은 각 서버에서 검사하고 정책과 로그는 별도 Manager에서 통합 관리합니다.">
+  <meta name="description" content="기존 Apache와 Nginx에 ModSecurity·OWASP CRS를 적용하고 여러 고객 서버의 정책, 상태, 보안 이벤트를 별도 Manager에서 관리하는 self-hosted 소프트웨어 웹방화벽 M-WAF.">
+  <meta name="theme-color" content="#071420">
+  <meta property="og:title" content="M-WAF | 호스팅사를 위한 self-hosted 웹방화벽">
+  <meta property="og:description" content="웹서버는 그대로 유지하고 WAF 정책과 운영은 별도 Manager에서 중앙 관리합니다.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://fhwang0926.github.io/m-waf/">
   <meta property="og:site_name" content="M-WAF">
   <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="M-WAF | 호스팅사를 위한 소프트웨어 웹방화벽">
-  <meta name="twitter:description" content="기존 Apache·Nginx는 그대로 유지하고 여러 고객 서버의 WAF 정책과 이벤트를 중앙에서 운영합니다.">
-  <title>M-WAF | 호스팅사를 위한 소프트웨어 웹방화벽</title>
+  <title>M-WAF | 호스팅사를 위한 self-hosted 웹방화벽</title>
   <link rel="canonical" href="https://fhwang0926.github.io/m-waf/">
   <link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./assets/styles.css?v=20260807-2">
+  <link rel="stylesheet" href="./assets/styles.css?v=20260807-3">
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -24,7 +22,7 @@
     "name": "M-WAF",
     "applicationCategory": "SecurityApplication",
     "operatingSystem": "Ubuntu Server 24.04 LTS amd64",
-    "description": "Apache와 Nginx에 ModSecurity·OWASP CRS를 적용하고 여러 고객 서버의 정책과 보안 이벤트를 중앙 관리하는 self-hosted WAF 운영 플랫폼",
+    "description": "Apache와 Nginx에 ModSecurity와 OWASP CRS를 적용하고 여러 서버의 정책과 보안 이벤트를 중앙 관리하는 self-hosted WAF 운영 플랫폼",
     "url": "https://fhwang0926.github.io/m-waf/",
     "codeRepository": "https://github.com/Fhwang0926/m-waf"
   }
@@ -33,37 +31,28 @@
 <body>
   <a class="skip-link" href="#main">본문으로 이동</a>
 
-  <div class="utility-bar">
-    <div class="shell utility-inner">
-      <span>Self-hosted WAF operations for hosting providers</span>
-      <div><a href="https://github.com/Fhwang0926/m-waf/blob/dev/README.md">기술 문서</a><a href="https://github.com/Fhwang0926/m-waf">GitHub</a></div>
-    </div>
-  </div>
-
   <header class="site-header">
     <div class="shell header-inner">
       <a class="brand" href="#top" aria-label="M-WAF 홈">
         <span class="brand-mark" aria-hidden="true">M</span>
-        <span><strong>M-WAF</strong><small>Web Application Firewall</small></span>
+        <span><strong>M-WAF</strong><small>SELF-HOSTED WAF</small></span>
       </a>
       <nav aria-label="주요 메뉴">
-        <a href="#fit">도입 조건</a>
+        <a href="#why">제품 개요</a>
         <a href="#architecture">구성</a>
-        <a href="#installation">설치 흐름</a>
-        <a href="#operations">운영</a>
-        <a href="#support">지원 환경</a>
+        <a href="#install">설치</a>
+        <a href="#support">지원 범위</a>
       </nav>
       <details class="mobile-menu">
         <summary>메뉴</summary>
         <div>
-          <a href="#fit">도입 조건</a>
+          <a href="#why">제품 개요</a>
           <a href="#architecture">구성</a>
-          <a href="#installation">설치 흐름</a>
-          <a href="#operations">운영</a>
-          <a href="#support">지원 환경</a>
+          <a href="#install">설치</a>
+          <a href="#support">지원 범위</a>
         </div>
       </details>
-      <a class="header-cta" href="https://github.com/Fhwang0926/m-waf/blob/dev/docs/custom-webserver-installation.md">설치 가이드</a>
+      <a class="header-link" href="https://github.com/Fhwang0926/m-waf">GitHub</a>
     </div>
   </header>
 
@@ -71,272 +60,210 @@
     <section class="hero" id="top">
       <div class="shell hero-grid">
         <div class="hero-copy">
-          <p class="section-label">호스팅사 웹서버 보안 운영</p>
-          <h1>여러 고객 웹서버의 WAF를 한 곳에서 운영합니다</h1>
-          <p class="hero-lead">Apache·Nginx가 각 서버에서 요청을 검사하고 차단합니다. 별도 Manager는 정책 배포, 서버 상태, ModSecurity 감사 로그와 패키지 버전을 중앙에서 관리합니다.</p>
+          <p class="eyebrow">SOFTWARE WAF FOR HOSTING OPERATIONS</p>
+          <h1>웹서버는 그대로.<br>WAF 운영은 중앙에서.</h1>
+          <p class="hero-lead">Apache·Nginx 프로세스에서 요청을 검사하고, 정책 배포와 서버 상태, ModSecurity 보안 이벤트는 별도 Manager에서 관리합니다.</p>
           <div class="hero-actions">
-            <a class="button primary" href="#fit">도입 조건 확인</a>
-            <a class="button secondary" href="#installation">설치 과정 보기</a>
+            <a class="button primary" href="#install">설치 구조 확인</a>
+            <a class="button ghost" href="https://github.com/Fhwang0926/m-waf/blob/dev/README.md">기술 문서</a>
           </div>
-          <p class="hero-note">현재 MVP 지원 범위: Ubuntu 24.04 amd64, Apache 또는 Nginx, 고객 서버당 Agent 1개와 통합 패키지 1개</p>
+          <ul class="hero-facts" aria-label="핵심 도입 조건">
+            <li>기존 80/443 경로 유지</li>
+            <li>고객 서버당 패키지 2개</li>
+            <li>Manager 별도 운영</li>
+          </ul>
         </div>
 
-        <aside class="summary-panel" aria-label="호스팅사 엔지니어 도입 요약">
-          <div class="summary-head">
-            <div><span>엔지니어 도입 요약</span><strong>Customer server impact</strong></div>
-            <span class="status-badge">SELF-HOSTED</span>
+        <figure class="product-shot">
+          <div class="shot-label"><span>MANAGER CONSOLE</span><small>화면 예시 데이터</small></div>
+          <div class="console-window">
+            <div class="console-topbar">
+              <strong>M-WAF</strong>
+              <span>현재 범위 <b>전체 기업</b></span>
+              <small>시스템 관리자</small>
+            </div>
+            <div class="console-body">
+              <aside class="console-sidebar" aria-label="Manager 화면 예시 메뉴">
+                <span>기업 운영</span>
+                <b>운영 현황</b>
+                <b>보안 이벤트</b>
+                <span>보호 정책</span>
+                <b>기업 정책</b>
+                <span>인프라</span>
+                <b class="active">보호 서버</b>
+                <b>설치 및 등록</b>
+              </aside>
+              <div class="console-content">
+                <div class="console-heading"><div><small>기업 운영 · 인프라</small><strong>보호 서버</strong></div><button type="button" tabindex="-1">설치 및 등록</button></div>
+                <div class="console-summary"><span>전체 서버</span><strong>2대</strong><i>온라인 2</i></div>
+                <div class="console-table" role="table" aria-label="보호 서버 화면 예시">
+                  <div class="console-row console-row-head" role="row"><span>서버</span><span>연결</span><span>웹서버·통합</span><span>정책 적용</span></div>
+                  <div class="console-row" role="row"><span><b>web-apache-01</b><small>customer-a</small></span><span><i class="online">온라인</i></span><span>Apache<small>distro · CRS</small></span><span><i class="applied">적용 완료</i></span></div>
+                  <div class="console-row" role="row"><span><b>web-nginx-02</b><small>customer-b</small></span><span><i class="online">온라인</i></span><span>Nginx<small>external · CRS</small></span><span><i class="applied">적용 완료</i></span></div>
+                </div>
+              </div>
+            </div>
           </div>
-          <dl class="summary-list">
-            <div><dt>웹 요청 경로</dt><dd>기존 80/443 유지</dd></div>
-            <div><dt>고객 서버 설치</dt><dd>Agent + 통합 DEB</dd></div>
-            <div><dt>커스텀 웹서버</dt><dd>기존 Connector 재사용</dd></div>
-            <div><dt>Manager 구성</dt><dd>Manager + MariaDB</dd></div>
-            <div><dt>Manager 장애 시</dt><dd>마지막 정책으로 계속 동작</dd></div>
-          </dl>
-          <div class="summary-metrics">
-            <div><strong>2</strong><span>서버당 M-WAF 패키지</span></div>
-            <div><strong>OUT</strong><span>Agent 발신 mTLS</span></div>
-            <div><strong>0</strong><span>트래픽 우회 구간</span></div>
-          </div>
-        </aside>
+          <figcaption>현재 Manager의 보호 서버 메뉴와 표시 항목을 기준으로 구성한 제품 화면 예시입니다.</figcaption>
+        </figure>
       </div>
     </section>
 
-    <section class="assurance-strip" aria-label="핵심 기술 구성">
-      <div class="shell assurance-grid">
-        <div><span>고객 OS</span><strong>Ubuntu 24.04 amd64</strong></div>
-        <div><span>웹서버</span><strong>Apache · Nginx</strong></div>
-        <div><span>검사 엔진</span><strong>ModSecurity + CRS</strong></div>
-        <div><span>관리 연결</span><strong>Agent 발신 mTLS</strong></div>
+    <section class="foundation" aria-label="M-WAF 기반 기술">
+      <div class="shell foundation-inner">
+        <span>BUILT ON</span>
+        <strong>ModSecurity</strong>
+        <strong>OWASP Core Rule Set</strong>
+        <strong>Apache</strong>
+        <strong>Nginx</strong>
+        <strong>Go</strong>
+        <strong>MariaDB</strong>
       </div>
     </section>
 
-    <section class="section fit" id="fit">
+    <section class="section why" id="why">
       <div class="shell">
         <div class="section-heading">
-          <div><p class="section-label">도입 판단</p><h2>설치 전에 세 가지를<br>먼저 확인하십시오</h2></div>
-          <p>M-WAF는 범용 프록시 WAF가 아닙니다. Ubuntu 기반 Apache·Nginx 서버를 직접 운영하고, 기존 트래픽 경로를 유지하려는 호스팅 환경을 대상으로 합니다.</p>
+          <p class="eyebrow">DESIGNED FOR HOSTING PROVIDERS</p>
+          <h2>웹서버 앞단을 바꾸지 않고<br>보호 범위를 넓힙니다.</h2>
+          <p>중앙 프록시를 새로 구성하는 대신 기존 웹서버에 검사 모듈을 연결합니다. 고객 트래픽과 관리 트래픽을 분리해 호스팅 환경의 변경 범위를 줄입니다.</p>
         </div>
-        <div class="decision-grid">
-          <article class="decision-card suitable"><span>적합한 환경</span><h3>이런 운영팀에 맞습니다</h3><ul><li>여러 고객의 Apache·Nginx를 직접 운영</li><li>80/443 경로를 중앙 프록시로 우회하기 어려움</li><li>오픈소스 ModSecurity·CRS를 중앙 관리하고 싶음</li><li>Manager와 데이터를 자체 인프라에 보관해야 함</li></ul></article>
-          <article class="decision-card required"><span>사전 조건</span><h3>다음 준비가 필요합니다</h3><ul><li>별도 Linux Manager 서버와 Docker Compose</li><li>고객 서버에서 Manager Agent API로 나가는 연결</li><li>Ubuntu 24.04 amd64 고객 서버</li><li>커스텀 빌드는 호환 Connector 사전 설치</li></ul></article>
-          <article class="decision-card unsupported-card"><span>현재 범위 밖</span><h3>MVP에서 지원하지 않습니다</h3><ul><li>트래픽 프록시·로드밸런서 기능</li><li>RPM 계열, ARM64, Windows, OpenResty</li><li>Connector 자동 컴파일과 ABI 자동 보정</li><li>Manager HA와 공식 대규모 용량 보증</li></ul></article>
+        <div class="value-list">
+          <article><span>01</span><h3>기존 서비스 경로 유지</h3><p>클라이언트 요청은 Manager를 거치지 않습니다. Apache·Nginx에 연결된 ModSecurity가 현재 서버에서 검사하고 차단합니다.</p></article>
+          <article><span>02</span><h3>여러 서버를 한 곳에서 운영</h3><p>Manager에서 기업, 서버 그룹, 정책, 단계 배포, 패키지 상태와 보안 이벤트를 동일한 운영 범위로 확인합니다.</p></article>
+          <article><span>03</span><h3>데이터와 관리 서버 자체 보관</h3><p>Manager와 MariaDB를 호스팅사 인프라에 배포합니다. 고객 서버의 Agent는 Manager API로 발신 연결합니다.</p></article>
         </div>
-        <div class="fit-note"><strong>핵심 원칙</strong><p>고객 웹 요청은 Manager로 보내지 않습니다. Manager는 정책과 패키지를 배포하고 Agent가 전송한 상태·감사 이벤트를 저장합니다.</p></div>
       </div>
     </section>
 
     <section class="section architecture" id="architecture">
-      <div class="shell">
-        <div class="section-heading">
-          <div><p class="section-label">트래픽과 관리 경로</p><h2>웹 요청 경로와<br>관리 경로를 분리합니다</h2></div>
-          <p>차단 판단은 고객 웹서버 프로세스 안에서 끝납니다. Manager 또는 관리 네트워크에 장애가 생겨도 기존 80/443 서비스는 마지막 적용 정책으로 계속 처리됩니다.</p>
+      <div class="shell architecture-grid">
+        <div class="architecture-copy">
+          <p class="eyebrow">DEPLOYMENT ARCHITECTURE</p>
+          <h2>검사는 고객 서버에서,<br>운영은 Manager에서.</h2>
+          <p>웹 요청 경로와 정책·로그 관리 경로가 분리됩니다. Manager 연결이 중단돼도 웹서버는 마지막으로 적용된 정책을 계속 사용합니다.</p>
+          <dl>
+            <div><dt>고객 서버</dt><dd>mwaf-agent + 웹서버 통합 패키지</dd></div>
+            <div><dt>관리 서버</dt><dd>Manager + MariaDB, Docker Compose</dd></div>
+            <div><dt>관리 연결</dt><dd>Agent 발신 mTLS</dd></div>
+          </dl>
         </div>
-
-        <div class="lane-stack" aria-label="M-WAF 데이터 및 관리 흐름">
-          <section class="flow-lane data-lane">
-            <div class="lane-label"><span>DATA PLANE</span><strong>실제 고객 요청</strong><small>Manager 비경유</small></div>
-            <div class="lane-flow">
-              <div class="lane-node"><small>01</small><strong>인터넷 요청</strong><span>기존 80 / 443</span></div>
-              <span class="lane-arrow" aria-hidden="true">→</span>
-              <div class="lane-node emphasized"><small>02</small><strong>Apache · Nginx</strong><span>ModSecurity + OWASP CRS</span></div>
-              <span class="lane-arrow" aria-hidden="true">→</span>
-              <div class="lane-node"><small>03</small><strong>기존 애플리케이션</strong><span>정상 요청 전달</span></div>
-            </div>
-          </section>
-          <section class="flow-lane control-lane">
-            <div class="lane-label"><span>CONTROL PLANE</span><strong>정책·상태·로그</strong><small>Agent 발신 mTLS</small></div>
-            <div class="lane-flow">
-              <div class="lane-node manager-node"><small>01</small><strong>M-WAF Manager</strong><span>정책 · 패키지 · 서버 관리</span></div>
-              <span class="lane-arrow bidirectional" aria-hidden="true">⇄</span>
-              <div class="lane-node emphasized"><small>02</small><strong>mwaf-agent</strong><span>검증 · 적용 · heartbeat</span></div>
-              <span class="lane-arrow" aria-hidden="true">←</span>
-              <div class="lane-node"><small>03</small><strong>JSON 감사 로그</strong><span>spool 후 batch 전송</span></div>
-            </div>
-          </section>
+        <div class="architecture-map" aria-label="M-WAF 구성도">
+          <div class="map-band data-band"><span>WEB REQUEST</span><div class="map-flow"><b>Internet</b><i>→</i><strong>Apache / Nginx<small>ModSecurity + CRS</small></strong><i>→</i><b>Web application</b></div></div>
+          <div class="map-separator"><span>요청은 Manager를 경유하지 않음</span></div>
+          <div class="map-band control-band"><span>CONTROL &amp; EVENTS</span><div class="map-flow"><b>Audit log</b><i>→</i><strong>mwaf-agent<small>spool · apply · heartbeat</small></strong><i>⇄</i><b>M-WAF Manager<small>MariaDB</small></b></div></div>
         </div>
-
-        <div class="boundary-grid">
-          <div><strong>Manager 장애</strong><p>웹 요청에는 영향이 없으며 Agent는 마지막 정책을 유지하고 재연결을 시도합니다.</p></div>
-          <div><strong>잘못된 정책</strong><p>서명과 SHA-256을 확인하고 configtest가 실패하면 이전 정책으로 복원합니다.</p></div>
-          <div><strong>고객 방화벽</strong><p>Agent용 인바운드 포트는 없습니다. 고객 서버에서 Manager Agent API로 연결할 수 있어야 합니다.</p></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="section installation" id="installation">
-      <div class="shell">
-        <div class="section-heading">
-          <div><p class="section-label">서버 등록과 설치</p><h2>고객 서버 한 대를<br>등록하는 실제 순서</h2></div>
-          <p>호스팅사 엔지니어는 Manager에서 토큰을 발급하고 설치 명령을 고객 서버에서 한 번 실행합니다. 설치기는 환경에 맞는 두 DEB만 내려받습니다.</p>
-        </div>
-        <div class="installation-layout">
-          <ol class="install-steps">
-            <li><span>01</span><div><strong>Manager에서 기업 설치 토큰 생성</strong><p>기업만 선택하고 유효 기간과 선택적인 서버 등록 한도를 지정합니다. 서버를 미리 만들 필요는 없습니다.</p></div></li>
-            <li><span>02</span><div><strong>CA·설치 스크립트·토큰 전달</strong><p>Manager가 제공한 설치 블록을 검토하고, 기업 설치 토큰은 별도의 보호된 입력이나 비밀 파일로 전달합니다.</p></div></li>
-            <li><span>03</span><div><strong>OS·웹서버·Connector 사전진단</strong><p>Ubuntu, amd64, 바이너리 경로, Connector 로드와 전용 include 경로를 확인합니다.</p></div></li>
-            <li><span>04</span><div><strong>서명 번들에서 DEB 두 개 설치</strong><p>SHA-256을 검증한 Agent와 선택한 웹서버 통합 패키지만 APT로 설치합니다.</p></div></li>
-            <li><span>05</span><div><strong>서버 자동등록과 Agent 인증서 발급</strong><p>Manager가 토큰을 단기 일회용 등록 세션으로 교환합니다. configtest가 끝나면 서버가 자동 생성되고 Agent별 mTLS 인증서로 전환합니다.</p></div></li>
-          </ol>
-          <aside class="package-panel">
-            <div class="package-panel-head"><span>설치 모드 선택</span><strong>웹서버 설치 방식에 맞춰 선택</strong></div>
-            <div class="package-mode"><strong>distro</strong><p>Ubuntu 패키지로 설치한 Apache/Nginx</p><code>mwaf-agent</code><code>mwaf-modsecurity-apache 또는 mwaf-modsecurity-nginx</code></div>
-            <div class="package-mode"><strong>external</strong><p>호스팅사가 직접 관리하는 커스텀 빌드</p><code>mwaf-agent</code><code>mwaf-modsecurity-apache-external 또는 mwaf-modsecurity-nginx-external</code><small>웹서버와 Connector는 교체하지 않음</small></div>
-            <a class="text-link" href="https://github.com/Fhwang0926/m-waf/blob/dev/docs/custom-webserver-installation.md">커스텀 웹서버 설치 옵션 전체 보기</a>
-          </aside>
-        </div>
-        <div class="install-failure"><strong>DEB 설치가 실패하면</strong><p>첫 오류에서 중단합니다. 자동 수동복사나 unsigned archive로 전환하지 않습니다. DPKG 상태·의존성·Connector·include를 수정한 뒤 같은 명령을 재실행하며, 현재 portable/RPM 설치는 지원하지 않습니다.</p><a href="https://github.com/Fhwang0926/m-waf/blob/dev/docs/custom-webserver-installation.md#deb-설치가-실패한-경우">복구 절차 보기</a></div>
       </div>
     </section>
 
     <section class="section operations" id="operations">
       <div class="shell">
-        <div class="section-heading">
-          <div><p class="section-label">일상 운영</p><h2>운영자가 실제로<br>확인하는 항목</h2></div>
-          <p>Manager는 서버별 적용 결과와 마지막 연결 상태를 보여주고, Agent는 정책·감사 로그·인증서 수명주기를 처리합니다.</p>
+        <div class="section-heading compact-heading">
+          <p class="eyebrow">CENTRAL OPERATIONS</p>
+          <h2>운영자가 필요한 상태를<br>한 화면 흐름으로 연결합니다.</h2>
+          <p>서버 등록부터 정책 적용 결과와 보안 이벤트까지 Manager의 실제 메뉴 구조를 기준으로 운영합니다.</p>
         </div>
-        <div class="operation-grid">
-          <article><span>정책 배포</span><h3>서명 → 검증 → configtest → reload</h3><p>DetectionOnly/On, CRS 민감도와 임계값, 요청 본문, URL·IP 예외와 제한된 사용자 규칙을 revision으로 배포합니다.</p><small>실패 시 이전 정책 복구</small></article>
-          <article><span>이벤트 수집</span><h3>audit.jsonl → spool → Manager</h3><p>Agent가 JSON 감사 로그를 읽어 로컬 디스크에 임시 저장하고 최대 500건씩 멱등 batch로 전송합니다.</p><small>기본 spool 상한 512 MiB</small></article>
-          <article><span>서버 상태</span><h3>heartbeat · 버전 · 적용 결과</h3><p>서버 ONLINE/OFFLINE, Agent·통합 패키지 버전, 정책 및 패키지 배포 상태와 최근 제어 결과를 확인합니다.</p><small>2분 heartbeat 미수신 시 OFFLINE</small></article>
+        <div class="operation-rail">
+          <article><span>01</span><div><h3>보호 서버</h3><p>Agent 연결, 웹서버·통합 방식, CRS, 정책과 패키지 적용 상태를 확인합니다.</p></div></article>
+          <article><span>02</span><div><h3>기업 정책</h3><p>시스템 정책을 기준으로 민감도, 임계점수, URL·IP 예외와 제한된 추가 규칙을 배포합니다.</p></div></article>
+          <article><span>03</span><div><h3>보안 이벤트</h3><p>기업, 그룹, 서버, 위험도, 처리 결과, Rule ID와 요청 경로로 탐지·차단 기록을 조회합니다.</p></div></article>
+          <article><span>04</span><div><h3>감사 및 시스템 운영</h3><p>기업과 사용자 변경, 오픈소스 CRS, 시스템 정책과 관리자 작업 이력을 분리해 관리합니다.</p></div></article>
         </div>
-        <div class="state-table-wrap" tabindex="0" aria-label="장애 상황별 동작 표, 좌우 스크롤 가능">
-          <table class="state-table">
-            <thead><tr><th>상황</th><th>고객 웹서비스</th><th>운영자 조치</th></tr></thead>
-            <tbody>
-              <tr><th scope="row">Manager 연결 중단</th><td>마지막 정책으로 계속 처리</td><td>네트워크와 Manager 상태를 복구하고 heartbeat 재개 확인</td></tr>
-              <tr><th scope="row">정책 configtest 실패</th><td>기존 정책 유지</td><td>배포 실패 상세에서 규칙 문법과 중복 설정 확인</td></tr>
-              <tr><th scope="row">감사 로그 전송 지연</th><td>요청 검사·차단 계속</td><td>Agent spool 사용량과 Manager API 연결 확인</td></tr>
-              <tr><th scope="row">Agent 중지</th><td>ModSecurity의 현재 정책은 유지</td><td>서버 콘솔에서 Agent 서비스 복구</td></tr>
-            </tbody>
-          </table>
+      </div>
+    </section>
+
+    <section class="section installation" id="install">
+      <div class="shell install-grid">
+        <div class="install-copy">
+          <p class="eyebrow">SERVER ENROLLMENT</p>
+          <h2>기업 설치 토큰 하나로<br>서버를 자동 등록합니다.</h2>
+          <p>서버를 Manager에 미리 생성하지 않습니다. 설치 토큰과 검토한 스크립트를 고객 서버에 전달하면 환경 진단, 패키지 선택, 서버 등록과 Agent 인증서 발급이 이어집니다.</p>
+          <ol>
+            <li><span>1</span><div><strong>Manager에서 기업 설치 토큰 생성</strong><small>유효기간과 선택적인 등록 한도 설정</small></div></li>
+            <li><span>2</span><div><strong>고객 서버에서 설치 스크립트 검토·실행</strong><small>CA로 Manager를 검증하고 토큰은 숨김 입력</small></div></li>
+            <li><span>3</span><div><strong>서버 자동등록 후 mTLS 전환</strong><small>재사용 토큰은 Agent 설정에 저장하지 않음</small></div></li>
+          </ol>
+          <a class="text-link" href="https://github.com/Fhwang0926/m-waf/blob/dev/docs/custom-webserver-installation.md">커스텀 Apache·Nginx 설치 문서 보기</a>
         </div>
-        <p class="scroll-hint">좁은 화면에서는 표를 좌우로 움직여 전체 항목을 확인할 수 있습니다.</p>
-        <div class="manager-preview-heading">
-          <div><p class="section-label">Manager 화면 예시</p><h3>운영자가 확인하는 정보를 제품 화면 형태로 미리 봅니다</h3></div>
-          <p>아래 값은 화면 구성을 설명하기 위한 샘플이며 실제 성능이나 운영 결과를 의미하지 않습니다.</p>
-        </div>
-        <div class="manager-preview-grid" aria-label="M-WAF Manager 운영 화면 예시">
-          <article class="manager-preview-card">
-            <div class="preview-bar"><strong>보호 서버</strong><span class="preview-state online">ONLINE</span></div>
-            <dl><div><dt>웹서버</dt><dd>Apache 2.4.x</dd></div><div><dt>Agent</dt><dd>설치 버전 표시</dd></div><div><dt>마지막 연결</dt><dd>Heartbeat 시각</dd></div></dl>
-            <p>기업·그룹별 서버 상태와 설치 패키지, 정책 적용 결과를 함께 확인합니다.</p>
-          </article>
-          <article class="manager-preview-card">
-            <div class="preview-bar"><strong>정책 배포</strong><span class="preview-state applied">APPLIED</span></div>
-            <dl><div><dt>시스템 정책</dt><dd>crs-baseline</dd></div><div><dt>검증</dt><dd>서명 · SHA-256</dd></div><div><dt>웹서버</dt><dd>configtest 통과</dd></div></dl>
-            <p>정책 revision, 단계적 rollout과 실패 상세를 서버별로 추적합니다.</p>
-          </article>
-          <article class="manager-preview-card">
-            <div class="preview-bar"><strong>보안 이벤트</strong><span class="preview-state blocked">BLOCKED</span></div>
-            <dl><div><dt>분류</dt><dd>CRS Rule ID</dd></div><div><dt>요청</dt><dd>Method · URL</dd></div><div><dt>대상</dt><dd>기업 · 서버</dd></div></dl>
-            <p>차단 여부, 심각도, URL과 규칙 기준으로 감사 이벤트를 조회합니다.</p>
-          </article>
+        <div class="terminal" aria-label="M-WAF 설치 명령 예시">
+          <div class="terminal-bar"><span>customer-web-01</span><small>Ubuntu 24.04 · root</small></div>
+          <pre><code><span># Manager 화면에서 제공한 CA와 스크립트 사용</span>
+curl --fail --cacert /tmp/mwaf-manager-ca.crt \
+  https://manager.example.com:8443/bootstrap/v1/install.sh \
+  -o /tmp/mwaf-install.sh
+
+sudo sh /tmp/mwaf-install.sh \
+  --manager https://manager.example.com:8443 \
+  --ca /tmp/mwaf-manager-ca.crt \
+  --install-token-stdin</code></pre>
+          <div class="terminal-result"><span>설치 결과</span><strong>Agent + Apache 또는 Nginx 통합 패키지</strong></div>
         </div>
       </div>
     </section>
 
     <section class="section support" id="support">
       <div class="shell">
-        <div class="section-heading">
-          <div><p class="section-label">현재 지원 명세</p><h2>설치 가능한 범위를<br>명확히 제한합니다</h2></div>
-          <p>배포판 패키지와 커스텀 웹서버를 같은 방식으로 취급하지 않습니다. custom build는 대상 빌드와 호환되는 ModSecurity Connector가 이미 로드되어 있어야 합니다.</p>
+        <div class="section-heading compact-heading">
+          <p class="eyebrow">CURRENT MVP SCOPE</p>
+          <h2>지원 범위를 먼저 확인하십시오.</h2>
+          <p>현재 릴리스에서 자동 설치와 검증을 제공하는 범위입니다. 이 표 밖의 환경은 지원된다고 가정하지 않습니다.</p>
         </div>
-        <div class="support-table-wrap" tabindex="0" aria-label="M-WAF 지원 환경 표, 좌우 스크롤 가능">
-          <table>
-            <thead><tr><th>설치 유형</th><th>웹서버 기준</th><th>사전 조건</th><th>M-WAF 통합 패키지</th></tr></thead>
-            <tbody>
-              <tr><td><strong>Apache distro</strong></td><td>Ubuntu 2.4.58 계열</td><td>Ubuntu APT 의존성 설치 가능</td><td><code>mwaf-modsecurity-apache</code></td></tr>
-              <tr><td><strong>Nginx distro</strong></td><td>Ubuntu 1.24.0 계열</td><td>Ubuntu APT 의존성 설치 가능</td><td><code>mwaf-modsecurity-nginx</code></td></tr>
-              <tr><td><strong>Apache external</strong></td><td>호스팅사 관리 2.4.x</td><td><code>security2_module</code>, 절대 apachectl, 전용 include</td><td><code>mwaf-modsecurity-apache-external</code></td></tr>
-              <tr><td><strong>Nginx external</strong></td><td>호스팅사 관리 빌드</td><td>동일 빌드용 Connector, 절대 nginx, http 전용 include</td><td><code>mwaf-modsecurity-nginx-external</code></td></tr>
-            </tbody>
-          </table>
-          <div class="support-note"><strong>공통 조건</strong><span>Ubuntu Server 24.04 LTS · amd64 · JSON 감사 로그 · Agent에서 Manager Agent API로 나가는 mTLS 연결</span></div>
+        <div class="support-layout">
+          <div class="support-table-wrap" tabindex="0" aria-label="M-WAF 지원 범위 표">
+            <table>
+              <thead><tr><th>구분</th><th>지원</th><th>설치 방식</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">운영체제</th><td>Ubuntu Server 24.04 LTS amd64</td><td>서명된 DEB</td></tr>
+                <tr><th scope="row">Apache</th><td>2.4.58 · ModSecurity 2.9.7 · CRS 4.28.0, 또는 호환 커스텀 빌드</td><td>distro / external</td></tr>
+                <tr><th scope="row">Nginx</th><td>1.24.0 · libmodsecurity 3.0.12 · CRS 4.28.0, 또는 Connector가 준비된 커스텀 빌드</td><td>distro / external</td></tr>
+                <tr><th scope="row">Manager</th><td>Linux amd64, Docker Engine·Compose plugin</td><td>Manager + MariaDB</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <aside class="scope-note">
+            <strong>현재 지원하지 않음</strong>
+            <p>RPM 계열, ARM64, Windows, OpenResty, portable Agent, Connector 자동 컴파일, Manager HA와 공식 처리량 보증.</p>
+            <a href="https://github.com/Fhwang0926/m-waf#supported-customer-web-server-matrix">버전 명세 확인</a>
+          </aside>
         </div>
-        <p class="scroll-hint">좁은 화면에서는 지원 표를 좌우로 움직여 확인할 수 있습니다.</p>
-        <div class="unsupported"><strong>현재 미지원</strong><span>Ubuntu 외 OS</span><span>ARM64</span><span>OpenResty</span><span>Connector 자동 빌드</span><span>tar.gz · RPM</span><span>Manager HA</span></div>
-      </div>
-    </section>
-
-    <section class="section trust" id="trust">
-      <div class="shell">
-        <div class="section-heading">
-          <div><p class="section-label">배포 신뢰 기준</p><h2>설치 파일의 출처와<br>검증 경로를 남깁니다</h2></div>
-          <p>M-WAF는 태그 릴리스에서만 Manager 이미지를 게시하고, 같은 commit에서 만든 Agent·웹서버 통합 패키지를 Manager에 포함합니다.</p>
-        </div>
-        <div class="trust-grid">
-          <article><span>01</span><h3>태그 기반 릴리스</h3><p>개발 브랜치 push는 검증만 수행하고, 버전 태그에서만 GHCR 이미지를 게시합니다.</p><a href="https://github.com/Fhwang0926/m-waf/tags">버전 태그 확인</a></article>
-          <article><span>02</span><h3>설치·구성 자동 검증</h3><p>Ubuntu 환경에서 Agent와 Apache·Nginx 패키지 설치, configtest와 CRS 로드를 확인합니다.</p><a href="https://github.com/Fhwang0926/m-waf/actions/workflows/dev-manager-image.yml">자동 검증 현황</a></article>
-          <article><span>03</span><h3>패키지 서명과 출처</h3><p>Ed25519 서명, SHA-256과 이미지 build provenance로 배포 입력을 추적합니다.</p><a href="https://github.com/Fhwang0926/m-waf/pkgs/container/m-waf-manager">Manager 패키지 보기</a></article>
-          <article><span>04</span><h3>비공개 보안 신고</h3><p>취약점 정보는 공개 Issue에 올리지 않고 GitHub의 private advisory 경로로 전달합니다.</p><a href="https://github.com/Fhwang0926/m-waf/security/advisories/new">보안 취약점 신고</a></article>
-        </div>
-        <p class="license-note"><strong>라이선스 범위</strong> M-WAF 소스와 제3자 구성요소의 사용 조건은 저장소의 명시된 파일을 기준으로 확인해야 합니다. ModSecurity, ModSecurity-nginx, OWASP CRS와 MariaDB의 고지는 <a href="https://github.com/Fhwang0926/m-waf/blob/dev/THIRD_PARTY_NOTICES.md">Third-party notices</a>에서 확인할 수 있습니다.</p>
       </div>
     </section>
 
     <section class="section comparison" id="comparison">
       <div class="shell">
-        <div class="section-heading comparison-heading">
-          <div><p class="section-label">상용 소프트웨어 WAF와의 차이</p><h2>DeepFinder와 같은 운영 모델,<br>더 좁은 MVP 범위</h2></div>
-          <p>두 제품 모두 보호 서버에서 검사하고 중앙 Manager에서 운영하는 모델입니다. M-WAF는 ModSecurity·OWASP CRS 기반의 공개 구성과 최소 기능에 집중하며, 상용 제품의 광범위한 정책·분석·지원 환경을 아직 제공하지 않습니다.</p>
-        </div>
         <details class="comparison-details">
-          <summary><span><strong>DeepFinder 공개 매뉴얼 기준 비교 펼치기</strong><small>검사 구조 · 정책 범위 · 분석 기능 · 지원 환경 · 규모 근거</small></span></summary>
-          <div class="comparison-table-wrap" tabindex="0" aria-label="DeepFinder와 M-WAF 비교 표, 좌우 스크롤 가능">
-            <table class="comparison-table">
-              <thead><tr><th>도입 판단 기준</th><th>M-WAF MVP</th><th>DeepFinder 공개 매뉴얼 기준</th></tr></thead>
-              <tbody>
-                <tr><th scope="row">검사 구조</th><td><strong>Apache·Nginx 로컬 검사</strong><span>Manager는 웹 요청 경로 밖에 위치</span></td><td><strong>보호 서버 Agent 검사</strong><span>Manager에서 여러 Agent를 중앙 운영</span></td></tr>
-                <tr><th scope="row">정책 범위</th><td><strong>CRS 중심 기본 운영</strong><span>모드·민감도·임계값·URL/IP 예외·제한된 규칙</span></td><td><strong>도메인 중심 상세 정책</strong><span>공급사 문서에 보안 패턴과 다양한 예외·검사 항목 명시</span></td></tr>
-                <tr><th scope="row">분석 기능</th><td><strong>이벤트 조회와 필터</strong><span>서버·차단·심각도·URL·Rule ID 기준 운영 조회</span></td><td><strong>관제와 통계 보고서</strong><span>다차원 분석과 PDF·Excel 보고 기능을 문서화</span></td></tr>
-                <tr><th scope="row">지원 환경</th><td><strong>Ubuntu 24.04 amd64 한정</strong><span>Apache·Nginx distro/external 두 설치 모드</span></td><td><strong>상대적으로 넓은 설치 유형</strong><span>Linux·Windows·Container·Kubernetes 관련 항목 제공</span></td></tr>
-                <tr><th scope="row">규모 근거</th><td><strong>공식 용량 수치 없음</strong><span>다수 Agent 구조는 구현했으나 환경별 부하 검증 필요</span></td><td><strong>공급사 용량 설명</strong><span>1,000개 이상 Agent 관리 가능하다는 매뉴얼 표현</span></td></tr>
-              </tbody>
-            </table>
-          </div>
-          <div class="comparison-conclusion"><strong>선택 기준</strong><p>공개 구성과 좁은 지원 범위로 직접 운영하려면 M-WAF를 검토할 수 있습니다. 다양한 OS, 세분화된 도메인 정책, 정기 보고서, 공식 용량과 기술지원이 필수라면 현재 MVP만으로는 대체할 수 없습니다.</p></div>
-          <div class="source-note">
-            <div><strong>비교 자료</strong><p>2026-08-06 확인: DeepFinder 공개 매뉴얼의 <a href="https://docs.deepfinder.co.kr/ko/operation/part1/Architecture/">제품 구성·특징</a>, <a href="https://docs.deepfinder.co.kr/ko/operation/part2/Policy/">정책관리</a>, <a href="https://docs.deepfinder.co.kr/ko/operation/part2/SecurityPattern/">보안패턴</a>.</p></div>
-            <p>공개된 기능 설명을 비교한 것이며 동일 환경의 탐지율·처리량·안정성 시험 결과가 아닙니다. DeepFinder의 용량 표현은 공급사 매뉴얼 기준입니다.</p>
+          <summary><span><small>DEPLOYMENT MODEL REVIEW</small><strong>DeepFinder 공개 자료와 설치·운영 모델 비교</strong></span></summary>
+          <div class="comparison-body">
+            <p>DeepFinder와 M-WAF는 모두 보호 웹서버에 소프트웨어를 설치하고 Manager에서 여러 서버를 관리하는 구조입니다. 다만 M-WAF는 ModSecurity·OWASP CRS 기반의 좁은 MVP이며 상용 제품의 지원 범위와 용량 보증을 제공하지 않습니다.</p>
+            <div class="comparison-table-wrap" tabindex="0" aria-label="DeepFinder와 M-WAF 비교 표">
+              <table>
+                <thead><tr><th>판단 기준</th><th>M-WAF MVP</th><th>DeepFinder 공개 자료</th></tr></thead>
+                <tbody>
+                  <tr><th scope="row">검사 위치</th><td>Apache·Nginx의 ModSecurity</td><td>보호 웹서버에 설치되는 Agent 모듈</td></tr>
+                  <tr><th scope="row">중앙 관리</th><td>정책·서버·패키지·감사 이벤트</td><td>정책 배포와 Agent 감사 데이터 보관</td></tr>
+                  <tr><th scope="row">공개 범위</th><td>코드와 오픈소스 기반 구성 공개</td><td>상용 소프트웨어와 제품 매뉴얼</td></tr>
+                  <tr><th scope="row">규모 근거</th><td>공식 용량 수치 없음</td><td>매뉴얼에 1,000개 이상 Agent 표현</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="comparison-source">2026-08-07 확인: DeepFinder <a href="https://www.deepfinder.co.kr/">제품 소개</a>와 <a href="https://docs.deepfinder.co.kr/ko/operation/part1/Architecture/">공개 구성 매뉴얼</a>. 동일 환경의 성능·탐지율 비교가 아닙니다.</p>
           </div>
         </details>
       </div>
     </section>
 
-    <section class="section deploy" id="deploy">
-      <div class="shell deploy-panel">
-        <div class="deploy-copy">
-          <p class="section-label">별도 Manager 서버 배포</p>
-          <h2>Compose로 Manager와<br>MariaDB를 시작합니다</h2>
-          <p>Manager 서버에는 Docker Engine과 Compose plugin, OpenSSL이 필요합니다. 고객 웹서버의 Agent가 접근할 Agent API 주소와 고정 버전 Manager 이미지를 설정한 뒤 배포합니다.</p>
-          <div class="deploy-actions"><a class="button light" href="https://github.com/Fhwang0926/m-waf#deploy-a-tagged-manager-release-from-a-clone">전체 배포 절차 보기</a><a class="deploy-tag-link" href="https://github.com/Fhwang0926/m-waf/tags">사용할 버전 태그 확인</a></div>
-        </div>
-        <div class="deploy-steps">
-          <div><span>1</span><p><strong>저장소 복제</strong><code>git clone https://github.com/Fhwang0926/m-waf.git &amp;&amp; cd m-waf</code></p></div>
-          <div><span>2</span><p><strong>고정 이미지와 Manager 주소 설정</strong><code>MWAF_MANAGER_IMAGE=ghcr.io/fhwang0926/m-waf-manager:VERSION</code></p></div>
-          <div><span>3</span><p><strong>Manager 시작과 상태 확인</strong><code>make deploy</code></p></div>
-        </div>
-      </div>
-    </section>
-
-    <section class="section opensource">
-      <div class="shell opensource-inner">
-        <div><p class="section-label">Open-source foundation</p><h2>검증된 프로젝트 위에<br>최소 관리 계층만 구축</h2></div>
-        <div class="project-list">
-          <a href="https://github.com/owasp-modsecurity/ModSecurity"><strong>ModSecurity</strong><span>웹방화벽 엔진</span></a>
-          <a href="https://github.com/owasp-modsecurity/ModSecurity-nginx"><strong>ModSecurity-nginx</strong><span>Nginx 연동 모듈</span></a>
-          <a href="https://github.com/coreruleset/coreruleset"><strong>OWASP CRS</strong><span>기본 탐지 규칙</span></a>
-          <a href="https://mariadb.org/"><strong>MariaDB</strong><span>Manager 데이터베이스</span></a>
-        </div>
+    <section class="closing">
+      <div class="shell closing-inner">
+        <div><p class="eyebrow">START WITH THE ACTUAL ENVIRONMENT</p><h2>저장소를 복제해<br>검증 환경에서 확인하십시오.</h2></div>
+        <div><p>개발 브랜치는 로컬 검증용이며 Manager 이미지는 버전 태그에서만 게시됩니다. 운영 배포에서는 고정 태그를 사용합니다.</p><div class="closing-actions"><a class="button light" href="https://github.com/Fhwang0926/m-waf">GitHub 저장소</a><a href="https://github.com/Fhwang0926/m-waf/tags">릴리스 태그 보기</a></div></div>
       </div>
     </section>
   </main>
 
   <footer>
     <div class="shell footer-inner">
-      <div><a class="brand footer-brand" href="#top"><span class="brand-mark" aria-hidden="true">M</span><span><strong>M-WAF</strong><small>Web Application Firewall</small></span></a><p>호스팅사를 위한 self-hosted WAF 운영 MVP</p></div>
-      <div class="footer-links"><a href="https://github.com/Fhwang0926/m-waf">GitHub</a><a href="https://github.com/Fhwang0926/m-waf/issues">문의·이슈</a><a href="https://github.com/Fhwang0926/m-waf/security/advisories/new">보안 신고</a><a href="https://github.com/Fhwang0926/m-waf/blob/dev/THIRD_PARTY_NOTICES.md">제3자 고지</a></div>
+      <div><a class="brand footer-brand" href="#top"><span class="brand-mark" aria-hidden="true">M</span><span><strong>M-WAF</strong><small>SELF-HOSTED WAF</small></span></a><p>호스팅사를 위한 소프트웨어 웹방화벽 MVP</p></div>
+      <div class="footer-links"><a href="https://github.com/Fhwang0926/m-waf/blob/dev/README.md">문서</a><a href="https://github.com/Fhwang0926/m-waf/issues">이슈</a><a href="https://github.com/Fhwang0926/m-waf/security/advisories/new">보안 신고</a><a href="https://github.com/Fhwang0926/m-waf/blob/dev/THIRD_PARTY_NOTICES.md">제3자 고지</a></div>
     </div>
   </footer>
 </body>
