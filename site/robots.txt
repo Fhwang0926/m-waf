@@ -1,2 +1,4 @@
 User-agent: *
 Allow: /
+
+Sitemap: https://fhwang0926.github.io/m-waf/sitemap.xml
