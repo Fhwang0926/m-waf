@@ -322,6 +322,8 @@ When `MWAF_E2E_ADMIN_PASSWORD_FILE` or `MWAF_E2E_ADMIN_PASSWORD` is explicitly s
 
 After the first run, `make e2e-remote-verify` repeats policy, blocking, and event checks with the preserved remote test state. `make e2e-remote-down` removes only the two local customer containers and their network; it preserves their named volumes and does not delete Manager-side audit records.
 
+If a customer fixture container is recreated, Docker preserves its Agent identity and certificate volumes but not the DEB packages installed in the old container filesystem. A later `make e2e-remote` detects that state, authenticates with the existing Agent certificate, downloads only the package pair already assigned to that server, verifies each Manager-provided SHA-256, and reinstalls it without creating another server identity. It never deletes or overwrites the enrolled identity to bypass the installer's duplicate-enrollment protection.
+
 Operational commands are also exposed through Make:
 
 ```sh

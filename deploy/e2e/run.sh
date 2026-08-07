@@ -485,6 +485,59 @@ install_customer_agent() {
     return 0
   fi
 
+  if compose exec -T "$service" test -s /var/lib/mwaf-agent/server-id; then
+    echo "Restoring Agent packages for $service with its existing M-WAF identity..."
+    if ! desired_state=$(compose exec -T "$service" sh -c '
+      set -eu
+      for file in /etc/mwaf-agent/manager-ca.crt /var/lib/mwaf-agent/agent.crt /var/lib/mwaf-agent/agent.key; do
+        [ -s "$file" ] || { echo "existing Agent identity is incomplete: $file" >&2; exit 1; }
+      done
+      curl --fail --silent --show-error --cacert /etc/mwaf-agent/manager-ca.crt \
+        --cert /var/lib/mwaf-agent/agent.crt --key /var/lib/mwaf-agent/agent.key \
+        "$1/agent/v1/desired-state"
+    ' mwaf-e2e-restore "$agent_url"); then
+      fail "$service has an existing Agent identity but its assigned packages could not be resolved"
+    fi
+    agent_package_id=$(printf '%s' "$desired_state" | jq -er '.agent_package_id | select(type == "string" and length > 0)') || \
+      fail "$service desired state does not include an Agent package"
+    module_package_id=$(printf '%s' "$desired_state" | jq -er '.module_package_id | select(type == "string" and length > 0)') || \
+      fail "$service desired state does not include a module package"
+    desired_state=""
+
+    compose exec -T "$service" sh -c '
+      set -eu
+      manager=$1
+      agent_package_id=$2
+      module_package_id=$3
+      temporary=$(mktemp -d)
+      trap '\''rm -rf "$temporary"'\'' EXIT INT TERM
+
+      download_package() {
+        package_id=$1
+        destination=$2
+        headers=$3
+        curl --fail --silent --show-error --cacert /etc/mwaf-agent/manager-ca.crt \
+          --cert /var/lib/mwaf-agent/agent.crt --key /var/lib/mwaf-agent/agent.key \
+          -D "$headers" -o "$destination" "$manager/agent/v1/packages/$package_id"
+        expected=$(sed -n '\''s/^X-Checksum-SHA256:[[:space:]]*//p'\'' "$headers" | tr -d '\''\r'\'' | tail -n 1)
+        actual=$(sha256sum "$destination" | awk '\''{print $1}'\'')
+        [ -n "$expected" ] && [ "$actual" = "$expected" ] || {
+          echo "restored package checksum mismatch: $package_id" >&2
+          exit 1
+        }
+      }
+
+      agent_file="$temporary/agent.deb"
+      module_file="$temporary/module.deb"
+      download_package "$agent_package_id" "$agent_file" "$temporary/agent.headers"
+      download_package "$module_package_id" "$module_file" "$temporary/module.headers"
+      DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y "$module_file" "$agent_file"
+      systemctl enable --now mwaf-agent.service >/dev/null
+    ' mwaf-e2e-restore "$agent_url" "$agent_package_id" "$module_package_id" || \
+      fail "$service could not restore its assigned Agent packages"
+    return 0
+  fi
+
   if [ -z "$enterprise_install_token" ]; then
     enterprise_install_token=$(create_enterprise_install_token)
     rm -f "$install_token_response"

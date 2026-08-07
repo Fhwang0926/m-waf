@@ -43,3 +43,9 @@
 - 최초 실패한 E2E 실행이 runtime에 관리자 자격 증명을 저장한 뒤 실제 관리자 비밀번호가 복구되면, 기존 runtime 복사본을 계속 사용해 로그인이 HTTP 401로 실패했다.
 - `make e2e-remote` 실행 시 `MWAF_E2E_ADMIN_PASSWORD_FILE` 또는 `MWAF_E2E_ADMIN_PASSWORD`가 명시되어 있으면 username과 password runtime 복사본을 로그인 전에 갱신한다.
 - 자격 증명을 다시 전달하지 않는 `make e2e-remote-verify`는 기존 mode `0600` runtime 복사본을 계속 사용한다.
+
+## 후속 Agent 재실행 복구 수정
+
+- 고객 컨테이너가 다시 생성되면 named volume의 Agent ID·인증서는 남지만 이전 컨테이너에 설치한 DEB 상태는 사라져 설치기가 중복 등록을 안전하게 거부했다.
+- Agent ID가 있고 패키지만 없는 경우 기존 mTLS 인증서로 해당 서버의 desired state와 이미 배정된 Agent·모듈 패키지만 내려받는다.
+- 내려받은 각 패키지는 Manager 응답의 SHA-256과 대조한 뒤 재설치하며 새 설치 토큰 발급, 서버 재등록, 기존 신원 삭제 또는 덮어쓰기는 수행하지 않는다.
