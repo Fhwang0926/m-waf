@@ -12,6 +12,7 @@ case "$runtime_dir" in
   /*) ;;
   *) runtime_dir="$repo_root/$runtime_dir" ;;
 esac
+export MWAF_E2E_RUNTIME_DIR=$runtime_dir
 env_file="$runtime_dir/compose.env"
 secrets_dir="$runtime_dir/secrets"
 cookie_jar="$runtime_dir/admin.cookies"

@@ -31,3 +31,9 @@
 - 실행 중인 원격 Manager의 Admin readiness와 Agent bootstrap 응답을 확인했다.
 - 실제 원격 CA와 시스템 관리자 자격 증명이 현재 로컬 작업 공간에 없어 전체 Agent 설치 및 정책·차단 E2E는 실행하지 않았다.
 - 저장소 지침에 따라 프론트엔드 빌드와 테스트는 수행하지 않았다.
+
+## 후속 경로 수정
+
+- Make가 상대 runtime 경로를 프로세스 환경으로 전달하면 Docker Compose가 env 파일의 절대 경로보다 프로세스 환경을 우선하고, 이를 첫 Compose 파일인 `deploy/compose` 기준으로 다시 해석하는 문제가 있었다.
+- `run.sh`가 repository 기준으로 정규화한 절대 `MWAF_E2E_RUNTIME_DIR`을 Compose 실행 환경에 다시 export하도록 수정했다.
+- 따라서 CA secret bind source는 `/root/git/m-waf/.local/mwaf-e2e-192-168-7-200/secrets/mwaf_ca_cert.pem`으로 해석되며 `deploy/compose/.local/...`로 잘못 붙지 않는다.
