@@ -10,12 +10,17 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
+	"time"
 )
 
 //go:embed catalog.json templates/*.json
 var policyFiles embed.FS
 
 const DefaultTemplateKey = "crs-baseline"
+
+const DefaultOperatingTemplateKey = "crs-lts-baseline"
+
+const DefaultStableTemplateKey = "crs-stable-baseline"
 
 const (
 	StatusPublished  = "PUBLISHED"
@@ -24,10 +29,65 @@ const (
 )
 
 type Defaults struct {
-	Mode          string `json:"mode"`
-	ParanoiaLevel int    `json:"paranoia_level"`
-	InboundScore  int    `json:"inbound_anomaly_score"`
-	RequestBody   bool   `json:"request_body_access"`
+	Mode                   string            `json:"mode"`
+	ParanoiaLevel          int               `json:"paranoia_level"`
+	ExecutingParanoiaLevel int               `json:"executing_paranoia_level,omitempty"`
+	InboundScore           int               `json:"inbound_anomaly_score"`
+	OutboundScore          int               `json:"outbound_anomaly_score,omitempty"`
+	RequestBody            bool              `json:"request_body_access"`
+	ResponseBody           bool              `json:"response_body_access,omitempty"`
+	EarlyBlocking          bool              `json:"early_blocking,omitempty"`
+	SamplingPercentage     int               `json:"sampling_percentage,omitempty"`
+	ExcludedPaths          []string          `json:"excluded_paths,omitempty"`
+	ExcludedIPs            []string          `json:"excluded_ips,omitempty"`
+	CustomRules            string            `json:"custom_rules,omitempty"`
+	CustomRuleCount        int               `json:"custom_rule_count,omitempty"`
+	CRSSource              *PolicySourceRef  `json:"crs_source,omitempty"`
+	CRSSetup               map[string]string `json:"crs_setup,omitempty"`
+	BeforeExclusions       []RuleExclusion   `json:"before_crs_exclusions,omitempty"`
+	AfterExclusions        []RuleExclusion   `json:"after_crs_exclusions,omitempty"`
+	TagExclusions          []string          `json:"tag_exclusions,omitempty"`
+	TargetExclusions       []TargetExclusion `json:"target_exclusions,omitempty"`
+	EngineBypasses         []EngineBypass    `json:"engine_bypasses,omitempty"`
+	ArtifactFormat         string            `json:"artifact_format,omitempty"`
+}
+
+// PolicySourceRef pins a system policy to one CI-verified CRS source. The
+// immutable source metadata is copied into the policy so it remains auditable
+// even after a newer package bundle is installed.
+type PolicySourceRef struct {
+	ID            string `json:"id"`
+	Repository    string `json:"repository"`
+	Channel       string `json:"channel,omitempty"`
+	Tag           string `json:"tag"`
+	Commit        string `json:"commit"`
+	TagObjectSHA  string `json:"tag_object_sha,omitempty"`
+	TagVerified   bool   `json:"tag_signature_verified,omitempty"`
+	ArchiveSHA256 string `json:"archive_sha256"`
+	IndexSHA256   string `json:"index_sha256"`
+}
+
+type RuleCondition struct {
+	Field    string `json:"field"`
+	Operator string `json:"operator"`
+	Value    string `json:"value"`
+}
+
+type RuleExclusion struct {
+	RuleID     int             `json:"rule_id"`
+	Conditions []RuleCondition `json:"conditions,omitempty"`
+}
+
+type TargetExclusion struct {
+	RuleID     int             `json:"rule_id"`
+	Target     string          `json:"target"`
+	Conditions []RuleCondition `json:"conditions,omitempty"`
+}
+
+type EngineBypass struct {
+	Reason     string          `json:"reason"`
+	ExpiresAt  time.Time       `json:"expires_at"`
+	Conditions []RuleCondition `json:"conditions"`
 }
 
 type Template struct {
@@ -189,6 +249,29 @@ func (t Template) Validate() error {
 	}
 	if t.Defaults.InboundScore < 1 || t.Defaults.InboundScore > 100 {
 		return errors.New("default inbound score must be 1..100")
+	}
+	if t.Defaults.ArtifactFormat != "" && t.Defaults.ArtifactFormat != "policy-bundle-v2" && t.Defaults.ArtifactFormat != "policy-bundle-v3" {
+		return errors.New("unsupported system policy artifact format")
+	}
+	if t.Defaults.ArtifactFormat == "policy-bundle-v2" || t.Defaults.ArtifactFormat == "policy-bundle-v3" {
+		if t.Defaults.CRSSource == nil || t.Defaults.CRSSource.ID == "" || t.Defaults.CRSSource.Commit == "" || len(t.Defaults.CRSSource.ArchiveSHA256) != 64 || len(t.Defaults.CRSSource.IndexSHA256) != 64 {
+			return errors.New("policy bundle requires a pinned verified CRS source")
+		}
+		if t.Defaults.CRSSource.Channel != "" && t.Defaults.CRSSource.Channel != t.CRSTrack {
+			return errors.New("system policy channel must match its verified CRS source")
+		}
+		if strings.TrimPrefix(t.CRSVersion, "v") != strings.TrimPrefix(t.Defaults.CRSSource.Tag, "v") {
+			return errors.New("system policy CRS version must match its verified source tag")
+		}
+	}
+	if t.Defaults.ExecutingParanoiaLevel != 0 && (t.Defaults.ExecutingParanoiaLevel < t.Defaults.ParanoiaLevel || t.Defaults.ExecutingParanoiaLevel > 4) {
+		return errors.New("executing paranoia level must be between blocking paranoia level and 4")
+	}
+	if t.Defaults.OutboundScore != 0 && (t.Defaults.OutboundScore < 1 || t.Defaults.OutboundScore > 100) {
+		return errors.New("default outbound score must be 1..100")
+	}
+	if t.Defaults.SamplingPercentage != 0 && (t.Defaults.SamplingPercentage < 1 || t.Defaults.SamplingPercentage > 100) {
+		return errors.New("sampling percentage must be 1..100")
 	}
 	return nil
 }

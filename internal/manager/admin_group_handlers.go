@@ -17,7 +17,7 @@ type groupView struct {
 }
 
 func (s *Server) groups(w http.ResponseWriter, r *http.Request) {
-	s.renderGroups(w, r, http.StatusOK, "", "", "", nil, "")
+	s.renderGroups(w, r, http.StatusOK, "", strings.TrimSpace(r.URL.Query().Get("edit")), "", nil, "")
 }
 
 func (s *Server) renderGroups(w http.ResponseWriter, r *http.Request, status int, pageError, formGroupID, formName string, formServerIDs []string, formEnterpriseID string) {
@@ -46,13 +46,13 @@ func (s *Server) renderGroups(w http.ResponseWriter, r *http.Request, status int
 		for _, server := range servers {
 			if server.EnterpriseID == group.EnterpriseID && !server.Revoked {
 				isSelected := selected[server.ID]
-				if formGroupID == group.ID {
+				if formGroupID == group.ID && pageError != "" {
 					isSelected = formSelected[server.ID]
 				}
 				choices = append(choices, groupServerChoice{Server: server, Selected: isSelected})
 			}
 		}
-		if formGroupID == group.ID {
+		if formGroupID == group.ID && pageError != "" {
 			group.Name = formName
 		}
 		views = append(views, groupView{Group: group, Servers: choices})
@@ -63,7 +63,31 @@ func (s *Server) renderGroups(w http.ResponseWriter, r *http.Request, status int
 			createChoices = append(createChoices, groupServerChoice{Server: server, Selected: formGroupID == "" && formSelected[server.ID]})
 		}
 	}
-	data := map[string]any{"Groups": views, "CreateServers": createChoices, "Error": pageError, "FormName": formName, "FormEnterpriseID": formEnterpriseID, "EditGroupID": formGroupID}
+	filterQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+	filterEnterprise := strings.TrimSpace(r.URL.Query().Get("enterprise_id"))
+	query := strings.ToLower(filterQuery)
+	filteredViews := views[:0]
+	for _, view := range views {
+		if query != "" && !strings.Contains(strings.ToLower(view.Group.Name), query) && !strings.Contains(strings.ToLower(view.Group.EnterpriseName), query) {
+			continue
+		}
+		if session.IsSystemAdmin() && filterEnterprise != "" && view.Group.EnterpriseID != filterEnterprise {
+			continue
+		}
+		filteredViews = append(filteredViews, view)
+	}
+	data := map[string]any{
+		"Groups":             filteredViews,
+		"GroupTotal":         len(views),
+		"CreateServers":      createChoices,
+		"Error":              pageError,
+		"FormName":           formName,
+		"FormEnterpriseID":   formEnterpriseID,
+		"EditGroupID":        formGroupID,
+		"FilterQuery":        filterQuery,
+		"FilterEnterpriseID": filterEnterprise,
+		"CreateOpen":         r.URL.Query().Get("create") == "1" || (r.Method == http.MethodPost && r.URL.Path == "/groups" && pageError != ""),
+	}
 	if session.IsSystemAdmin() {
 		enterprises, err := s.store.ListEnterprises(r.Context())
 		if err != nil {

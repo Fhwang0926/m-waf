@@ -25,6 +25,7 @@ import (
 
 	"github.com/Fhwang0926/m-waf/internal/config"
 	"github.com/Fhwang0926/m-waf/internal/model"
+	"github.com/Fhwang0926/m-waf/internal/protocol"
 )
 
 type Client struct {
@@ -69,9 +70,9 @@ func (c *Client) Enroll(ctx context.Context, inventory model.Inventory) error {
 		return err
 	}
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
-	request := model.EnrollRequest{Token: c.cfg.EnrollmentToken, Name: c.cfg.ServerName, CSRPEM: string(csrPEM), Inventory: inventory}
-	var response model.EnrollResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/agent/v1/enroll", request, &response); err != nil {
+	request := protocol.EnrollRequest{Token: c.cfg.EnrollmentToken, Name: c.cfg.ServerName, CSRPEM: string(csrPEM), Inventory: inventory}
+	var response protocol.EnrollResponse
+	if err := c.doJSON(ctx, http.MethodPost, protocol.EnrollPath, request, &response); err != nil {
 		return err
 	}
 	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
@@ -137,9 +138,9 @@ func (c *Client) RenewCertificate(ctx context.Context) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	request := model.CertificateRenewRequest{CSRPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))}
-	var response model.CertificateRenewResponse
-	if err := c.doJSON(ctx, http.MethodPost, "/agent/v1/certificate/renew", request, &response); err != nil {
+	request := protocol.CertificateRenewRequest{CSRPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))}
+	var response protocol.CertificateRenewResponse
+	if err := c.doJSON(ctx, http.MethodPost, protocol.CertificateRenewPath, request, &response); err != nil {
 		return time.Time{}, err
 	}
 	if response.CertificatePEM == "" || response.ExpiresAt.IsZero() {
@@ -164,35 +165,35 @@ func (c *Client) RenewCertificate(ctx context.Context) (time.Time, error) {
 }
 
 func (c *Client) Heartbeat(ctx context.Context, heartbeat model.HeartbeatRequest) error {
-	return c.doJSON(ctx, http.MethodPost, "/agent/v1/heartbeat", heartbeat, nil)
+	return c.doJSON(ctx, http.MethodPost, protocol.HeartbeatPath, heartbeat, nil)
 }
 
 func (c *Client) DesiredState(ctx context.Context) (model.DesiredState, error) {
 	var state model.DesiredState
-	err := c.doJSON(ctx, http.MethodGet, "/agent/v1/desired-state", nil, &state)
+	err := c.doJSON(ctx, http.MethodGet, protocol.DesiredStatePath, nil, &state)
 	return state, err
 }
 
 func (c *Client) SendEvents(ctx context.Context, batch model.EventBatch) error {
-	return c.doJSON(ctx, http.MethodPost, "/agent/v1/events/batch", batch, nil)
+	return c.doJSON(ctx, http.MethodPost, protocol.EventBatchPath, batch, nil)
 }
 
 func (c *Client) SendPolicyResult(ctx context.Context, revisionID, status, detail string) error {
-	return c.doJSON(ctx, http.MethodPost, "/agent/v1/policies/"+revisionID+"/result", model.DeploymentResult{Status: status, Detail: detail}, nil)
+	return c.doJSON(ctx, http.MethodPost, protocol.PolicyResultPath(revisionID), protocol.DeploymentResult{Status: status, Detail: detail}, nil)
 }
 
 func (c *Client) SendPackageResult(ctx context.Context, deploymentID, status, detail string) error {
-	return c.doJSON(ctx, http.MethodPost, "/agent/v1/package-deployments/"+deploymentID+"/result", model.DeploymentResult{Status: status, Detail: detail}, nil)
+	return c.doJSON(ctx, http.MethodPost, protocol.PackageResultPath(deploymentID), protocol.DeploymentResult{Status: status, Detail: detail}, nil)
 }
 
 func (c *Client) NextCommand(ctx context.Context) (model.AgentCommand, error) {
 	var command model.AgentCommand
-	err := c.doJSON(ctx, http.MethodGet, "/agent/v1/commands/next", nil, &command)
+	err := c.doJSON(ctx, http.MethodGet, protocol.NextCommandPath, nil, &command)
 	return command, err
 }
 
 func (c *Client) SendCommandResult(ctx context.Context, commandID, status, detail string) error {
-	return c.doJSON(ctx, http.MethodPost, "/agent/v1/commands/"+commandID+"/result", model.DeploymentResult{Status: status, Detail: detail}, nil)
+	return c.doJSON(ctx, http.MethodPost, protocol.CommandResultPath(commandID), protocol.DeploymentResult{Status: status, Detail: detail}, nil)
 }
 
 func (c *Client) EnsurePolicyPublicKey(ctx context.Context) error {
@@ -201,7 +202,7 @@ func (c *Client) EnsurePolicyPublicKey(ctx context.Context) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	raw, err := c.doBytes(ctx, "/agent/v1/policy-key", 64<<10)
+	raw, err := c.doBytes(ctx, protocol.PolicyKeyPath, 64<<10)
 	if err != nil {
 		return err
 	}
@@ -209,14 +210,14 @@ func (c *Client) EnsurePolicyPublicKey(ctx context.Context) error {
 }
 
 func (c *Client) DownloadPolicy(ctx context.Context, path string) ([]byte, error) {
-	if !strings.HasPrefix(path, "/agent/v1/artifacts/") {
+	if !strings.HasPrefix(path, protocol.PolicyArtifactPrefix) {
 		return nil, errors.New("invalid policy artifact path")
 	}
-	return c.doBytes(ctx, path, 1<<20)
+	return c.doBytes(ctx, path, protocol.AgentV1.PolicyArtifactLimit)
 }
 
 func (c *Client) DownloadPackage(ctx context.Context, item model.PackageDownload, destination string) error {
-	if item.ID == "" || !strings.HasPrefix(item.URL, "/agent/v1/packages/") || item.Size < 1 || item.Size > 1<<30 {
+	if item.ID == "" || !strings.HasPrefix(item.URL, protocol.AgentPackagePrefix) || item.Size < 1 || item.Size > protocol.AgentV1.PackageLimit {
 		return errors.New("invalid package download")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.cfg.ManagerURL, "/")+item.URL, nil)

@@ -59,4 +59,9 @@ func (s *PolicySigner) Sign(raw []byte) (string, string) {
 	return hex.EncodeToString(hash[:]), base64.StdEncoding.EncodeToString(signature)
 }
 
+func (s *PolicySigner) Verify(raw []byte, encoded string) bool {
+	signature, err := base64.StdEncoding.DecodeString(encoded)
+	return err == nil && ed25519.Verify(s.privateKey.Public().(ed25519.PublicKey), raw, signature)
+}
+
 func (s *PolicySigner) PublicPEM() string { return s.publicPEM }

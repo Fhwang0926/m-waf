@@ -71,28 +71,21 @@ func main() {
 	defer stopCleanup()
 	go runLogCleanup(cleanupCtx, cfg, store, logger)
 	go runSystemPolicySync(cleanupCtx, cfg.PolicySyncInterval, app, logger)
-	agentTLS, err := app.AgentTLSConfig()
+	go runCRSSourceSync(cleanupCtx, cfg.CRSSyncInterval, app, logger)
+	tlsConfig, err := app.TLSConfig()
 	if err != nil {
-		logger.Error("agent_tls_config", "error", err)
+		logger.Error("manager_tls_config", "error", err)
 		os.Exit(1)
 	}
-	adminServer := &http.Server{
-		Addr: cfg.AdminAddr, Handler: app.AdminHandler(), ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second,
-	}
-	agentServer := &http.Server{
-		Addr: cfg.AgentAddr, Handler: app.AgentHandler(), TLSConfig: agentTLS, ReadHeaderTimeout: 5 * time.Second,
+	managerServer := &http.Server{
+		Addr: cfg.AdminAddr, Handler: app.Handler(), TLSConfig: tlsConfig, ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 90 * time.Second,
 	}
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("admin_server_start", "addr", cfg.AdminAddr, "version", version.Version, "commit", version.Commit)
-		errCh <- adminServer.ListenAndServeTLS(cfg.TLSCertificate, cfg.TLSPrivateKey)
-	}()
-	go func() {
-		logger.Info("agent_server_start", "addr", cfg.AgentAddr, "version", version.Version, "commit", version.Commit)
-		errCh <- agentServer.ListenAndServeTLS(cfg.TLSCertificate, cfg.TLSPrivateKey)
+		logger.Info("manager_server_start", "addr", cfg.AdminAddr, "version", version.Version, "commit", version.Commit, "agent_direction", "agent-to-manager")
+		errCh <- managerServer.ListenAndServeTLS(cfg.TLSCertificate, cfg.TLSPrivateKey)
 	}()
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -108,8 +101,30 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer shutdownCancel()
 	stopCleanup()
-	_ = adminServer.Shutdown(shutdownCtx)
-	_ = agentServer.Shutdown(shutdownCtx)
+	_ = managerServer.Shutdown(shutdownCtx)
+}
+
+func runCRSSourceSync(ctx context.Context, interval time.Duration, app *manager.Server, logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	syncSources := func() {
+		syncCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
+		defer cancel()
+		if err := app.SyncCRSChannels(syncCtx); err != nil {
+			logger.Warn("crs_source_sync_failed", "error", err)
+			return
+		}
+		logger.Info("crs_source_sync", "channels", "lts,stable")
+	}
+	syncSources()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			syncSources()
+		}
+	}
 }
 
 func runSystemPolicySync(ctx context.Context, interval time.Duration, app *manager.Server, logger *slog.Logger) {

@@ -52,4 +52,7 @@ func TestLoadAgentDefaultsToDistroIntegration(t *testing.T) {
 	if cfg.IntegrationMode != "distro" {
 		t.Fatalf("unexpected integration mode %q", cfg.IntegrationMode)
 	}
+	if cfg.InstallationMode != "package" {
+		t.Fatalf("unexpected installation mode %q", cfg.InstallationMode)
+	}
 }

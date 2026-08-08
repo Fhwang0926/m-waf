@@ -65,6 +65,10 @@ func (s *Server) deployServerPackages(w http.ResponseWriter, r *http.Request) {
 		s.renderServers(w, r, http.StatusNotFound, "서버를 찾을 수 없거나 이미 등록 해제되었습니다.")
 		return
 	}
+	if server.Inventory.InstallationMode == "manual" {
+		s.renderServers(w, r, http.StatusConflict, "수동 Connector 서버는 Manager가 모듈 패키지를 교체하지 않습니다. 기존 Connector를 유지하고 별도 유지보수 절차로 Agent를 갱신하세요.")
+		return
+	}
 	operation := strings.TrimSpace(r.FormValue("operation"))
 	var agentID, moduleID string
 	switch operation {

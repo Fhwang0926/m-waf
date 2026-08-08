@@ -10,13 +10,13 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: mwaf-crs-stable-update
+  group: mwaf-crs-channel-updates
   cancel-in-progress: true
 
 jobs:
   discover:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Check out development branch
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -31,31 +31,36 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Update verified CRS source lock and system templates
+      - name: Update verified LTS and Stable CRS locks
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: go run ./cmd/mwaf-crs-updater -channel stable -write
+        run: |
+          set -eu
+          go run ./cmd/mwaf-crs-updater -channel lts -write
+          go run ./cmd/mwaf-crs-updater -channel stable -write
 
       - name: Open or refresh the CRS update pull request
-        if: ${{ hashFiles('packaging/sources.lock.yaml') != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
-          if git diff --quiet -- packaging/sources.lock.yaml internal/systempolicy/catalog.json internal/systempolicy/templates; then
+          if git diff --quiet -- packaging/sources.lock.yaml; then
             echo "No CRS update is available"
             exit 0
           fi
-          version="$(go run ./cmd/mwaf-crs-updater -field version)"
+          lts_version="$(go run ./cmd/mwaf-crs-updater -channel lts -field version)"
+          stable_version="$(go run ./cmd/mwaf-crs-updater -channel stable -field version)"
           branch="codex/crs-auto-update"
+          title="chore: prepare OWASP CRS LTS ${lts_version} and Stable ${stable_version}"
+          body="Automated signed annotated-tag discovery for the pinned LTS line and the latest Stable CRS. The normal compatibility checks and approval flow remain required before release."
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$branch"
-          git add packaging/sources.lock.yaml internal/systempolicy/catalog.json internal/systempolicy/templates
-          git commit -m "chore: prepare OWASP CRS ${version}"
+          git add packaging/sources.lock.yaml
+          git commit -m "$title"
           git push --force-with-lease origin "HEAD:refs/heads/${branch}"
           if gh pr view "$branch" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh pr edit "$branch" --repo "$GITHUB_REPOSITORY" --title "chore: prepare OWASP CRS ${version}" --body "Automated signed-tag discovery for OWASP CRS ${version}. The normal package compatibility checks and approval flow remain required before release."
+            gh pr edit "$branch" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
           else
-            gh pr create --repo "$GITHUB_REPOSITORY" --base dev --head "$branch" --title "chore: prepare OWASP CRS ${version}" --body "Automated signed-tag discovery for OWASP CRS ${version}. The normal package compatibility checks and approval flow remain required before release."
+            gh pr create --repo "$GITHUB_REPOSITORY" --base dev --head "$branch" --title "$title" --body "$body"
           fi

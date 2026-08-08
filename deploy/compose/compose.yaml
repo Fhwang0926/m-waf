@@ -47,8 +47,7 @@ services:
         condition: service_healthy
     environment:
       MWAF_ADMIN_ADDR: ":${MWAF_ADMIN_PORT:-8443}"
-      MWAF_AGENT_ADDR: ":${MWAF_AGENT_PORT:-10443}"
-      MWAF_AGENT_PUBLIC_URL: "${MWAF_AGENT_PUBLIC_URL:-https://${MWAF_MANAGER_HOST:-localhost}:${MWAF_AGENT_PORT:-10443}}"
+      MWAF_PUBLIC_URL: "${MWAF_PUBLIC_URL:-https://${MWAF_MANAGER_HOST:-localhost}:${MWAF_ADMIN_PORT:-8443}}"
       MWAF_DB_HOST: mariadb
       MWAF_DB_PORT: "3306"
       MWAF_DB_NAME: ${MWAF_DB_NAME:-mwaf}
@@ -68,6 +67,9 @@ services:
       MWAF_ARTIFACT_ROOT: /var/lib/mwaf-manager/artifacts
       MWAF_EVENT_RETENTION: ${MWAF_EVENT_RETENTION:-720h}
       MWAF_POLICY_SYNC_INTERVAL: ${MWAF_POLICY_SYNC_INTERVAL:-15m}
+      MWAF_CRS_SYNC_INTERVAL: ${MWAF_CRS_SYNC_INTERVAL:-24h}
+      MWAF_CRS_GITHUB_TOKEN: ${MWAF_CRS_GITHUB_TOKEN:-}
+      MWAF_CRS_LTS_LINE: ${MWAF_CRS_LTS_LINE:-4.25}
     secrets:
       - mariadb_app_password
       - mwaf_session_key
@@ -81,8 +83,7 @@ services:
       - mwaf_data:/var/lib/mwaf-manager
       - mwaf_logs:/var/log/mwaf-manager
     ports:
-      - "${MWAF_ADMIN_BIND:-127.0.0.1}:${MWAF_ADMIN_PORT:-8443}:${MWAF_ADMIN_PORT:-8443}"
-      - "${MWAF_AGENT_BIND:-0.0.0.0}:${MWAF_AGENT_PORT:-10443}:${MWAF_AGENT_PORT:-10443}"
+      - "${MWAF_ADMIN_BIND:-0.0.0.0}:${MWAF_ADMIN_PORT:-8443}:${MWAF_ADMIN_PORT:-8443}"
     networks:
       - manager_net
       - db_net

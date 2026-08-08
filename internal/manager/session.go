@@ -31,15 +31,43 @@ type sessionData struct {
 	CSRF           string `json:"csrf"`
 }
 
+// TenantScope separates a user's home hosting tenant from permission to read
+// across tenants. A system administrator still belongs to one enterprise, but
+// may select all enterprises for system-wide monitoring and administration.
+type TenantScope struct {
+	HomeEnterpriseID string
+	GlobalAccess     bool
+}
+
+func (s sessionData) TenantScope() TenantScope {
+	return TenantScope{HomeEnterpriseID: s.EnterpriseID, GlobalAccess: s.IsSystemAdmin()}
+}
+
+func (s TenantScope) ReadEnterpriseID(requested string) string {
+	if !s.GlobalAccess {
+		return s.HomeEnterpriseID
+	}
+	return strings.TrimSpace(requested)
+}
+
+func (s TenantScope) MutationEnterpriseID(requested string) string {
+	requested = strings.TrimSpace(requested)
+	if !s.GlobalAccess || requested == "" {
+		return s.HomeEnterpriseID
+	}
+	return requested
+}
+
 func (s sessionData) RoleLabel() string    { return s.Role.Label() }
 func (s sessionData) IsSystemAdmin() bool  { return s.Role == RoleSystemAdmin }
 func (s sessionData) CanOperate() bool     { return roleAtLeast(s.Role, RoleEnterpriseUser) }
 func (s sessionData) CanManageUsers() bool { return roleAtLeast(s.Role, RoleEnterpriseAdmin) }
 func (s sessionData) ScopeEnterpriseID() string {
-	if s.IsSystemAdmin() {
+	scope := s.TenantScope()
+	if scope.GlobalAccess {
 		return ""
 	}
-	return s.EnterpriseID
+	return scope.HomeEnterpriseID
 }
 
 type sessionManager struct {

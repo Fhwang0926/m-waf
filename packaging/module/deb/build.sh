@@ -15,15 +15,22 @@ case "$INTEGRATION_MODE" in distro|external) ;; *) echo "unsupported integration
 root=$(mktemp -d)
 crs_stage=$(mktemp -d)
 trap 'rm -rf "$root" "$crs_stage"' EXIT INT TERM
-mkdir -p "$OUTPUT_DIR" "$METADATA_DIR" "$root/DEBIAN" "$root/etc/mwaf/active" "$root/usr/share/mwaf/crs" "$root/usr/share/doc/mwaf-modsecurity-$WEBSERVER"
+mkdir -p "$OUTPUT_DIR" "$METADATA_DIR" "$root/DEBIAN" "$root/usr/share/mwaf/policy/default" "$root/usr/share/mwaf/crs" "$root/usr/share/doc/mwaf-modsecurity-$WEBSERVER"
 tar -xzf "$CRS_ARCHIVE" -C "$crs_stage" --strip-components=1
 cp -R "$crs_stage/rules" "$root/usr/share/mwaf/crs/rules"
 install -m 0644 "$crs_stage/crs-setup.conf.example" "$root/usr/share/mwaf/crs/crs-setup.conf"
 install -m 0644 "$crs_stage/LICENSE" "$root/usr/share/doc/mwaf-modsecurity-$WEBSERVER/LICENSE.crs"
 printf '%s\n' "$CRS_VERSION" > "$root/etc/mwaf/crs.version"
-cat > "$root/etc/mwaf/active/main.conf" <<'EOF'
+cat > "$root/usr/share/mwaf/policy/default/00-engine.conf" <<'EOF'
 # Managed by mwaf-agent. Do not edit.
 SecRuleEngine DetectionOnly
+SecRequestBodyAccess On
+EOF
+cat > "$root/usr/share/mwaf/policy/default/20-crs-setup.conf" <<'EOF'
+Include /usr/share/mwaf/crs/crs-setup.conf
+EOF
+cat > "$root/usr/share/mwaf/policy/default/40-crs-rules.conf" <<'EOF'
+Include /usr/share/mwaf/crs/rules/*.conf
 EOF
 case "$WEBSERVER" in apache|nginx) ;; *) echo "unsupported webserver: $WEBSERVER" >&2; exit 1 ;; esac
 
@@ -80,6 +87,35 @@ EOF
 cat > "$root/DEBIAN/postinst" <<EOF
 #!/bin/sh
 set -e
+active=/etc/mwaf/active
+revisions=/etc/mwaf/revisions
+if [ ! -L "\$active" ]; then
+  install -d -m 0750 "\$revisions"
+  legacy="\$revisions/legacy-package"
+  if [ -e "\$legacy" ]; then
+    legacy="\$revisions/legacy-package-\$(date +%s)"
+  fi
+  install -d -m 0750 "\$legacy"
+  if [ -d "\$active" ]; then
+    for policy_file in "\$active"/*.conf; do
+      [ -f "\$policy_file" ] || continue
+      policy_name=\$(basename "\$policy_file")
+      if [ "\$policy_name" = main.conf ]; then policy_name=00-engine.conf; fi
+      cp -p "\$policy_file" "\$legacy/\$policy_name"
+    done
+  fi
+  for policy_name in 00-engine.conf 20-crs-setup.conf 40-crs-rules.conf; do
+    if [ ! -f "\$legacy/\$policy_name" ]; then
+      cp "/usr/share/mwaf/policy/default/\$policy_name" "\$legacy/\$policy_name"
+    fi
+  done
+  if [ ! -f "\$legacy/main.conf" ]; then
+    printf '%s\n' '# Compatibility entry for conf-v1 policy rollback. Managed by mwaf-agent.' > "\$legacy/main.conf"
+  fi
+  if [ -e "\$active" ]; then mv "\$active" "\$active.mwaf-old"; fi
+  ln -s "\$legacy" "\$active"
+  if [ -d "\$active.mwaf-old" ]; then rm -rf "\$active.mwaf-old"; fi
+fi
 if [ "$INTEGRATION_MODE" = "distro" ]; then
 install -d -o root -g www-data -m 0770 /var/log/modsecurity
 touch /var/log/modsecurity/audit.jsonl

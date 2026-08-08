@@ -5,15 +5,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/Fhwang0926/m-waf/internal/config"
 	"github.com/Fhwang0926/m-waf/internal/model"
+	"github.com/Fhwang0926/m-waf/internal/policybundle"
 	"github.com/Fhwang0926/m-waf/internal/version"
 )
 
@@ -38,10 +41,21 @@ func CollectInventory(ctx context.Context, cfg config.Agent) (model.Inventory, e
 	if cfg.IntegrationMode == "external" {
 		moduleName += "-external"
 	}
+	moduleVersion := installedPackageVersion(ctx, moduleName)
+	connectorVersion := installedConnectorVersion(ctx, webServer)
+	if cfg.InstallationMode == "manual" {
+		moduleVersion = "manual"
+		if recorded := readFirst(filepath.Join(cfg.StateDirectory, "connector.version")); recorded != "unknown" {
+			connectorVersion = recorded
+		}
+	}
+	connectorLoaded, configTestOK := connectorStatus(ctx, webServer, cfg.WebServerBinary)
 	return model.Inventory{
 		Hostname: hostname, OSID: osRelease["ID"], OSVersion: osRelease["VERSION_ID"], Architecture: runtime.GOARCH,
 		WebServer: webServer, WebServerVersion: webVersion, WebServerBuild: webBuild, IntegrationMode: cfg.IntegrationMode,
-		AgentVersion: version.Version, ModuleVersion: installedPackageVersion(ctx, moduleName), CRSVersion: readFirst("/etc/mwaf/crs.version"),
+		InstallationMode: cfg.InstallationMode, AgentVersion: version.Version, ModuleVersion: moduleVersion, CRSVersion: appliedCRSVersion(cfg.PolicyPath),
+		ConnectorVersion: connectorVersion, ConnectorLoaded: connectorLoaded, ConfigTestOK: configTestOK,
+		PolicyFormats: []string{"conf-v1", policybundle.Format, policybundle.FormatV3},
 	}, nil
 }
 
@@ -163,10 +177,72 @@ func installedPackageVersion(ctx context.Context, name string) string {
 	return "unknown"
 }
 
+func installedConnectorVersion(ctx context.Context, webServer string) string {
+	names := []string{"libmodsecurity3"}
+	if webServer == "apache" {
+		names = []string{"libapache2-mod-security2"}
+	} else if webServer == "nginx" {
+		names = []string{"libnginx-mod-http-modsecurity", "libmodsecurity3"}
+	}
+	for _, name := range names {
+		if version := installedPackageVersion(ctx, name); version != "unknown" {
+			return version
+		}
+	}
+	return "unknown"
+}
+
+func connectorStatus(parent context.Context, webServer, configuredBinary string) (bool, bool) {
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	binary := configuredBinary
+	if binary == "" {
+		binary = webServer
+		if webServer == "apache" {
+			binary = "apachectl"
+			if _, err := exec.LookPath(binary); err != nil {
+				binary = "httpd"
+			}
+		}
+	}
+	if webServer == "apache" {
+		if err := exec.CommandContext(ctx, binary, "configtest").Run(); err != nil {
+			return false, false
+		}
+		output, err := exec.CommandContext(ctx, binary, "-M").CombinedOutput()
+		return err == nil && strings.Contains(string(output), "security2_module"), true
+	}
+	if webServer == "nginx" {
+		if err := exec.CommandContext(ctx, binary, "-t").Run(); err != nil {
+			return false, false
+		}
+		output, err := exec.CommandContext(ctx, binary, "-T").CombinedOutput()
+		loaded := err == nil && (strings.Contains(string(output), "modsecurity on;") || strings.Contains(string(output), "modsecurity_rules_file"))
+		return loaded, true
+	}
+	return false, false
+}
+
 func readFirst(path string) string {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "unknown"
 	}
 	return strings.TrimSpace(string(raw))
+}
+
+func appliedCRSVersion(policyPath string) string {
+	manifestPath := filepath.Join(filepath.Dir(policyPath), "manifest.json")
+	raw, err := os.ReadFile(manifestPath)
+	if err == nil {
+		var manifest struct {
+			PolicySource struct {
+				Tag string `json:"tag"`
+			} `json:"policy_source"`
+		}
+		if json.Unmarshal(raw, &manifest) == nil && manifest.PolicySource.Tag != "" {
+			return strings.TrimPrefix(manifest.PolicySource.Tag, "v")
+		}
+	}
+	return readFirst("/etc/mwaf/crs.version")
 }

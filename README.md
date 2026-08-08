@@ -5,7 +5,7 @@ M-WAF is a lightweight hosting-provider WAF control plane. Customer web servers 
 1. `mwaf-agent`
 2. the matching Apache/Nginx `distro` or `external` M-WAF integration package
 
-The separate Manager server runs MariaDB and one Manager container. A tagged release image embeds the exact Agent package plus distro and pre-installed-connector integration packages for both web servers from the same release commit.
+The separate Manager server runs MariaDB and one Manager container. Every published Manager image embeds the exact Agent package plus distro and pre-installed-connector integration packages for both web servers from the same verified commit.
 
 ## Project introduction page
 
@@ -29,7 +29,7 @@ Before the first publication, set **Repository Settings → Pages → Build and 
 | Web server | Ubuntu 24.04 distribution packages, or an operator-managed Apache/Nginx custom build using `external` integration |
 | WAF | Distro connector package, or a compatible ModSecurity connector already built and loaded by the hosting operator |
 | Rules | OWASP CRS v4.28.0 from the repository source lock, with managed sensitivity, threshold, URL/IP exclusions, and restricted custom `SecRule` additions |
-| Policy | Versioned templates, an enterprise DetectionOnly seed, per-server/group overrides, signed revisions, migration metadata, and deployment status |
+| Policy | No implicit first-install policy; a verified CRS source is reviewed into an immutable system policy, then enterprise URL/IP detect/block overrides are deployed as signed revisions |
 | Events | ModSecurity JSON audit log batch forwarding and Manager event list |
 | Access | Enterprise-isolated users, enterprise administrators, and one first-setup system administrator |
 
@@ -80,8 +80,7 @@ flowchart LR
     Web --> Module["ModSecurity + OWASP CRS"]
     Module --> Audit["JSON audit log"]
     Audit --> Agent["mwaf-agent"]
-    Manager["M-WAF Manager\nembedded DEB bundle"] -->|"mTLS policy and package API"| Agent
-    Agent -->|"batch events and heartbeat"| Manager
+    Agent -->|"Agent-initiated mTLS polling, heartbeat, results and events"| Manager["M-WAF Manager\nembedded DEB bundle"]
     Manager --> DB["MariaDB"]
     Admin["Hosting administrator"] -->|"HTTPS :8443"| Manager
 ```
@@ -96,38 +95,41 @@ Prerequisites are Docker Engine with the Compose plugin, OpenSSL, and Go 1.26 or
 make dev
 ```
 
-The command creates missing local secrets and certificates, starts an isolated `mwaf-local` MariaDB project on `127.0.0.1:3306`, applies forward-only migrations to that local database, and runs the Manager directly from the current source with `go run`. It does not build a Manager Docker image. It uses `dist/bundle` when present and otherwise extracts the signed package bundle from `MWAF_BUNDLE_IMAGE`. Before the first tagged release exists, Manager still starts for UI/API development with package installation endpoints marked unavailable.
+The command creates missing local secrets and certificates, starts an isolated `mwaf-local` MariaDB project on `127.0.0.1:3306`, applies forward-only migrations to that local database, and runs the Manager directly from the current source. It does not build a Manager Docker image. Every `make dev` pulls `ghcr.io/fhwang0926/m-waf-manager:latest`, extracts its signed bundle, and caches it by immutable image ID. A local signed `dist/bundle` is used only when the latest image cannot be refreshed. If the latest release still contains schema v1, Manager remains available in compatibility mode and the Open Source CRS catalog explains that a schema v2 release is required.
+
+To reproduce a specific signed release bundle once without editing `.env`, pass its immutable tag through the development-only override:
+
+```sh
+MWAF_DEV_BUNDLE_IMAGE=ghcr.io/fhwang0926/m-waf-manager:VERSION make dev
+```
 
 - Admin UI: `https://localhost:8443/setup`
-- Agent API: `https://localhost:10443`
+- Agent/API endpoint: the same `https://localhost:8443`
 - Stop the foreground Manager: `Ctrl-C`
 - Stop local MariaDB without deleting its volume: `make dev-down`
 - Follow local MariaDB output: `make dev-db-logs`
 
-Admin UI and Agent API ports are independent. Override either one before `make dev` or in `deploy/compose/.env`:
+The administrator UI and Agent API share one HTTPS listener. Override it before `make dev` or in `deploy/compose/.env`:
 
 ```dotenv
 MWAF_ADMIN_PORT=8443
-MWAF_AGENT_PORT=10443
 ```
 
 For a one-off local run, the same values can be supplied in one command:
 
 ```sh
-MWAF_ADMIN_PORT=18443 MWAF_AGENT_PORT=20443 make dev
+MWAF_ADMIN_PORT=18443 make dev
 ```
 
-Local source development binds both endpoints to loopback by default. `MWAF_DEV_ADMIN_BIND` and `MWAF_DEV_AGENT_BIND` can change those local bind addresses. Container deployment uses `MWAF_ADMIN_BIND` and `MWAF_AGENT_BIND`; keep the Admin UI on a management network, while protected servers must be able to reach the Agent API.
+Local source development binds the endpoint to loopback by default. `MWAF_DEV_ADMIN_BIND` changes the local bind address and container deployment uses `MWAF_ADMIN_BIND`. Protected servers must be able to reach this Manager endpoint. The Agent opens no inbound port: every heartbeat, desired-state fetch, command check, event upload, and result report is an Agent-initiated HTTPS request. See [Agent protocol v1](docs/agent-protocol-v1.md).
 
-Port `10443` is opened by Manager, not by the Agent. The Agent has no inbound management listener; it initiates authenticated HTTPS requests to this Manager endpoint for heartbeat, desired policy, package deployment, status reporting, and fixed control-command polling.
-
-HTML templates and CSS are embedded in the Go binary. After changing Go, HTML, or CSS, stop the foreground process and run `make dev` again. Never add `-v` to the local Compose shutdown command unless the isolated development data is intentionally disposable.
+HTML templates, CSS, and JavaScript are embedded in the Go binary. While `make dev` is running, changes under the Manager source are rebuilt automatically, the Manager restarts without rerunning migrations, and open administrator pages reload after the new process is ready. Production and remote Docker deployments remain immutable and require a new image build and deployment. Never add `-v` to the local Compose shutdown command unless the isolated development data is intentionally disposable.
 
 ## Deploy a tagged Manager release from a clone
 
 Prerequisites: Docker Engine, the Docker Compose plugin, OpenSSL, and access to the public GHCR image.
 
-After the first tagged release is published, the repository owner must perform GitHub's one-time visibility setting: **Profile → Packages → m-waf-manager → Package settings → Change visibility → Public**. GitHub creates a personal-account package as private by default even when it is linked to a public source repository. Public container visibility is required for anonymous clone-to-deploy pulls and cannot later be changed back to private.
+After the first image is published from `dev` or a version tag, the repository owner must perform GitHub's one-time visibility setting: **Profile → Packages → m-waf-manager → Package settings → Change visibility → Public**. GitHub creates a personal-account package as private by default even when it is linked to a public source repository. Public container visibility is required for anonymous clone-to-deploy pulls and cannot later be changed back to private.
 
 ```sh
 git clone https://github.com/Fhwang0926/m-waf.git
@@ -140,8 +142,7 @@ Before the first start, set the final DNS name or IP address in `deploy/compose/
 ```dotenv
 MWAF_MANAGER_HOST=manager.example.com
 MWAF_ADMIN_PORT=8443
-MWAF_AGENT_PORT=10443
-MWAF_AGENT_PUBLIC_URL=https://manager.example.com:10443
+MWAF_PUBLIC_URL=https://manager.example.com:8443
 MWAF_MANAGER_IMAGE=ghcr.io/fhwang0926/m-waf-manager:0.1.0
 ```
 
@@ -166,12 +167,12 @@ docker compose --env-file deploy/compose/.env -f deploy/compose/compose.yaml ps
 ```
 
 - Admin UI: `https://manager.example.com:8443`
-- Agent/package API: `https://manager.example.com:10443`
+- Agent/package API: the same `https://manager.example.com:8443`
 - Local CA certificate to import or securely copy: `deploy/compose/secrets/mwaf_ca_cert.pem`
 
 On the first visit, `/setup` asks for the system administrator username, display name, and password. The setup route closes after the first account is created. The system administrator then creates each enterprise and its first enterprise administrator from **기업 관리** and **사용자 관리**.
 
-The generated TLS certificate is signed by the local M-WAF CA. Its DNS/IP identity is valid for the configured Manager host, but browsers still require that CA to be explicitly trusted. For public browser trust, terminate Admin HTTPS at an existing reverse proxy with an approved certificate while leaving the Agent API mTLS path intact.
+The generated TLS certificate is signed by the local M-WAF CA. Its DNS/IP identity is valid for the configured Manager host, but browsers still require that CA to be explicitly trusted. If a reverse proxy terminates public browser TLS, it must preserve the authenticated Agent mTLS path to the shared Manager listener or route Agent paths directly to Manager.
 
 ## Install a customer web server
 
@@ -185,9 +186,9 @@ Example:
 ```sh
 umask 077
 printf '%s' 'MANAGER_CA_BASE64_FROM_UI' | base64 -d > /tmp/mwaf-manager-ca.crt
-curl --fail --cacert /tmp/mwaf-manager-ca.crt https://manager.example.com:10443/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
+curl --fail --cacert /tmp/mwaf-manager-ca.crt https://manager.example.com:8443/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
 sudo sh /tmp/mwaf-install.sh \
-  --manager https://manager.example.com:10443 \
+  --manager https://manager.example.com:8443 \
   --ca /tmp/mwaf-manager-ca.crt \
   --install-token-stdin
 ```
@@ -203,7 +204,7 @@ If both Apache and Nginx are installed, add `--webserver apache` or `--webserver
 - installs dependencies through Ubuntu APT without installing the distro CRS recommendation;
 - enables the Agent, which completes certificate enrollment over TLS.
 
-For a hosting-provider custom build, use `--integration external`, `--webserver-bin`, and `--integration-config`. The connector must already be built and loaded by the operator; M-WAF does not compile it on the customer server. Apache/Nginx, the Connector, and their existing main configuration are not replaced. See [Custom Apache/Nginx installation](docs/custom-webserver-installation.md) for prerequisites, examples, verification, and rollback behavior.
+For a hosting-provider custom build, use `--integration external`, `--webserver-bin`, and `--integration-config`. The connector must already be built and loaded by the operator; M-WAF does not compile it on the customer server. Add `--module-install manual` to install only the signed M-WAF Agent package and connect that existing Connector without an M-WAF module package. Apache/Nginx, the Connector, and their existing main configuration are not replaced. See [Custom Apache/Nginx installation](docs/custom-webserver-installation.md) for prerequisites, examples, verification, and rollback behavior.
 
 No compiler, Go toolchain, Docker runtime, or source checkout is required by M-WAF on the customer server.
 
@@ -220,9 +221,13 @@ dpkg-query -W -f='${binary:Package}\t${db:Status-Abbrev}\t${Version}\n' \
 
 Resolve the reported lock, disk-space, repository, dependency, or interrupted-DPKG problem first, then rerun the same reviewed installer command. A fresh short-lived enrollment session is created from the enterprise install token on each retry. If the enterprise token expired, was revoked, or reached its limit, create a new one in Manager. Do not purge Apache/Nginx, delete `/etc/mwaf`, or force-install an incompatible package as a recovery shortcut.
 
-The current MVP has no supported `tar.gz`, manual-copy, or RPM installation path, and a failed bootstrap/APT transaction is not rolled back automatically. Systems that cannot use Ubuntu 24.04 amd64 DEBs remain unsupported. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation — DEB installation failure](docs/custom-webserver-installation.md#deb-설치가-실패한-경우).
+The current MVP has no supported Agent `tar.gz`, manual-copy, or RPM installation path, and a failed Agent APT transaction is not rolled back automatically. The ModSecurity Connector may be operator-installed in `external/manual` mode, but the Agent still requires the signed Ubuntu 24.04 amd64 DEB. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation — DEB installation failure](docs/custom-webserver-installation.md#deb-설치가-실패한-경우).
 
 ## Operate the MVP
+
+사용자 역할, 기업 범위, 계정 수명주기와 보호 규칙의 상세 기준은 [사용자 및 접근 권한 관리](docs/user-access-management.md)를 참고하세요.
+
+탐지 이벤트의 MariaDB 저장, 커서 페이지 처리, 대시보드 집계 보호와 외부 이벤트 저장소 분리 기준은 [탐지 이벤트 저장 및 조회 확장 기준](docs/security-event-storage-and-scaling.md)을 참고하세요.
 
 - **시스템 관리자** can view all enterprises, create enterprises, create enterprise administrators/users, safely delete an unused enterprise, terminate an enterprise with retained history, and operate every server.
 - **기업 사용자** can monitor and operate only its enterprise, including server enrollment/control, groups, enterprise policies, staged rollout approval/retry, and rollback.
@@ -235,20 +240,22 @@ The current MVP has no supported `tar.gz`, manual-copy, or RPM installation path
 - `Agent 중지` and `서버 종료` cannot be reversed through Manager after connectivity is lost; use the host console, service manager, hypervisor, or power controller to recover them.
 - Starting with the second tagged release, the release workflow resolves the highest earlier semantic GHCR tag, verifies that signed image, and embeds its Agent and module packages as explicit rollback targets.
 - **서버 그룹** manages enterprise-scoped groups used by enterprise-policy targets.
-- **시스템 정책** is a system-administrator read-only catalog of immutable GitHub-managed versions, CRS compatibility, lifecycle status, source commit, migration notes, and adoption counts. Manager does not provide create, edit, or publish controls for this catalog.
-- **기업 정책** adopts one published system-policy version and owns the enterprise target, detection/blocking mode, CRS sensitivity, anomaly threshold, request-body inspection, URL/IP exclusions, restricted custom `SecRule` lines, and update strategy. New standalone policies are blocked; untraceable existing revisions remain `LEGACY_LOCKED` until an administrator explicitly converts them.
-- Manager creates one enterprise-wide `DetectionOnly` baseline when an enterprise first enrolls an unprotected server. The signed seed is attributed to the M-WAF system and starts with the `MANUAL` update strategy.
+- **오픈소스 CRS** lets a system administrator verify the pinned LTS line or newest official Stable v4 source from GitHub. Manager verifies the signed annotated tag, exact commit, archive digest, Rule index, and Setup schema before storing an immutable source; synchronization never publishes or deploys a system policy.
+- **시스템 정책** is one immutable `crs-baseline` policy family managed by system administrators. CI supplies verified CRS and package artifacts but never publishes a policy. A clean Manager creates `crs-baseline@1.0.0` only after an administrator selects a verified LTS or Stable source and completes the five-step review; later publications create the next patch. CRS and policy versions cannot be typed manually. Self-contained v3 policies require a reporting Agent, a loaded Connector, a passing web-server configtest, and `policy-bundle-v3` capability. Legacy v2 policies keep package-coverage and rollback-package gates.
+- **기업 정책** adopts one published system-policy version and owns the enterprise target, detection/blocking mode, Blocking/Executing PL, inbound/outbound thresholds, request/response-body inspection, Rule/Target/Tag exceptions, restricted custom `SecRule` lines, emergency bypasses, and update strategy. New standalone policies are blocked; untraceable existing revisions remain `LEGACY_LOCKED` until an administrator explicitly converts them.
+- On a clean installation, enterprise policy creation waits until a system administrator publishes the first canonical `crs-baseline`. The initial policy defaults to `DetectionOnly`, PL1, request-body inspection on, and response-body inspection off. Manager then creates one enterprise-wide baseline for each enterprise that does not yet have one; it starts with the `MANUAL` update strategy.
 - Enterprise users choose `MANUAL` (approve each update), `AUTOMATIC` (start a staged rollout), or `PINNED` (show updates without applying them).
 - The policy controller runs at startup, after enrollment and Agent state changes, and every `MWAF_POLICY_SYNC_INTERVAL` (default `15m`). Target resolution keeps `server > group > enterprise` precedence.
-- Every update uses one online canary and then batches of at most 25. Offline servers remain deferred without blocking online servers; the first failure pauses the remaining rollout.
-- When CRS changes, Manager first applies a minimum signed `DetectionOnly` transition, deploys the compatible signed Agent/module pair, waits for heartbeat to confirm the target CRS, and then applies the migrated immutable enterprise revision. The migration preserves enterprise settings and validated custom rules.
+- Every update uses one online canary, observes the exact CRS/revision and recent heartbeat for 10 minutes, and then expands in batches of at most 25. Expansion stops when the new block rate exceeds the greater of 5 per minute or three times the previous 60-minute baseline. A failed canary is restored automatically; offline servers remain deferred and an offline pre-apply canary is replaced by another online target.
+- When a self-contained CRS source changes, Manager deploys the signed immutable v3 policy containing the unchanged upstream CRS files and reviewed overlays. Package-managed legacy v2 transitions continue to use the compatible signed Agent/module pair. The migration preserves enterprise settings and validated custom rules.
 - Enterprise users can retry a failed rollout or roll back only to the immediately previous successful revision. Rollback restores the compatible Agent/CRS package pair as well as the policy and is blocked when the signed bundle is missing or the target system-policy version is withdrawn.
 - **서버 제어** queues only four fixed polling commands: Agent restart/stop and server restart/poweroff. Arbitrary shell input is not accepted.
 - **패키지 제어** force-installs the current compatible signed bundle or its explicit rollback pair; success is recorded only after the restarted Agent reports matching installed versions.
 - **등록 해제** preserves server/event history but blocks the enrolled Agent certificate immediately.
 - **사용자 관리** is limited to enterprise/system administrators and supports administrator creation, display-name/role/password updates, activation changes, and audit-preserving soft deletion within scope. **내 계정** lets every signed-in user rotate their own password and invalidates existing sessions.
-- Agent verifies the Ed25519 signature and SHA-256, writes `/etc/mwaf/active/main.conf`, runs `apachectl configtest` or `nginx -t`, and reloads only on a change.
-- If validation or reload fails, Agent restores the prior policy and reloads it.
+- Existing `conf-v1` and `policy-bundle-v2` revisions remain supported. New Manager-imported system-policy revisions use signed self-contained `policy-bundle-v3` artifacts with `00-engine.conf`, CRS Setup, before/after exclusions, unchanged upstream CRS files, and service Rules in a fixed order.
+- Agent verifies the Ed25519 signature, whole-artifact SHA-256, tar entry allowlist, and every manifest file hash; stages a revision directory, atomically switches `/etc/mwaf/active`, runs `apachectl configtest` or `nginx -t`, and performs a graceful reload.
+- If validation or reload fails, Agent atomically restores the previous revision and revalidates the web server.
 - Each Agent uses a Manager-issued client certificate so the mTLS API can bind heartbeat, policy, package, command, and event traffic to one enrolled server without storing a reusable API password.
 - Agent renews its 90-day mTLS certificate with the existing private key beginning 30 days before expiration. A renewed certificate replaces the stored serial on its first authenticated request; the prior serial is then rejected.
 - ModSecurity writes JSON lines to `/var/log/modsecurity/audit.jsonl`; distro `logrotate` bounds the file and Agent tracks device, inode, and offset across truncation or replacement.
@@ -292,7 +299,6 @@ Use an immutable release tag or digest when the result must be reproducible. `la
 ./deploy/e2e/run.sh all \
   --manager-image ghcr.io/fhwang0926/m-waf-manager:0.1.0 \
   --admin-port 18443 \
-  --agent-port 20443 \
   --apache-port 18080 \
   --nginx-port 18081
 ```
@@ -300,7 +306,7 @@ Use an immutable release tag or digest when the result must be reproducible. `la
 The default host endpoints are:
 
 - Admin UI: `https://localhost:8443`
-- Agent API: `https://localhost:10443` (loopback only; customer containers use the internal `manager` DNS name)
+- Agent API: the same `https://localhost:8443` (loopback only; customer containers use the internal `manager` DNS name)
 - Apache customer: `http://localhost:18080`
 - Nginx customer: `http://localhost:18081`
 
@@ -308,7 +314,7 @@ The first run creates a random system-administrator password under `.local/mwaf-
 
 The `all` command creates one enterprise install token, reuses it for the Apache and Nginx installations, verifies that both Agents become online, waits for one enterprise-scoped group policy to reach `APPLIED`, checks normal and excluded requests return 200, checks a restricted custom rule returns 403, and confirms both blocked events arrive at Manager. Evidence and size-bounded diagnostic logs are written under `.local/mwaf-e2e/results/<run-id>` without enrollment tokens or passwords.
 
-To run the same customer-container flow against the existing test Manager at `https://192.168.7.200:18443`, use its Agent API at `https://192.168.7.200:10443` and the CA certificate generated on that Manager host. The remote mode never starts MariaDB or another Manager and never performs first-time setup. It does create or reuse the named `mwaf-e2e` enterprise, group, and policy, and creates an enterprise install token, server records, and test events in the existing Manager:
+To run the same customer-container flow against the existing test Manager at `https://192.168.7.200:18443`, use that same URL for Agent traffic and the CA certificate generated on that Manager host. The remote mode never starts MariaDB or another Manager and never performs first-time setup. It does create or reuse the named `mwaf-e2e` enterprise, group, and policy, and creates an enterprise install token, server records, and test events in the existing Manager:
 
 ```sh
 export MWAF_E2E_ADMIN_USERNAME='EXISTING_SYSTEM_ADMIN'
@@ -339,20 +345,20 @@ The two customer fixtures run systemd because the production installer and Agent
 
 ## System policy and CRS lifecycle
 
-`packaging/sources.lock.yaml` is the repository source of truth for the approved CRS tag, commit, archive, and SHA-256. `internal/systempolicy/catalog.json` records the current immutable policy version and each version's `PUBLISHED`, `DEPRECATED`, or `WITHDRAWN` lifecycle status. Matching JSON files under `internal/systempolicy/templates/` define the immutable version contents. Enterprise-policy revisions copy both the system-policy and CRS versions, so a deployed revision remains auditable after the repository moves forward.
+`packaging/sources.lock.yaml` pins the two CRS sources carried by a release package for offline installation and rollback. Manager independently checks the configured official LTS line and newest signed Stable v4 release, resolves each annotated tag to an exact commit, verifies the archive SHA-256, builds the Rule/Setup index, and stores the immutable source in its artifact store and DB catalog. Neither the release bundle nor runtime synchronization publishes a system policy automatically.
 
-`.github/workflows/crs-updates.yml` checks the official `coreruleset/coreruleset` GitHub releases each day. It accepts only non-draft stable CRS v4 releases, requires GitHub to report the annotated tag signature as verified, calculates the archive digest, adds a new immutable template version, advances the lifecycle catalog, updates the source lock, and opens or refreshes a review pull request. It does not merge, publish a bundle, or update customer servers directly.
+The signed CI bundle imports verified CRS source and compatible package artifacts only. It never creates a system-policy version. Manager checks both channels at startup and every `MWAF_CRS_SYNC_INTERVAL` (default `24h`); the LTS channel remains inside `MWAF_CRS_LTS_LINE`, while Stable chooses the highest signed non-prerelease v4 tag. `MWAF_CRS_GITHUB_TOKEN` is optional for authenticated GitHub API limits. A system administrator selects one verified source to create `crs-baseline@1.0.0`; later migrations create the next patch of the same canonical family. Existing `crs-lts-baseline` and `crs-stable-baseline` versions remain read-only history and are deprecated when the canonical policy is first published.
 
-After that pull request passes the standard package and installation checks and an approved Manager bundle is deployed, the runtime controller records the new system-policy version. It waits for enterprise approval under `MANUAL`, starts the staged rollout under `AUTOMATIC`, and only reports availability under `PINNED`. No GitHub synchronization path directly replaces an enterprise policy.
+Runtime synchronization only adds a verified immutable CRS release and its DB search index; it never publishes or deploys a system policy. A system administrator reviews Rule/Setup changes and overlays before explicit publication. Same-channel migrations allow only higher CRS versions; LTS/Stable channel changes require a separate confirmation and may use a numerically lower version. Safe `AUTOMATIC` enterprise policies enter the canary queue, `MANUAL` policies wait for approval, and `PINNED` policies only show availability. Existing v2 artifacts and legacy JSON remain readable for rollback and compatibility, while new structured snapshots are authoritative for new revisions.
 
-## Verification and tag-only image publication
+## Verification, latest publication, and version releases
 
 Relevant pull requests, every push to `dev`, and `vMAJOR.MINOR.PATCH` tags run `.github/workflows/dev-manager-image.yml`. The read-only verification job:
 
 1. tests the Go code;
 2. builds the Linux amd64 Agent;
 3. builds `mwaf-agent` and four Apache/Nginx distro/external integration DEB packages;
-4. reads the CRS version/archive/hash from `packaging/sources.lock.yaml`, restores the exact archive from cache or downloads it, and always verifies its locked SHA-256;
+4. reads the LTS and Stable CRS tag/commit/archive/hash entries from `packaging/sources.lock.yaml`, restores both exact archives, and verifies both locked SHA-256 values;
 5. records the supported Ubuntu, architecture, and web-server type in the bundle catalog;
 6. installs the Agent and Apache module on a clean pinned Ubuntu 24.04 amd64 container and runs `apachectl configtest`;
 7. installs the Agent and Nginx module on a separate clean container and runs `nginx -t`;
@@ -363,10 +369,10 @@ Relevant pull requests, every push to `dev`, and `vMAJOR.MINOR.PATCH` tags run `
 
 The workflow reuses four bounded caches: Go modules/build outputs keyed by `go.sum`, the CRS archive keyed by its locked SHA-256, a pinned Ubuntu 24.04 Apache/Nginx install-test fixture, and Manager BuildKit layers in a separate image scope. The fixture is refreshed at least once per UTC week so Ubuntu dependency drift is still detected; within that period it only avoids repeating package downloads. Every verification run still installs the newly built local DEBs and performs the same configuration, module-load, HTTP block, and audit-log checks. Cache misses fall back to normal downloads and builds. Release signing keys, signed bundles, DEBs, workflow artifacts, and GHCR rollback inputs are never restored from these cross-run caches.
 
-Pull requests, `dev` pushes, and manual workflow runs stop after verification. They do not build or publish the project Docker image. Only a validated semantic release tag push such as `v0.1.0` starts the publish job. The job downloads the exact tested DEBs through a workflow artifact, requires `RELEASE_BUNDLE_SIGNING_KEY_B64`, signs the release bundle, embeds it in the Manager image, and then publishes:
+Pull requests and manual workflow runs stop after verification. Every validated push to `dev` publishes the tested commit as `latest`, `dev`, and `sha-<full-commit-sha>`. A validated semantic tag such as `v0.1.0` publishes the version tags and `latest`, then fast-forwards `main` to that exact tagged commit and creates a GitHub Release. Both paths download the exact tested DEBs through a workflow artifact, require `RELEASE_BUNDLE_SIGNING_KEY_B64`, sign the bundle, and embed it in the Manager image.
 
 1. `ghcr.io/fhwang0926/m-waf-manager:<major.minor.patch>`;
-2. moving convenience tags `<major.minor>`, `<major>`, and `latest` (`latest` is updated only by a validated `vMAJOR.MINOR.PATCH` tag release);
+2. moving convenience tags `<major.minor>`, `<major>`, and `latest` for a version release;
 3. immutable `sha-<full-commit-sha>`;
 4. build provenance using GitHub OIDC.
 
@@ -380,7 +386,7 @@ The workflow publishes the package but cannot perform GitHub's irreversible firs
 docker pull ghcr.io/fhwang0926/m-waf-manager:latest
 ```
 
-Set repository secret `RELEASE_BUNDLE_SIGNING_KEY_B64` to a base64-encoded Ed25519 PKCS#8 private-key PEM before pushing the first release tag. Tagged publication fails closed when the key is absent; release images never use an ephemeral signing identity. Production deployments should pin the full version tag or image digest rather than `latest`.
+Set repository secret `RELEASE_BUNDLE_SIGNING_KEY_B64` to a base64-encoded Ed25519 PKCS#8 private-key PEM before publishing from `dev` or pushing the first release tag. Publication fails closed when the key is absent; published images never use an ephemeral signing identity. Production deployments should pin the full version tag or image digest rather than `latest`.
 
 ## Local backend verification
 
@@ -404,7 +410,7 @@ packaging/                   Agent/module DEB builders and source locks
 build/containers/manager/    Manager multi-stage Dockerfile
 build/containers/ci-webservers/ Cached Ubuntu install-test fixture
 deploy/compose/              Clone-to-deploy Manager stack
-.github/workflows/           PR/dev verification and tag-only GHCR publication
+.github/workflows/           PR verification, dev/latest publication, and tagged release promotion
 site/                        No-build GitHub Pages introduction site
 docs/                        Detailed design and completion records
 ```

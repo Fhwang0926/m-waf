@@ -1,10 +1,22 @@
-schema_version: 1
+schema_version: 2
 crs:
-  repository: https://github.com/coreruleset/coreruleset
-  version: v4.28.0
-  commit: 55b09f5
-  archive: https://github.com/coreruleset/coreruleset/archive/refs/tags/v4.28.0.tar.gz
-  sha256: d8acc96f25ad07c8e3a595a23c797324f6d77e59ddf9e26e90dd95ebd2e676ce
+  - channel: lts
+    line: "4.25"
+    repository: https://github.com/coreruleset/coreruleset
+    version: v4.25.1
+    commit: 3b89d5a05322f448b4b74b9cadc5fb05ac6915ad
+    tag_object_sha: 85d2ebd0beeea0b422a4c9cadba85a05dd7955eb
+    tag_signature_verified: true
+    archive: https://github.com/coreruleset/coreruleset/archive/3b89d5a05322f448b4b74b9cadc5fb05ac6915ad.tar.gz
+    sha256: ea42fe6e4d1def341ebf4ab1b1e69bcd8b184c1f6ca4e0883633afabc976c084
+  - channel: stable
+    repository: https://github.com/coreruleset/coreruleset
+    version: v4.28.0
+    commit: 55b09f5acfd16413e7b31041100711ceb7adc89c
+    tag_object_sha: 5d2bd9a1ad7e607813f9e19cc73fa44dd5dd2ceb
+    tag_signature_verified: true
+    archive: https://github.com/coreruleset/coreruleset/archive/55b09f5acfd16413e7b31041100711ceb7adc89c.tar.gz
+    sha256: bdd76828d8f5679a9a4db009b66fa77db3d514b25ae3a846fe2889050f840663
 ubuntu_24_04:
   apache_module:
     package: libapache2-mod-security2

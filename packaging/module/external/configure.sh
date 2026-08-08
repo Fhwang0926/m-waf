@@ -119,9 +119,7 @@ SecAuditLogParts ABIJDEFHZ
 SecAuditLogType Serial
 SecAuditLog $audit_log
 SecAuditLogFormat JSON
-Include /etc/mwaf/active/main.conf
-Include /usr/share/mwaf/crs/crs-setup.conf
-Include /usr/share/mwaf/crs/rules/*.conf
+Include /etc/mwaf/active/*.conf
 EOF
 } > "$temporary/engine.new"
 install -m 0644 "$temporary/engine.new" "$engine_config"

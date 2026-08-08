@@ -12,46 +12,13 @@ import (
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
 )
 
-func (s *Store) SyncSystemPolicyCatalog(ctx context.Context, catalog *systempolicy.Catalog, sourceCommit string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, item := range catalog.List() {
-		var existingDigest sql.NullString
-		err := tx.QueryRowContext(ctx, `SELECT template_sha256 FROM system_policy_versions WHERE id=?`, item.Reference()).Scan(&existingDigest)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if existingDigest.Valid && existingDigest.String != item.Digest {
-			return fmt.Errorf("published system policy %s is immutable", item.Reference())
-		}
-		defaultsJSON, err := json.Marshal(item.Defaults)
-		if err != nil {
-			return err
-		}
-		notesJSON, err := json.Marshal(item.MigrationNotes)
-		if err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO system_policy_versions(id,policy_key,version,schema_version,name,description,crs_track,crs_version,status,template_sha256,source_commit,defaults_json,migration_notes_json)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON DUPLICATE KEY UPDATE status=VALUES(status),synced_at=UTC_TIMESTAMP(6)`, item.Reference(), item.Key, item.Version, item.SchemaVersion, item.Name, item.Description, item.CRSTrack, item.CRSVersion, item.Status, item.Digest, sourceCommit, defaultsJSON, notesJSON)
-		if err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
 func (s *Store) ListSystemPolicyVersions(ctx context.Context) ([]SystemPolicyVersionRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT sp.id,sp.policy_key,sp.version,sp.schema_version,sp.name,sp.description,sp.crs_track,sp.crs_version,sp.status,sp.template_sha256,sp.source_commit,sp.migration_notes_json,
+	rows, err := s.db.QueryContext(ctx, `SELECT sp.id,sp.policy_key,sp.version,sp.schema_version,sp.name,sp.description,sp.crs_track,sp.crs_version,sp.status,sp.template_sha256,sp.source_commit,sp.defaults_json,sp.migration_notes_json,
 COUNT(DISTINCT ep.enterprise_id),COUNT(DISTINCT ds.server_id),sp.created_at
 FROM system_policy_versions sp
 LEFT JOIN enterprise_policies ep ON ep.current_system_policy_version_id=sp.id
 LEFT JOIN desired_states ds ON ds.policy_revision_id=ep.current_revision_id
-GROUP BY sp.id,sp.policy_key,sp.version,sp.schema_version,sp.name,sp.description,sp.crs_track,sp.crs_version,sp.status,sp.template_sha256,sp.source_commit,sp.migration_notes_json,sp.created_at
+GROUP BY sp.id,sp.policy_key,sp.version,sp.schema_version,sp.name,sp.description,sp.crs_track,sp.crs_version,sp.status,sp.template_sha256,sp.source_commit,sp.defaults_json,sp.migration_notes_json,sp.created_at
 ORDER BY sp.policy_key,sp.created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -60,14 +27,222 @@ ORDER BY sp.policy_key,sp.created_at DESC`)
 	items := make([]SystemPolicyVersionRecord, 0)
 	for rows.Next() {
 		var item SystemPolicyVersionRecord
+		var defaults []byte
 		var notes []byte
-		if err := rows.Scan(&item.ID, &item.Key, &item.Version, &item.SchemaVersion, &item.Name, &item.Description, &item.CRSTrack, &item.CRSVersion, &item.Status, &item.TemplateSHA256, &item.SourceCommit, &notes, &item.EnterpriseCount, &item.ServerCount, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Key, &item.Version, &item.SchemaVersion, &item.Name, &item.Description, &item.CRSTrack, &item.CRSVersion, &item.Status, &item.TemplateSHA256, &item.SourceCommit, &defaults, &notes, &item.EnterpriseCount, &item.ServerCount, &item.CreatedAt); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal(defaults, &item.Defaults)
 		_ = json.Unmarshal(notes, &item.MigrationNotes)
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range items {
+		configuration, err := s.PolicyConfigurationBySystemPolicyID(ctx, items[index].ID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		template := systempolicy.Template{Defaults: items[index].Defaults}
+		template = configuration.ApplyToSystemPolicyTemplate(template)
+		items[index].Defaults = template.Defaults
+	}
+	return items, nil
+}
+
+func (s *Store) SystemPolicyTemplateByID(ctx context.Context, id string) (systempolicy.Template, error) {
+	var item systempolicy.Template
+	var defaults, notes []byte
+	err := s.db.QueryRowContext(ctx, `SELECT schema_version,policy_key,version,name,description,crs_track,crs_version,status,template_sha256,defaults_json,migration_notes_json
+FROM system_policy_versions WHERE id=?`, id).Scan(&item.SchemaVersion, &item.Key, &item.Version, &item.Name, &item.Description, &item.CRSTrack, &item.CRSVersion, &item.Status, &item.Digest, &defaults, &notes)
+	if err != nil {
+		return systempolicy.Template{}, err
+	}
+	if err := json.Unmarshal(defaults, &item.Defaults); err != nil {
+		return systempolicy.Template{}, fmt.Errorf("decode system policy defaults: %w", err)
+	}
+	if len(notes) != 0 {
+		_ = json.Unmarshal(notes, &item.MigrationNotes)
+	}
+	configuration, configurationErr := s.PolicyConfigurationBySystemPolicyID(ctx, id)
+	if configurationErr == nil {
+		item = configuration.ApplyToSystemPolicyTemplate(item)
+	} else if !errors.Is(configurationErr, sql.ErrNoRows) {
+		return systempolicy.Template{}, configurationErr
+	}
+	return item, nil
+}
+
+func (s *Store) LatestSystemPolicyTemplate(ctx context.Context, key string) (systempolicy.Template, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM system_policy_versions WHERE policy_key=? AND status='PUBLISHED' ORDER BY created_at DESC LIMIT 1`, key).Scan(&id)
+	if err != nil {
+		return systempolicy.Template{}, err
+	}
+	return s.SystemPolicyTemplateByID(ctx, id)
+}
+
+func (s *Store) ListPublishedSystemPolicyTemplates(ctx context.Context) ([]systempolicy.Template, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM system_policy_versions WHERE status='PUBLISHED' ORDER BY policy_key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	items := make([]systempolicy.Template, 0, len(ids))
+	for _, id := range ids {
+		item, err := s.SystemPolicyTemplateByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (s *Store) PublishSystemPolicyVersion(ctx context.Context, item systempolicy.Template, sourceCommit, expectedCurrentID string) error {
+	defaultsJSON, err := json.Marshal(item.Defaults)
+	if err != nil {
+		return err
+	}
+	notesJSON, err := json.Marshal(item.MigrationNotes)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM system_policy_versions WHERE id=?`, item.Reference()).Scan(&exists); err != nil {
+		return err
+	}
+	if exists != 0 {
+		return errors.New("system policy version already exists")
+	}
+	if item.Key != systempolicy.DefaultTemplateKey {
+		return errors.New("Manager publishing is limited to the canonical crs-baseline policy")
+	}
+	type currentPolicy struct {
+		id, key, version string
+		schema           int
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,policy_key,version,schema_version FROM system_policy_versions
+WHERE policy_key IN (?,?,?) AND status='PUBLISHED'
+ORDER BY CASE policy_key WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END,created_at DESC FOR UPDATE`,
+		systempolicy.DefaultTemplateKey, systempolicy.DefaultOperatingTemplateKey, systempolicy.DefaultStableTemplateKey,
+		systempolicy.DefaultTemplateKey, systempolicy.DefaultOperatingTemplateKey)
+	if err != nil {
+		return err
+	}
+	var current currentPolicy
+	for rows.Next() {
+		var candidate currentPolicy
+		if err := rows.Scan(&candidate.id, &candidate.key, &candidate.version, &candidate.schema); err != nil {
+			rows.Close()
+			return err
+		}
+		if current.id == "" {
+			current = candidate
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if current.id != expectedCurrentID {
+		return errors.New("current system policy changed; validate the latest state again")
+	}
+	if current.id == "" {
+		if item.Version != "1.0.0" {
+			return errors.New("the first canonical system policy must be version 1.0.0")
+		}
+	} else if current.key == systempolicy.DefaultTemplateKey {
+		if item.SchemaVersion < current.schema || nextSystemPolicyVersion(current.version) != item.Version {
+			return errors.New("a canonical system policy must use the next patch version without reducing its schema")
+		}
+	} else if item.Version != "1.0.0" {
+		return errors.New("migration from a legacy baseline must create canonical version 1.0.0")
+	}
+	if item.Defaults.CRSSource == nil || item.Defaults.CRSSource.Commit != sourceCommit {
+		return errors.New("system policy source commit is not pinned")
+	}
+	var verifiedRelease int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM crs_releases WHERE id=? AND commit_sha=? AND status='VERIFIED' AND tag_signature_verified=TRUE`, item.Defaults.CRSSource.ID, sourceCommit).Scan(&verifiedRelease); err != nil {
+		return err
+	}
+	if verifiedRelease != 1 {
+		return errors.New("verified CRS release is unavailable")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE system_policy_versions SET status='DEPRECATED' WHERE policy_key IN (?,?,?) AND status='PUBLISHED'`, systempolicy.DefaultTemplateKey, systempolicy.DefaultOperatingTemplateKey, systempolicy.DefaultStableTemplateKey); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO system_policy_versions(id,policy_key,version,schema_version,name,description,crs_track,crs_version,status,template_sha256,source_commit,defaults_json,migration_notes_json)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.Reference(), item.Key, item.Version, item.SchemaVersion, item.Name, item.Description, item.CRSTrack, item.CRSVersion, systempolicy.StatusPublished, item.Digest, sourceCommit, defaultsJSON, notesJSON)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE enterprise_policies SET system_policy_key=? WHERE system_policy_key IN (?,?)`, systempolicy.DefaultTemplateKey, systempolicy.DefaultOperatingTemplateKey, systempolicy.DefaultStableTemplateKey); err != nil {
+		return err
+	}
+	settings := PolicySettings{
+		ParanoiaLevel: item.Defaults.ParanoiaLevel, ExecutingParanoiaLevel: item.Defaults.ExecutingParanoiaLevel,
+		InboundScore: item.Defaults.InboundScore, OutboundScore: item.Defaults.OutboundScore,
+		RequestBody: item.Defaults.RequestBody, ResponseBody: item.Defaults.ResponseBody,
+		EarlyBlocking: item.Defaults.EarlyBlocking, SamplingPercentage: item.Defaults.SamplingPercentage,
+	}
+	configuration, legacy, err := structuredConfigurationFromPolicy(item.Reference(), "", item, item.Defaults.Mode, settings)
+	if err != nil {
+		return err
+	}
+	if err := insertPolicyConfigurationTx(ctx, tx, configuration); err != nil {
+		return err
+	}
+	status := PolicyConfigMigrated
+	detail := ""
+	if legacy {
+		status = PolicyConfigLegacyCompat
+		detail = "legacy bypass or Rule ID range preserved"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE system_policy_versions SET config_storage_version=2,config_migration_status=?,config_migration_detail=? WHERE id=?`, status, detail, item.Reference()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) WithdrawSystemPolicyVersion(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE system_policy_versions SET status='WITHDRAWN'
+WHERE id=? AND status='DEPRECATED'
+AND NOT EXISTS (SELECT 1 FROM enterprise_policies WHERE current_system_policy_version_id=system_policy_versions.id)
+AND NOT EXISTS (SELECT 1 FROM policy_rollouts WHERE target_system_policy_version_id=system_policy_versions.id AND status IN ('AWAITING_APPROVAL','QUEUED','CANARY','EXPANDING','PAUSED'))`, id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return errors.New("system policy version cannot be withdrawn")
+	}
+	return nil
 }
 
 type legacyPolicyRevision struct {
@@ -212,7 +387,9 @@ COALESCE(ep.current_system_policy_version_id,''),COALESCE(cur.version,''),COALES
 ep.update_strategy,ep.status,COALESCE(ep.current_revision_id,''),COALESCE(ep.previous_revision_id,''),COALESCE(pr.mode,''),pr.settings_json,
 COALESCE((SELECT r.id FROM policy_rollouts r WHERE r.enterprise_policy_id=ep.id ORDER BY r.created_at DESC LIMIT 1),''),
 COALESCE((SELECT r.status FROM policy_rollouts r WHERE r.enterprise_policy_id=ep.id ORDER BY r.created_at DESC LIMIT 1),''),
-EXISTS(SELECT 1 FROM policy_rollouts r WHERE r.enterprise_policy_id=ep.id AND r.status IN ('AWAITING_APPROVAL','QUEUED','CANARY','EXPANDING','PAUSED')),ep.created_at,ep.updated_at
+EXISTS(SELECT 1 FROM policy_rollouts r WHERE r.enterprise_policy_id=ep.id AND r.status IN ('AWAITING_APPROVAL','QUEUED','CANARY','EXPANDING','PAUSED')),ep.created_at,ep.updated_at,
+EXISTS(SELECT 1 FROM policy_migration_impacts mi WHERE mi.enterprise_policy_id=ep.id AND mi.target_system_policy_version_id=latest.id AND mi.status='MIGRATION_REQUIRED'),
+COALESCE((SELECT mi.detail FROM policy_migration_impacts mi WHERE mi.enterprise_policy_id=ep.id AND mi.target_system_policy_version_id=latest.id LIMIT 1),'')
 FROM enterprise_policies ep
 JOIN enterprises e ON e.id=ep.enterprise_id
 LEFT JOIN system_policy_versions cur ON cur.id=ep.current_system_policy_version_id
@@ -236,7 +413,7 @@ LEFT JOIN policy_revisions pr ON pr.id=ep.current_revision_id`
 		var settings sql.NullString
 		if err := rows.Scan(&item.ID, &item.EnterpriseID, &item.EnterpriseName, &item.Name, &item.Description, &item.Target, &item.SystemPolicyKey, &item.SystemPolicyName,
 			&item.CurrentSystemPolicyID, &item.CurrentSystemPolicyVersion, &item.CurrentCRSVersion, &item.LatestSystemPolicyID, &item.LatestSystemPolicyVersion, &item.LatestCRSVersion,
-			&item.UpdateStrategy, &item.Status, &item.CurrentRevisionID, &item.PreviousRevisionID, &item.CurrentMode, &settings, &item.LatestRolloutID, &item.LatestRolloutStatus, &item.HasActiveRollout, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			&item.UpdateStrategy, &item.Status, &item.CurrentRevisionID, &item.PreviousRevisionID, &item.CurrentMode, &settings, &item.LatestRolloutID, &item.LatestRolloutStatus, &item.HasActiveRollout, &item.CreatedAt, &item.UpdatedAt, &item.MigrationRequired, &item.MigrationDetail); err != nil {
 			return nil, err
 		}
 		if settings.Valid {
@@ -244,7 +421,27 @@ LEFT JOIN policy_revisions pr ON pr.id=ep.current_revision_id`
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range items {
+		if items[index].CurrentRevisionID == "" {
+			continue
+		}
+		configuration, err := s.PolicyConfigurationByRevisionID(ctx, items[index].CurrentRevisionID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		items[index].CurrentSettings = configuration.ApplyToSettings(items[index].CurrentSettings)
+		items[index].CurrentConfiguration = &configuration
+	}
+	return items, nil
 }
 
 func (s *Store) EnterprisePolicyByID(ctx context.Context, scopeEnterpriseID, id string) (EnterprisePolicyRecord, error) {
@@ -267,6 +464,14 @@ func (s *Store) PolicyRevisionByID(ctx context.Context, enterprisePolicyID, revi
 FROM policy_revisions WHERE id=? AND enterprise_policy_id=?`, revisionID, enterprisePolicyID).Scan(&item.ID, &item.EnterprisePolicyID, &item.SystemPolicyVersionID, &item.ParentRevisionID, &item.Name, &item.Description, &item.Mode, &settings, &item.ArtifactPath, &item.ArtifactSHA256, &item.ArtifactSignature, &item.PolicyOrigin, &item.CreatedAt)
 	if settings.Valid {
 		_ = json.Unmarshal([]byte(settings.String), &item.Settings)
+	}
+	if err == nil {
+		configuration, configurationErr := s.PolicyConfigurationByRevisionID(ctx, revisionID)
+		if configurationErr == nil {
+			item.Settings = configuration.ApplyToSettings(item.Settings)
+		} else if !errors.Is(configurationErr, sql.ErrNoRows) {
+			return PolicyRevisionRecord{}, configurationErr
+		}
 	}
 	return item, err
 }
@@ -384,6 +589,9 @@ func (s *Store) CreatePolicyRollout(ctx context.Context, policy EnterprisePolicy
 		return "", errors.New("enterprise policy already has an active rollout")
 	}
 	if revision != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE enterprise_policies SET name=?,description=? WHERE id=? AND enterprise_id=?`, revision.Name, revision.Description, policy.ID, policy.EnterpriseID); err != nil {
+			return "", err
+		}
 		if err := insertPolicyRevisionTx(ctx, tx, policy.EnterpriseID, policy.ID, *revision); err != nil {
 			return "", err
 		}
@@ -412,6 +620,32 @@ func (s *Store) PolicyUpdateBlocked(ctx context.Context, policyID, targetSystemV
 func insertPolicyRevisionTx(ctx context.Context, tx *sql.Tx, enterpriseID, enterprisePolicyID string, revision PolicyRevisionInput) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO policy_revisions(id,enterprise_id,enterprise_policy_id,system_policy_version_id,parent_revision_id,policy_origin,revision_name,description,mode,settings_json,artifact_path,artifact_sha256,artifact_signature)
 VALUES (?,?,?,NULLIF(?,''),NULLIF(?,''),?,?,?,?,?,?,?,?)`, revision.ID, enterpriseID, enterprisePolicyID, revision.SystemPolicyVersionID, revision.ParentRevisionID, revision.PolicyOrigin, revision.Name, revision.Description, revision.Mode, revision.SettingsJSON, revision.ArtifactPath, revision.ArtifactSHA256, revision.ArtifactSignature)
+	if err != nil || revision.Configuration == nil {
+		return err
+	}
+	configuration := *revision.Configuration
+	configuration.SystemPolicyVersionID = ""
+	configuration.PolicyRevisionID = revision.ID
+	if err := insertPolicyConfigurationTx(ctx, tx, configuration); err != nil {
+		return err
+	}
+	status := PolicyConfigMigrated
+	detail := ""
+	for _, item := range configuration.Exclusions {
+		if item.Legacy {
+			status = PolicyConfigLegacyCompat
+			detail = "legacy bypass preserved"
+			break
+		}
+	}
+	for _, item := range configuration.CustomRules {
+		if item.LegacyIDRange {
+			status = PolicyConfigLegacyCompat
+			detail = "legacy Rule ID range preserved"
+			break
+		}
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE policy_revisions SET config_storage_version=2,config_migration_status=?,config_migration_detail=? WHERE id=?`, status, detail, revision.ID)
 	return err
 }
 
@@ -550,8 +784,8 @@ WHERE e.status='ACTIVE' AND r.status IN ('QUEUED','CANARY','EXPANDING') ORDER BY
 }
 
 func (s *Store) ListPolicyRolloutTargets(ctx context.Context, rolloutID string) ([]PolicyRolloutTargetRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT t.rollout_id,t.server_id,t.batch_no,t.status,COALESCE(t.resume_status,''),COALESCE(t.source_agent_package_id,''),COALESCE(t.source_module_package_id,''),COALESCE(t.target_agent_package_id,''),COALESCE(t.target_module_package_id,''),COALESCE(t.transition_revision_id,''),COALESCE(t.final_revision_id,''),COALESCE(t.package_deployment_id,''),t.detail,
-s.status,(s.revoked_at IS NULL AND s.last_heartbeat_at >= UTC_TIMESTAMP(6) - INTERVAL 2 MINUTE),s.inventory_json,s.policy_revision,COALESCE(ds.policy_revision_id,''),COALESCE(pkg.status,''),COALESCE(pd.status,''),COALESCE(tpd.status,''),t.updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT t.rollout_id,t.server_id,s.name,t.batch_no,t.status,COALESCE(t.resume_status,''),COALESCE(t.source_agent_package_id,''),COALESCE(t.source_module_package_id,''),COALESCE(t.target_agent_package_id,''),COALESCE(t.target_module_package_id,''),COALESCE(t.transition_revision_id,''),COALESCE(t.final_revision_id,''),COALESCE(t.package_deployment_id,''),t.detail,
+s.status,(s.revoked_at IS NULL AND s.last_heartbeat_at >= UTC_TIMESTAMP(6) - INTERVAL 2 MINUTE),s.inventory_json,s.policy_revision,COALESCE(ds.policy_revision_id,''),COALESCE(pkg.status,''),COALESCE(pd.status,''),COALESCE(tpd.status,''),t.stabilized_at,t.updated_at
 FROM policy_rollout_targets t JOIN servers s ON s.id=t.server_id
 LEFT JOIN desired_states ds ON ds.server_id=s.id
 LEFT JOIN package_deployments pkg ON pkg.id=t.package_deployment_id
@@ -566,8 +800,8 @@ WHERE t.rollout_id=? ORDER BY t.batch_no,s.name`, rolloutID)
 	for rows.Next() {
 		var item PolicyRolloutTargetRecord
 		var inventory []byte
-		if err := rows.Scan(&item.RolloutID, &item.ServerID, &item.BatchNo, &item.Status, &item.ResumeStatus, &item.SourceAgentPackageID, &item.SourceModulePackageID, &item.TargetAgentPackageID, &item.TargetModulePackageID, &item.TransitionRevisionID, &item.FinalRevisionID, &item.PackageDeploymentID, &item.Detail,
-			&item.ServerStatus, &item.Online, &inventory, &item.CurrentPolicyRevision, &item.DesiredPolicyRevision, &item.PackageStatus, &item.PolicyStatus, &item.TransitionPolicyStatus, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.RolloutID, &item.ServerID, &item.ServerName, &item.BatchNo, &item.Status, &item.ResumeStatus, &item.SourceAgentPackageID, &item.SourceModulePackageID, &item.TargetAgentPackageID, &item.TargetModulePackageID, &item.TransitionRevisionID, &item.FinalRevisionID, &item.PackageDeploymentID, &item.Detail,
+			&item.ServerStatus, &item.Online, &inventory, &item.CurrentPolicyRevision, &item.DesiredPolicyRevision, &item.PackageStatus, &item.PolicyStatus, &item.TransitionPolicyStatus, &item.StabilizedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		var decoded struct {

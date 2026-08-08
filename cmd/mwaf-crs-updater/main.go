@@ -20,17 +20,23 @@ import (
 	"time"
 )
 
+var errUntrustedTag = errors.New("untrusted CRS release tag")
+
 const (
 	defaultRepository = "coreruleset/coreruleset"
 	maxArchiveBytes   = 256 << 20
 )
 
 type sourceLock struct {
-	Repository string
-	Version    string
-	Commit     string
-	Archive    string
-	SHA256     string
+	Channel     string
+	Line        string
+	Repository  string
+	Version     string
+	Commit      string
+	TagObject   string
+	TagVerified bool
+	Archive     string
+	SHA256      string
 }
 
 type release struct {
@@ -57,33 +63,14 @@ type gitTag struct {
 	} `json:"verification"`
 }
 
-type templateUpdate struct {
-	Key             string
-	PreviousVersion string
-	Version         string
-}
-
-type lifecycleCatalog struct {
-	DefaultKey string            `json:"default_key"`
-	Policies   []policyLifecycle `json:"policies"`
-}
-
-type policyLifecycle struct {
-	Key            string            `json:"key"`
-	CurrentVersion string            `json:"current_version"`
-	Versions       map[string]string `json:"versions"`
-}
-
 func main() {
 	lockPath := flag.String("lock", "packaging/sources.lock.yaml", "CRS source lock path")
-	templateDir := flag.String("templates", "internal/systempolicy/templates", "system policy template directory")
-	catalogPath := flag.String("catalog", "internal/systempolicy/catalog.json", "system policy lifecycle catalog path")
-	channel := flag.String("channel", "stable", "release channel: stable")
-	write := flag.Bool("write", false, "write an available update to the lock and matching templates")
+	channel := flag.String("channel", "stable", "release channel: stable or lts")
+	write := flag.Bool("write", false, "write an available verified source candidate to the lock")
 	field := flag.String("field", "", "print one locked field without accessing the network")
 	flag.Parse()
 
-	locked, raw, err := readSourceLock(*lockPath)
+	locked, raw, err := readSourceLock(*lockPath, *channel)
 	if err != nil {
 		fatal(err)
 	}
@@ -95,14 +82,14 @@ func main() {
 		fmt.Println(value)
 		return
 	}
-	if *channel != "stable" {
-		fatal(errors.New("channel must be stable"))
+	if *channel != "stable" && *channel != "lts" {
+		fatal(errors.New("channel must be stable or lts"))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	client := &http.Client{Timeout: 90 * time.Second}
-	latest, err := latestRelease(ctx, client, locked.Repository, *channel)
+	latest, commit, tagObject, err := latestSignedRelease(ctx, client, locked.Repository, *channel, locked.Line)
 	if err != nil {
 		fatal(err)
 	}
@@ -111,16 +98,12 @@ func main() {
 		return
 	}
 
-	commit, err := verifiedTagCommit(ctx, client, locked.Repository, latest.TagName)
-	if err != nil {
-		fatal(err)
-	}
-	archive := "https://github.com/" + locked.Repository + "/archive/refs/tags/" + latest.TagName + ".tar.gz"
+	archive := "https://github.com/" + locked.Repository + "/archive/" + commit + ".tar.gz"
 	digest, err := archiveSHA256(ctx, client, archive)
 	if err != nil {
 		fatal(err)
 	}
-	next := sourceLock{Repository: locked.Repository, Version: latest.TagName, Commit: commit, Archive: archive, SHA256: digest}
+	next := sourceLock{Channel: locked.Channel, Line: locked.Line, Repository: locked.Repository, Version: latest.TagName, Commit: commit, TagObject: tagObject, TagVerified: true, Archive: archive, SHA256: digest}
 	if !*write {
 		fmt.Printf("CRS update available: %s -> %s (%s)\n", locked.Version, next.Version, next.Commit)
 		return
@@ -129,63 +112,65 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	lifecycle, err := readLifecycleCatalog(*catalogPath)
-	if err != nil {
-		fatal(err)
-	}
-	templateUpdates, err := updateTemplates(*templateDir, *channel, strings.TrimPrefix(next.Version, "v"), lifecycle)
-	if err != nil {
-		fatal(err)
-	}
-	if err := updateLifecycleCatalog(*catalogPath, templateUpdates); err != nil {
-		fatal(err)
-	}
 	if err := atomicWrite(*lockPath, updated, 0o644); err != nil {
 		fatal(err)
 	}
 	fmt.Printf("updated CRS %s from %s to %s\n", *channel, locked.Version, next.Version)
 }
 
-func latestRelease(ctx context.Context, client *http.Client, repository, channel string) (release, error) {
+func latestSignedRelease(ctx context.Context, client *http.Client, repository, channel, lockedLine string) (release, string, string, error) {
 	var releases []release
 	if err := getJSON(ctx, client, "https://api.github.com/repos/"+repository+"/releases?per_page=50", &releases); err != nil {
-		return release{}, err
+		return release{}, "", "", err
 	}
-	var selected release
+	var candidates []release
 	for _, item := range releases {
 		if item.Draft || item.Prerelease || !strings.HasPrefix(item.TagName, "v4.") {
 			continue
 		}
-		if selected.TagName == "" || compareVersions(item.TagName, selected.TagName) > 0 {
-			selected = item
+		if channel == "lts" && !strings.HasPrefix(strings.TrimPrefix(item.TagName, "v"), strings.TrimPrefix(lockedLine, "v")+".") {
+			continue
 		}
+		candidates = append(candidates, item)
 	}
-	if selected.TagName == "" {
-		return release{}, fmt.Errorf("no %s CRS v4 release found", channel)
+	if len(candidates) == 0 {
+		return release{}, "", "", fmt.Errorf("no %s CRS v4 release found", channel)
 	}
-	return selected, nil
+	sort.Slice(candidates, func(i, j int) bool { return compareVersions(candidates[i].TagName, candidates[j].TagName) > 0 })
+	var verificationErrors []error
+	for _, candidate := range candidates {
+		commit, tagObject, err := verifiedTagCommit(ctx, client, repository, candidate.TagName)
+		if err == nil {
+			return candidate, commit, tagObject, nil
+		}
+		if !errors.Is(err, errUntrustedTag) {
+			return release{}, "", "", err
+		}
+		verificationErrors = append(verificationErrors, fmt.Errorf("%s: %w", candidate.TagName, err))
+	}
+	return release{}, "", "", fmt.Errorf("no signed %s CRS v4 release found: %w", channel, errors.Join(verificationErrors...))
 }
 
-func verifiedTagCommit(ctx context.Context, client *http.Client, repository, tagName string) (string, error) {
+func verifiedTagCommit(ctx context.Context, client *http.Client, repository, tagName string) (string, string, error) {
 	var ref gitReference
 	endpoint := "https://api.github.com/repos/" + repository + "/git/ref/tags/" + url.PathEscape(tagName)
 	if err := getJSON(ctx, client, endpoint, &ref); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if ref.Object.Type != "tag" {
-		return "", errors.New("CRS release tag is not an annotated signed tag")
+		return "", "", fmt.Errorf("%w: release tag is not annotated", errUntrustedTag)
 	}
 	var tag gitTag
 	if err := getJSON(ctx, client, "https://api.github.com/repos/"+repository+"/git/tags/"+ref.Object.SHA, &tag); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if !tag.Verification.Verified {
-		return "", fmt.Errorf("CRS release tag signature is not verified: %s", tag.Verification.Reason)
+		return "", "", fmt.Errorf("%w: signature is not verified: %s", errUntrustedTag, tag.Verification.Reason)
 	}
 	if tag.Object.Type != "commit" || tag.Object.SHA == "" {
-		return "", errors.New("CRS release tag does not resolve to a commit")
+		return "", "", fmt.Errorf("%w: tag does not resolve to a commit", errUntrustedTag)
 	}
-	return tag.Object.SHA, nil
+	return tag.Object.SHA, ref.Object.SHA, nil
 }
 
 func archiveSHA256(ctx context.Context, client *http.Client, archive string) (string, error) {
@@ -238,13 +223,15 @@ func getJSON(ctx context.Context, client *http.Client, endpoint string, target a
 	return nil
 }
 
-func readSourceLock(path string) (sourceLock, []byte, error) {
+func readSourceLock(path, channel string) (sourceLock, []byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return sourceLock{}, nil, err
 	}
-	lock := sourceLock{}
+	lock := sourceLock{Channel: channel}
 	inCRS := false
+	inSelected := false
+	legacy := false
 	scanner := bufio.NewScanner(strings.NewReader(string(raw)))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -258,18 +245,37 @@ func readSourceLock(path string) (sourceLock, []byte, error) {
 		if !inCRS {
 			continue
 		}
-		key, value, ok := strings.Cut(strings.TrimSpace(line), ":")
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- ") {
+			key, value, ok := strings.Cut(strings.TrimPrefix(trimmed, "- "), ":")
+			inSelected = ok && key == "channel" && unquoteYAML(value) == channel
+			continue
+		}
+		if !strings.Contains(string(raw), "  - channel:") {
+			legacy = true
+			inSelected = channel == "stable"
+		}
+		if !inSelected {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
 		if !ok {
 			continue
 		}
-		value = strings.TrimSpace(value)
+		value = unquoteYAML(value)
 		switch key {
+		case "line":
+			lock.Line = value
 		case "repository":
 			lock.Repository = strings.TrimPrefix(value, "https://github.com/")
 		case "version":
 			lock.Version = value
 		case "commit":
 			lock.Commit = value
+		case "tag_object_sha":
+			lock.TagObject = value
+		case "tag_signature_verified":
+			lock.TagVerified = value == "true"
 		case "archive":
 			lock.Archive = value
 		case "sha256":
@@ -282,22 +288,32 @@ func readSourceLock(path string) (sourceLock, []byte, error) {
 	if lock.Repository == "" {
 		lock.Repository = defaultRepository
 	}
-	if lock.Version == "" || lock.Commit == "" || lock.Archive == "" || len(lock.SHA256) != 64 {
+	if channel == "lts" && lock.Line == "" {
+		return sourceLock{}, nil, errors.New("CRS LTS source lock requires a line")
+	}
+	if lock.Version == "" || lock.Commit == "" || lock.Archive == "" || len(lock.SHA256) != 64 || !legacy && (len(lock.TagObject) != 40 || !lock.TagVerified) {
 		return sourceLock{}, nil, errors.New("CRS source lock is incomplete")
 	}
 	return lock, raw, nil
 }
 
+func unquoteYAML(value string) string {
+	return strings.Trim(strings.TrimSpace(value), "'\"")
+}
+
 func rewriteSourceLock(raw []byte, lock sourceLock) ([]byte, error) {
 	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
 	inCRS := false
+	inSelected := false
 	seen := make(map[string]bool)
 	values := map[string]string{
-		"repository": "https://github.com/" + lock.Repository,
-		"version":    lock.Version,
-		"commit":     lock.Commit,
-		"archive":    lock.Archive,
-		"sha256":     lock.SHA256,
+		"repository":             "https://github.com/" + lock.Repository,
+		"version":                lock.Version,
+		"commit":                 lock.Commit,
+		"tag_object_sha":         lock.TagObject,
+		"tag_signature_verified": strconv.FormatBool(lock.TagVerified),
+		"archive":                lock.Archive,
+		"sha256":                 lock.SHA256,
 	}
 	for index, line := range lines {
 		if line == "crs:" {
@@ -310,9 +326,18 @@ func rewriteSourceLock(raw []byte, lock sourceLock) ([]byte, error) {
 		if !inCRS {
 			continue
 		}
-		key, _, ok := strings.Cut(strings.TrimSpace(line), ":")
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- ") {
+			key, value, ok := strings.Cut(strings.TrimPrefix(trimmed, "- "), ":")
+			inSelected = ok && key == "channel" && unquoteYAML(value) == lock.Channel
+			continue
+		}
+		if !inSelected {
+			continue
+		}
+		key, _, ok := strings.Cut(trimmed, ":")
 		if value, replace := values[key]; ok && replace {
-			lines[index] = "  " + key + ": " + value
+			lines[index] = "    " + key + ": " + value
 			seen[key] = true
 		}
 	}
@@ -324,145 +349,12 @@ func rewriteSourceLock(raw []byte, lock sourceLock) ([]byte, error) {
 	return []byte(strings.Join(lines, "\n") + "\n"), nil
 }
 
-func updateTemplates(directory, channel, crsVersion string, lifecycle lifecycleCatalog) ([]templateUpdate, error) {
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return nil, err
-	}
-	type candidate struct {
-		item    map[string]any
-		version string
-	}
-	currentVersions := make(map[string]string, len(lifecycle.Policies))
-	for _, policy := range lifecycle.Policies {
-		if policy.Key == "" || policy.CurrentVersion == "" || policy.Versions[policy.CurrentVersion] != "PUBLISHED" {
-			return nil, errors.New("system policy lifecycle current version must be published")
-		}
-		currentVersions[policy.Key] = policy.CurrentVersion
-	}
-	currentByKey := make(map[string]candidate)
-	updates := make([]templateUpdate, 0)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(directory, entry.Name())
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		var item map[string]any
-		if err := json.Unmarshal(raw, &item); err != nil {
-			return nil, fmt.Errorf("decode %s: %w", path, err)
-		}
-		if item["crs_track"] != channel {
-			continue
-		}
-		key, _ := item["key"].(string)
-		version, _ := item["version"].(string)
-		if key == "" || version == "" {
-			return nil, fmt.Errorf("template %s is missing key or version", path)
-		}
-		if currentVersions[key] == version {
-			currentByKey[key] = candidate{item: item, version: version}
-		}
-	}
-	keys := make([]string, 0, len(currentByKey))
-	for key := range currentByKey {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		current := currentByKey[key]
-		if current.item["crs_version"] == crsVersion {
-			continue
-		}
-		nextVersion := bumpPatch(current.version)
-		current.item["version"] = nextVersion
-		current.item["crs_version"] = crsVersion
-		formatted, err := json.MarshalIndent(current.item, "", "  ")
-		if err != nil {
-			return nil, err
-		}
-		path := filepath.Join(directory, key+"."+nextVersion+".json")
-		if _, err := os.Stat(path); err == nil {
-			return nil, fmt.Errorf("template version already exists: %s", path)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		if err := atomicWrite(path, append(formatted, '\n'), 0o644); err != nil {
-			return nil, err
-		}
-		updates = append(updates, templateUpdate{Key: key, PreviousVersion: current.version, Version: nextVersion})
-	}
-	if len(updates) == 0 {
-		return nil, fmt.Errorf("no %s system policy template was updated", channel)
-	}
-	return updates, nil
-}
-
-func readLifecycleCatalog(path string) (lifecycleCatalog, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return lifecycleCatalog{}, err
-	}
-	var catalog lifecycleCatalog
-	if err := json.Unmarshal(raw, &catalog); err != nil {
-		return lifecycleCatalog{}, fmt.Errorf("decode %s: %w", path, err)
-	}
-	return catalog, nil
-}
-
-func updateLifecycleCatalog(path string, updates []templateUpdate) error {
-	catalog, err := readLifecycleCatalog(path)
-	if err != nil {
-		return err
-	}
-	for _, update := range updates {
-		found := false
-		for index := range catalog.Policies {
-			policy := &catalog.Policies[index]
-			if policy.Key != update.Key {
-				continue
-			}
-			found = true
-			if policy.CurrentVersion != update.PreviousVersion || policy.Versions[update.PreviousVersion] != "PUBLISHED" {
-				return fmt.Errorf("system policy %s current lifecycle does not match template %s", update.Key, update.PreviousVersion)
-			}
-			if _, exists := policy.Versions[update.Version]; exists {
-				return fmt.Errorf("system policy lifecycle already contains %s@%s", update.Key, update.Version)
-			}
-			policy.Versions[update.PreviousVersion] = "DEPRECATED"
-			policy.Versions[update.Version] = "PUBLISHED"
-			policy.CurrentVersion = update.Version
-			break
-		}
-		if !found {
-			return fmt.Errorf("system policy lifecycle is missing key %s", update.Key)
-		}
-	}
-	formatted, err := json.MarshalIndent(catalog, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicWrite(path, append(formatted, '\n'), 0o644)
-}
-
-func bumpPatch(version string) string {
-	parts := strings.Split(strings.TrimPrefix(version, "v"), ".")
-	for len(parts) < 3 {
-		parts = append(parts, "0")
-	}
-	patch, err := strconv.Atoi(parts[2])
-	if err != nil {
-		return version + ".1"
-	}
-	parts[2] = strconv.Itoa(patch + 1)
-	return strings.Join(parts[:3], ".")
-}
-
 func lockField(lock sourceLock, field string) (string, error) {
 	switch field {
+	case "channel":
+		return lock.Channel, nil
+	case "line":
+		return lock.Line, nil
 	case "repository":
 		return lock.Repository, nil
 	case "version":
@@ -471,6 +363,10 @@ func lockField(lock sourceLock, field string) (string, error) {
 		return strings.TrimPrefix(lock.Version, "v"), nil
 	case "commit":
 		return lock.Commit, nil
+	case "tag-object-sha":
+		return lock.TagObject, nil
+	case "tag-signature-verified":
+		return strconv.FormatBool(lock.TagVerified), nil
 	case "archive":
 		return lock.Archive, nil
 	case "sha256":

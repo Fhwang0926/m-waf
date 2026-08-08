@@ -1,7 +1,7 @@
 services:
   manager:
     environment:
-      MWAF_AGENT_PUBLIC_URL: "https://manager:${MWAF_AGENT_PORT:-10443}"
+      MWAF_PUBLIC_URL: "https://manager:${MWAF_ADMIN_PORT:-8443}"
 
   customer-apache:
     build:

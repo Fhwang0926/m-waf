@@ -49,21 +49,27 @@ type ServerRecord struct {
 }
 
 type EventRecord struct {
-	ID             uint64
-	AgentID        string
-	ServerName     string
-	EnterpriseName string
-	OccurredAt     time.Time
-	Method         string
-	URI            string
-	RuleID         string
-	Message        string
-	Severity       string
-	Blocked        bool
+	ID             uint64    `json:"id"`
+	AgentID        string    `json:"server_id"`
+	ServerName     string    `json:"server_name"`
+	EnterpriseID   string    `json:"enterprise_id,omitempty"`
+	EnterpriseName string    `json:"enterprise_name"`
+	OccurredAt     time.Time `json:"occurred_at"`
+	TransactionID  string    `json:"transaction_id,omitempty"`
+	Service        string    `json:"service,omitempty"`
+	Method         string    `json:"method"`
+	URI            string    `json:"uri"`
+	StatusCode     uint16    `json:"status_code"`
+	RuleID         string    `json:"rule_id"`
+	Message        string    `json:"message"`
+	Severity       string    `json:"severity"`
+	Blocked        bool      `json:"blocked"`
+	PolicyRevision string    `json:"policy_revision,omitempty"`
+	PolicyID       string    `json:"policy_id,omitempty"`
 }
 
 func (e EventRecord) SeverityLabel() string {
-	labels := map[string]string{"0": "EMERGENCY", "1": "ALERT", "2": "CRITICAL", "3": "ERROR", "4": "WARNING", "5": "NOTICE", "6": "INFO", "7": "DEBUG"}
+	labels := map[string]string{"0": "긴급 (EMERGENCY)", "1": "경보 (ALERT)", "2": "치명적 (CRITICAL)", "3": "오류 (ERROR)", "4": "주의 (WARNING)", "5": "알림 (NOTICE)", "6": "정보 (INFO)", "7": "디버그 (DEBUG)"}
 	if label := labels[e.Severity]; label != "" {
 		return label
 	}
@@ -248,8 +254,12 @@ FROM enterprise_install_tokens WHERE id=? FOR UPDATE`, installTokenID.String).Sc
 		if err := json.Unmarshal([]byte(allowedJSON.String), &packageIDs); err != nil {
 			return err
 		}
-		if len(packageIDs) == 2 {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO desired_states(server_id, agent_package_id, module_package_id) VALUES (?, ?, ?)`, serverID, packageIDs[0], packageIDs[1]); err != nil {
+		if len(packageIDs) == 1 || len(packageIDs) == 2 {
+			moduleID := ""
+			if len(packageIDs) == 2 {
+				moduleID = packageIDs[1]
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO desired_states(server_id, agent_package_id, module_package_id) VALUES (?, ?, NULLIF(?,''))`, serverID, packageIDs[0], moduleID); err != nil {
 				return err
 			}
 		}
@@ -293,17 +303,28 @@ func (s *Store) UpdateHeartbeat(ctx context.Context, serverID string, heartbeat 
 
 func (s *Store) DesiredState(ctx context.Context, serverID string) (model.DesiredState, error) {
 	var state model.DesiredState
-	var revision, artifactPath, hash, signature, mode, agentPackage, modulePackage, packageDeployment sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT pr.id, pr.artifact_path, pr.artifact_sha256, pr.artifact_signature, pr.mode, ds.agent_package_id, ds.module_package_id, ds.package_deployment_id
+	var revision, artifactPath, hash, signature, mode, settingsJSON, agentPackage, modulePackage, packageDeployment sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT pr.id, pr.artifact_path, pr.artifact_sha256, pr.artifact_signature, pr.mode, pr.settings_json, ds.agent_package_id, ds.module_package_id, ds.package_deployment_id
 FROM servers s
 LEFT JOIN desired_states ds ON ds.server_id=s.id
 LEFT JOIN policy_revisions pr ON pr.id=ds.policy_revision_id
-WHERE s.id=? AND s.revoked_at IS NULL`, serverID).Scan(&revision, &artifactPath, &hash, &signature, &mode, &agentPackage, &modulePackage, &packageDeployment)
+WHERE s.id=? AND s.revoked_at IS NULL`, serverID).Scan(&revision, &artifactPath, &hash, &signature, &mode, &settingsJSON, &agentPackage, &modulePackage, &packageDeployment)
 	if err != nil {
 		return state, err
 	}
 	state.RevisionID = revision.String
 	state.ArtifactURL = artifactPath.String
+	var settings PolicySettings
+	if settingsJSON.Valid {
+		_ = json.Unmarshal([]byte(settingsJSON.String), &settings)
+	}
+	if settings.ArtifactFormat != "" {
+		state.ArtifactFormat = settings.ArtifactFormat
+	} else if strings.HasSuffix(artifactPath.String, ".tar.gz") {
+		state.ArtifactFormat = "policy-bundle-v2"
+	} else if artifactPath.String != "" {
+		state.ArtifactFormat = "conf-v1"
+	}
 	state.SHA256 = hash.String
 	state.Signature = signature.String
 	state.Mode = mode.String
@@ -420,6 +441,20 @@ func (s *Store) SyncCatalog(ctx context.Context, catalog *packages.Catalog) erro
 			return err
 		}
 	}
+	for _, source := range manifest.PolicySources {
+		target, err := json.Marshal(map[string]any{
+			"source_id": source.ID, "provider": source.Provider, "repository": source.Repository,
+			"channel": source.Channel, "crs_version": source.Version, "tag": source.Tag,
+			"commit": source.Commit, "archive_sha256": source.ArchiveSHA256,
+			"index_sha256": source.IndexSHA256, "compatible_package_ids": source.CompatiblePackageIDs,
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO package_artifacts(id,bundle_version,kind,name,version,target_json,sha256,image_path,rollback_id) VALUES (?,?,?,?,?,?,?,?,NULL) ON DUPLICATE KEY UPDATE bundle_version=VALUES(bundle_version), target_json=VALUES(target_json), sha256=VALUES(sha256), image_path=VALUES(image_path), rollback_id=NULL`, source.ID, manifest.BundleVersion, "policy-source", "OWASP Core Rule Set", source.Version, target, source.IndexSHA256, source.IndexPath); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -469,11 +504,18 @@ func markServerOffline(item *ServerRecord, now time.Time) {
 }
 
 type EventFilter struct {
-	ServerID string
-	Severity string
-	Query    string
-	Blocked  *bool
-	Offset   int
+	EnterpriseID    string
+	GroupID         string
+	ServerID        string
+	Severity        string
+	RuleID          string
+	Query           string
+	Blocked         *bool
+	Since           time.Time
+	CursorAt        time.Time
+	CursorID        uint64
+	CursorDirection string
+	Offset          int
 }
 
 func (s *Store) ListEvents(ctx context.Context, enterpriseID string, limit int) ([]EventRecord, error) {
@@ -481,13 +523,21 @@ func (s *Store) ListEvents(ctx context.Context, enterpriseID string, limit int) 
 }
 
 func (s *Store) ListEventsFiltered(ctx context.Context, enterpriseID string, filter EventFilter, limit int) ([]EventRecord, error) {
-	query := `SELECT se.id,se.agent_id,s.name,COALESCE(e.name,'미지정'),se.occurred_at,se.method,se.uri,se.rule_id,se.message,se.severity,se.blocked
-FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN enterprises e ON e.id=s.enterprise_id`
-	conditions := make([]string, 0, 5)
-	args := make([]any, 0, 8)
+	query := `SELECT se.id,se.agent_id,s.name,COALESCE(s.enterprise_id,''),COALESCE(e.name,'미지정'),se.occurred_at,se.transaction_id,se.service,se.method,se.uri,se.status_code,se.rule_id,se.message,se.severity,se.blocked,se.policy_revision,COALESCE(pr.enterprise_policy_id,'')
+FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN enterprises e ON e.id=s.enterprise_id
+LEFT JOIN policy_revisions pr ON pr.id=se.policy_revision`
+	conditions := make([]string, 0, 9)
+	args := make([]any, 0, 14)
 	if enterpriseID != "" {
 		conditions = append(conditions, `s.enterprise_id=?`)
 		args = append(args, enterpriseID)
+	} else if filter.EnterpriseID != "" {
+		conditions = append(conditions, `s.enterprise_id=?`)
+		args = append(args, filter.EnterpriseID)
+	}
+	if filter.GroupID != "" {
+		conditions = append(conditions, `EXISTS (SELECT 1 FROM server_group_members gm JOIN server_groups g ON g.id=gm.group_id WHERE gm.server_id=s.id AND g.id=? AND g.enterprise_id=s.enterprise_id)`)
+		args = append(args, filter.GroupID)
 	}
 	if filter.ServerID != "" {
 		conditions = append(conditions, `se.agent_id=?`)
@@ -496,6 +546,14 @@ FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN enterprises
 	if filter.Severity != "" {
 		conditions = append(conditions, `se.severity=?`)
 		args = append(args, filter.Severity)
+	}
+	if filter.RuleID != "" {
+		conditions = append(conditions, `se.rule_id=?`)
+		args = append(args, filter.RuleID)
+	}
+	if !filter.Since.IsZero() {
+		conditions = append(conditions, `se.occurred_at>=?`)
+		args = append(args, filter.Since.UTC())
 	}
 	if filter.Blocked != nil {
 		conditions = append(conditions, `se.blocked=?`)
@@ -506,10 +564,23 @@ FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN enterprises
 		value := "%" + filter.Query + "%"
 		args = append(args, value, value, value)
 	}
+	if !filter.CursorAt.IsZero() && filter.CursorID != 0 {
+		operator := "<"
+		if filter.CursorDirection == eventCursorAfter {
+			operator = ">"
+		}
+		conditions = append(conditions, `(se.occurred_at `+operator+` ? OR (se.occurred_at=? AND se.id `+operator+` ?))`)
+		args = append(args, filter.CursorAt.UTC(), filter.CursorAt.UTC(), filter.CursorID)
+		filter.Offset = 0
+	}
 	if len(conditions) != 0 {
 		query += ` WHERE ` + strings.Join(conditions, ` AND `)
 	}
-	query += ` ORDER BY se.occurred_at DESC LIMIT ? OFFSET ?`
+	order := "DESC"
+	if filter.CursorDirection == eventCursorAfter {
+		order = "ASC"
+	}
+	query += ` ORDER BY se.occurred_at ` + order + `,se.id ` + order + ` LIMIT ? OFFSET ?`
 	args = append(args, limit, max(filter.Offset, 0))
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -519,7 +590,7 @@ FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN enterprises
 	result := make([]EventRecord, 0)
 	for rows.Next() {
 		var item EventRecord
-		if err := rows.Scan(&item.ID, &item.AgentID, &item.ServerName, &item.EnterpriseName, &item.OccurredAt, &item.Method, &item.URI, &item.RuleID, &item.Message, &item.Severity, &item.Blocked); err != nil {
+		if err := rows.Scan(&item.ID, &item.AgentID, &item.ServerName, &item.EnterpriseID, &item.EnterpriseName, &item.OccurredAt, &item.TransactionID, &item.Service, &item.Method, &item.URI, &item.StatusCode, &item.RuleID, &item.Message, &item.Severity, &item.Blocked, &item.PolicyRevision, &item.PolicyID); err != nil {
 			return nil, err
 		}
 		result = append(result, item)

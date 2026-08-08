@@ -15,8 +15,8 @@ import (
 
 type Manager struct {
 	AdminAddr           string
-	AgentAddr           string
-	AgentPublicURL      string
+	PublicURL           string
+	DevLiveReload       bool
 	DBDSN               string
 	DBMigrate           bool
 	BundleRoot          string
@@ -35,6 +35,9 @@ type Manager struct {
 	EventRetention      time.Duration
 	CleanupInterval     time.Duration
 	PolicySyncInterval  time.Duration
+	CRSSyncInterval     time.Duration
+	CRSGitHubToken      string
+	CRSLTSLine          string
 	ShutdownTimeout     time.Duration
 }
 
@@ -67,8 +70,8 @@ func LoadManager() (Manager, error) {
 
 	cfg := Manager{
 		AdminAddr:           value("MWAF_ADMIN_ADDR", ":8443"),
-		AgentAddr:           value("MWAF_AGENT_ADDR", ":10443"),
-		AgentPublicURL:      strings.TrimRight(value("MWAF_AGENT_PUBLIC_URL", "https://127.0.0.1:10443"), "/"),
+		PublicURL:           strings.TrimRight(value("MWAF_PUBLIC_URL", "https://127.0.0.1:8443"), "/"),
+		DevLiveReload:       boolean("MWAF_DEV_LIVE_RELOAD", false),
 		DBDSN:               dbConfig.FormatDSN(),
 		DBMigrate:           boolean("MWAF_DB_MIGRATE", false),
 		BundleRoot:          value("MWAF_BUNDLE_ROOT", "/opt/mwaf/bundles/current"),
@@ -87,6 +90,9 @@ func LoadManager() (Manager, error) {
 		EventRetention:      duration("MWAF_EVENT_RETENTION", 30*24*time.Hour),
 		CleanupInterval:     duration("MWAF_CLEANUP_INTERVAL", time.Hour),
 		PolicySyncInterval:  duration("MWAF_POLICY_SYNC_INTERVAL", 15*time.Minute),
+		CRSSyncInterval:     duration("MWAF_CRS_SYNC_INTERVAL", 24*time.Hour),
+		CRSGitHubToken:      strings.TrimSpace(os.Getenv("MWAF_CRS_GITHUB_TOKEN")),
+		CRSLTSLine:          value("MWAF_CRS_LTS_LINE", "4.25"),
 		ShutdownTimeout:     duration("MWAF_SHUTDOWN_TIMEOUT", 15*time.Second),
 	}
 	if override := os.Getenv("MWAF_DB_DSN"); override != "" {
@@ -102,24 +108,30 @@ func (c Manager) Validate() error {
 	if err := validateListenAddress("MWAF_ADMIN_ADDR", c.AdminAddr); err != nil {
 		return err
 	}
-	if err := validateListenAddress("MWAF_AGENT_ADDR", c.AgentAddr); err != nil {
-		return err
-	}
 	if len(c.SessionKey) < 32 {
 		return errors.New("MWAF_SESSION_KEY_FILE must contain at least 32 characters")
 	}
 	if c.DBDSN == "" {
 		return errors.New("database DSN is required")
 	}
-	if c.AgentPublicURL == "" {
-		return errors.New("agent public URL is required")
+	if c.PublicURL == "" {
+		return errors.New("manager public URL is required")
 	}
-	publicURL, err := url.Parse(c.AgentPublicURL)
+	publicURL, err := url.Parse(c.PublicURL)
 	if err != nil || publicURL.Scheme != "https" || publicURL.Hostname() == "" {
-		return errors.New("MWAF_AGENT_PUBLIC_URL must be an https URL")
+		return errors.New("MWAF_PUBLIC_URL must be an https URL")
 	}
-	if c.EventRetention < 24*time.Hour || c.CleanupInterval < time.Minute || c.PolicySyncInterval < time.Minute {
-		return errors.New("event retention must be at least 24h and cleanup and policy sync intervals at least 1m")
+	if c.EventRetention < 24*time.Hour || c.CleanupInterval < time.Minute || c.PolicySyncInterval < time.Minute || c.CRSSyncInterval < time.Hour {
+		return errors.New("event retention must be at least 24h, cleanup and policy sync at least 1m, and CRS sync at least 1h")
+	}
+	ltsParts := strings.Split(strings.TrimPrefix(c.CRSLTSLine, "v"), ".")
+	if len(ltsParts) != 2 || ltsParts[0] != "4" {
+		return errors.New("MWAF_CRS_LTS_LINE must be a CRS v4 major.minor line")
+	}
+	for _, part := range ltsParts {
+		if _, err := strconv.Atoi(part); err != nil {
+			return errors.New("MWAF_CRS_LTS_LINE must be a CRS v4 major.minor line")
+		}
 	}
 	return nil
 }

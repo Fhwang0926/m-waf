@@ -245,6 +245,12 @@ func (a *Agent) flushAudit(ctx context.Context) error {
 			}
 			return nil
 		}
+		policyRevision := a.currentDesiredState().RevisionID
+		for index := range events {
+			if events[index].PolicyRevision == "" {
+				events[index].PolicyRevision = policyRevision
+			}
+		}
 		batch := model.EventBatch{BatchID: randomID(), Events: events}
 		item, err := a.spool.Put(batch, nextPosition)
 		if err != nil {

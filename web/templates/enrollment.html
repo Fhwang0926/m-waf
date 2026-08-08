@@ -1,9 +1,22 @@
 {{define "enrollment.html"}}
-<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 설치 및 등록</title><link rel="stylesheet" href="/static/app.css"><script defer src="/static/app.js"></script></head>
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 설치 및 등록</title><link rel="stylesheet" href="/static/app.css"></head>
 <body>{{template "navigation" .}}
-<main class="container"><div class="page-head"><div><p class="eyebrow">서버 관리</p><h1>설치 및 등록</h1><p class="muted">기업 설치 토큰 하나로 여러 웹 서버를 설치하면 Agent가 서버 정보를 수집해 자동 등록합니다.</p></div></div>
+<main class="container"><div class="page-head"><div><p class="eyebrow">기업 운영 · 서버 관리</p><h1>설치 및 등록</h1><p class="muted">{{.SelectedEnterpriseName}}에 설치 토큰을 발급하고 Agent를 연결합니다.</p></div></div>
 {{if .Notice}}<div class="alert success" role="status"><strong>처리 완료</strong><div>{{.Notice}}</div></div>{{end}}
 {{if .Error}}<div id="enrollment-error" class="alert error" role="alert"><strong>요청을 처리하지 못했습니다</strong><div>{{.Error}}</div></div>{{end}}
+
+{{if .IsSystemAdmin}}<section class="panel resource-toolbar compact" aria-labelledby="install-enterprise-scope"><form method="get" action="/enrollments/new"><label id="install-enterprise-scope">설치 대상 기업<select name="enterprise_id" required>{{range .Enterprises}}<option value="{{.ID}}" {{if eq .ID $.SelectedEnterpriseID}}selected{{end}}>{{.Name}}</option>{{end}}</select><small>설치·토큰 목록과 신규 Agent는 선택한 기업 범위로 제한됩니다.</small></label><div class="actions"><button type="submit">범위 적용</button></div></form></section>{{end}}
+
+<section class="install-support" aria-labelledby="install-support-title"><div class="panel-head"><div><h2 id="install-support-title">지원 환경</h2><small>설치기는 환경을 자동 확인하며 지원 범위를 벗어나면 웹서버 설정을 변경하기 전에 중단합니다.</small></div><span class="badge info">현재 실행 가능 범위</span></div>
+  <div class="support-grid">
+    <article class="support-card os"><span class="support-code" aria-hidden="true">OS</span><div><span class="support-kicker">운영체제</span><strong>Ubuntu Server 24.04 LTS</strong><small>amd64(x86_64)만 지원합니다.</small></div></article>
+    <article class="support-card web"><span class="support-code" aria-hidden="true">WEB</span><div><span class="support-kicker">보호 웹서버</span><strong>Apache 또는 Nginx</strong><small>한 Agent가 한 종류의 활성 웹서버를 관리합니다.</small></div></article>
+    <article class="support-card integration"><span class="support-code" aria-hidden="true">MODE</span><div><span class="support-kicker">통합 방식</span><strong>패키지 · 수동 Connector</strong><small>수동 방식은 사전에 로드된 Apache/Nginx ModSecurity Connector를 검증하고 교체하지 않습니다.</small></div></article>
+  </div>
+  <details class="support-details"><summary>지원 제외 환경과 설치 전 확인사항</summary><p class="muted">Windows, AIX, 다른 Linux 배포판, ARM64, OpenResty와 자동 Connector 컴파일은 현재 지원하지 않습니다. Apache와 Nginx가 함께 설치된 경우 설치 명령에서 보호 대상을 명시해야 합니다.</p></details>
+</section>
+
+<ol class="install-steps" aria-label="설치 진행 단계"><li><strong>1. 환경 확인</strong><small>지원 OS·웹서버·통합 방식을 확인합니다.</small></li><li><strong>2. 토큰 생성</strong><small>{{if .InstallToken}}완료 · 지금 한 번만 표시{{else}}기업과 사용 범위를 지정합니다.{{end}}</small></li><li><strong>3. 설치 명령</strong><small>{{if .InstallToken}}복사 후 고객 서버에서 실행{{else}}토큰 생성 후 표시됩니다.{{end}}</small></li><li><strong>4. Agent 연결</strong><small>서버별 mTLS 신원을 발급합니다.</small></li><li><strong>5. 정책 적용</strong><small>연결 후 기본 또는 대상 정책을 동기화합니다.</small></li></ol>
 
 {{if .InstallToken}}<section class="panel danger-zone"><div class="alert warn" role="alert"><strong>지금 안전하게 보관하세요</strong><div>기업 설치 토큰은 이 화면에서 한 번만 표시됩니다. {{.InstallTokenRecord.ExpiresAt.Format "2006-01-02 15:04:05"}} UTC까지 사용할 수 있습니다.</div></div>
   <div class="code-toolbar"><h2>1. 기업 설치 토큰</h2><button class="secondary" type="button" data-copy-target="enterprise-install-token" data-copy-status="copy-status" data-copy-success="기업 설치 토큰을 복사했습니다.">토큰 복사</button></div>
@@ -16,30 +29,37 @@ curl --fail --cacert /tmp/mwaf-manager-ca.crt {{.AgentURL}}/bootstrap/v1/install
 sudo sh /tmp/mwaf-install.sh --manager {{.AgentURL}} --ca /tmp/mwaf-manager-ca.crt --install-token-stdin</pre>
   <p id="copy-status" class="copy-status" aria-live="polite"></p>
   <p class="muted">자동 배포에서는 토큰을 권한 0600 파일에 저장하고 <span class="mono">--install-token-file /secure/path/token</span>을 사용하세요. 설치 전에 스크립트를 검토하세요.</p>
+  <details class="panel-subtle"><summary>기존 ModSecurity Connector를 패키지 없이 연결</summary><p class="muted">Connector가 이미 로드된 커스텀 웹서버에서만 사용합니다. Manager는 Connector 바이너리를 설치하거나 교체하지 않고 Agent와 전용 include만 설치합니다.</p><pre>sudo sh /tmp/mwaf-install.sh \
+  --manager {{.AgentURL}} \
+  --ca /tmp/mwaf-manager-ca.crt \
+  --install-token-stdin \
+  --module-install manual \
+  --integration external \
+  --webserver apache \
+  --webserver-bin /opt/hosting/apache/bin/apachectl \
+  --integration-config /opt/hosting/apache/conf/extra/mwaf.conf \
+  --reload</pre><p class="muted">Nginx는 <span class="mono">--webserver nginx</span>, 해당 nginx 절대 경로와 http 컨텍스트에 포함되는 전용 conf 경로를 지정하세요.</p></details>
 </section>{{end}}
 
-<div class="admin-grid">
-  <section class="panel"><h2>기업 설치 토큰 생성</h2>
-  {{if and .IsSystemAdmin (not .Enterprises)}}<div class="empty">먼저 <a href="/enterprises">기업을 등록하세요.</a></div>{{else}}
-  <form method="post" action="/install-tokens" {{if .Error}}aria-describedby="enrollment-error"{{end}}><input type="hidden" name="csrf" value="{{.CSRF}}">
-    {{if .IsSystemAdmin}}<label>기업<select name="enterprise_id" required><option value="">기업 선택</option>{{range .Enterprises}}<option value="{{.ID}}" {{if eq .ID $.FormEnterpriseID}}selected{{end}}>{{.Name}}</option>{{end}}</select><small>설치되는 서버는 선택한 기업 범위에 자동 등록됩니다.</small></label>{{end}}
+<section class="panel form-workspace"><div class="panel-head"><div><h2>기업 설치 토큰 생성</h2><small>{{.SelectedEnterpriseName}}의 유효 기간과 등록 가능한 서버 수를 지정합니다.</small></div><span class="badge info">기본 설치 방식</span></div>
+  {{if and .IsSystemAdmin (not .Enterprises)}}<div class="empty-state"><div class="empty-state-content"><h3>기업 등록이 먼저 필요합니다</h3><p>설치되는 서버가 속할 기업 범위를 먼저 생성하세요.</p><div class="actions"><a class="button" href="/enterprises?create=1">기업 등록</a></div></div></div>{{else}}
+  <form method="post" action="/install-tokens" {{if .Error}}aria-describedby="enrollment-error"{{end}}><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="enterprise_id" value="{{.SelectedEnterpriseID}}">
+    <div class="alert"><strong>설치 대상</strong><div>{{.SelectedEnterpriseName}} · 위 기업 범위를 변경하면 토큰 목록과 생성 대상이 함께 바뀝니다.</div></div>
     <label>토큰 이름<input name="name" maxlength="255" placeholder="서울 IDC 설치" value="{{.FormTokenName}}" required><small>설치 범위나 배포 기간을 구분할 수 있는 이름을 사용하세요.</small></label>
     <div class="form-grid"><label>유효 기간(일)<input type="number" name="expires_in_days" min="1" max="90" value="{{.FormExpiresDays}}" required><small>1~90일</small></label><label>최대 등록 서버 수<input type="number" name="max_enrollments" min="1" max="10000" value="{{.FormMaxEnrollments}}" placeholder="비워두면 제한 없음"><small>비워두면 만료 전까지 제한 없이 사용합니다.</small></label></div>
-    <button type="submit">기업 설치 토큰 생성</button>
+    <div class="form-actions"><button type="submit">기업 설치 토큰 생성</button></div>
   </form>{{end}}</section>
+<details class="panel panel-subtle form-workspace"><summary>등록 과정과 토큰 동작 보기</summary><ol><li>설치기가 서버 OS와 Apache/Nginx 정보를 확인합니다.</li><li><span class="help-term" tabindex="0" aria-describedby="tip-install-token">기업 설치 토큰<span id="tip-install-token" role="tooltip">여러 서버가 만료 또는 사용 한도까지 공유할 수 있는 기업 범위 비밀입니다.</span></span>을 짧은 일회용 등록 세션으로 교환합니다.</li><li>기본 방식은 Manager의 Agent·통합 패키지를 설치하고, 수동 방식은 기존 Connector의 로드·configtest 상태를 검증합니다.</li><li>서버별 고유 <span class="help-term" tabindex="0" aria-describedby="tip-mtls">mTLS 인증서<span id="tip-mtls" role="tooltip">Agent와 Manager가 서로 신원을 확인하는 서버별 인증서입니다.</span></span>를 발급하고 서버 목록에 자동 등록합니다.</li></ol><p class="muted">기업 토큰 폐기는 새 설치만 차단합니다. 이미 등록된 Agent는 고유 인증서로 계속 동작합니다.</p></details>
 
-  <section class="panel panel-subtle"><h2>등록 흐름</h2><ol><li>설치기가 서버 OS와 Apache/Nginx 정보를 확인합니다.</li><li><span class="help-term" tabindex="0" aria-describedby="tip-install-token">기업 설치 토큰<span id="tip-install-token" role="tooltip">여러 서버가 만료 또는 사용 한도까지 공유할 수 있는 기업 범위 비밀입니다.</span></span>을 짧은 일회용 등록 세션으로 교환합니다.</li><li>Manager에 포함된 Agent와 호환 모듈만 검증해 설치합니다.</li><li>서버별 고유 <span class="help-term" tabindex="0" aria-describedby="tip-mtls">mTLS 인증서<span id="tip-mtls" role="tooltip">Agent와 Manager가 서로 신원을 확인하는 서버별 인증서입니다.</span></span>를 발급하고 서버 목록에 자동 등록합니다.</li></ol><p class="muted">기업 토큰 폐기는 새 설치만 차단합니다. 이미 등록된 Agent는 고유 인증서로 계속 동작합니다.</p></section>
-</div>
-
-<section class="panel"><div class="panel-head"><div><h2>기업 설치 토큰</h2><small>원문은 저장하지 않으며 식별 접두어와 사용 상태만 표시합니다.</small></div><span class="badge">{{len .InstallTokens}}개</span></div>
-{{if .InstallTokens}}<div class="table-scroll"><table class="table-wide"><thead><tr>{{if .IsSystemAdmin}}<th>기업</th>{{end}}<th>이름</th><th>식별 접두어</th><th>상태</th><th>등록 수</th><th>만료</th><th>마지막 사용</th><th>관리</th></tr></thead><tbody>
-{{range .InstallTokens}}<tr>{{if $.IsSystemAdmin}}<td>{{.EnterpriseName}}</td>{{end}}<td><strong>{{.Name}}</strong></td><td><span class="mono">{{.TokenPrefix}}…</span></td><td><span class="badge {{if .Active}}ok{{else}}warn{{end}}">{{.StatusLabel}}</span></td><td>{{.EnrollmentCount}}{{if .MaxEnrollments.Valid}} / {{.MaxEnrollments.Int64}}{{else}}<small>제한 없음</small>{{end}}</td><td>{{.ExpiresAt.Format "2006-01-02 15:04"}} UTC</td><td>{{if .LastUsedAt.Valid}}{{.LastUsedAt.Time.Format "2006-01-02 15:04"}} UTC{{else}}미사용{{end}}</td><td>{{if .Active}}<details class="danger-disclosure"><summary>폐기</summary><form method="post" action="/install-tokens/{{.ID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><label class="check-row"><input type="checkbox" name="confirm" value="confirmed" required> 새 설치가 즉시 차단됨을 확인했습니다.</label><button class="danger" type="submit">토큰 폐기</button></form></details>{{else}}<span class="muted">작업 없음</span>{{end}}</td></tr>{{end}}
-</tbody></table></div>{{else}}<div class="empty">생성된 기업 설치 토큰이 없습니다.</div>{{end}}</section>
+<section class="panel resource-panel"><div class="resource-panel-head"><div><h2>기업 설치 토큰</h2><small>원문은 저장하지 않으며 식별 접두어와 사용 상태만 표시합니다.</small></div><span class="badge">{{len .InstallTokens}}개</span></div>
+{{if .InstallTokens}}<div class="table-scroll"><table class="table-wide"><thead><tr><th>이름</th><th>식별 접두어</th><th>상태</th><th>등록 수</th><th>만료</th><th>마지막 사용</th><th>관리</th></tr></thead><tbody>
+{{range .InstallTokens}}<tr><td><strong>{{.Name}}</strong></td><td><span class="mono">{{.TokenPrefix}}…</span></td><td><span class="badge {{if .Active}}ok{{else}}warn{{end}}">{{.StatusLabel}}</span></td><td>{{.EnrollmentCount}}{{if .MaxEnrollments.Valid}} / {{.MaxEnrollments.Int64}}{{else}}<small>제한 없음</small>{{end}}</td><td>{{.ExpiresAt.Format "2006-01-02 15:04"}} UTC</td><td>{{if .LastUsedAt.Valid}}{{.LastUsedAt.Time.Format "2006-01-02 15:04"}} UTC{{else}}미사용{{end}}</td><td>{{if .Active}}<details class="danger-disclosure"><summary>폐기</summary><form method="post" action="/install-tokens/{{.ID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="enterprise_id" value="{{.EnterpriseID}}"><label class="check-row"><input type="checkbox" name="confirm" value="confirmed" required> 새 설치가 즉시 차단됨을 확인했습니다.</label><button class="danger" type="submit">토큰 폐기</button></form></details>{{else}}<span class="muted">작업 없음</span>{{end}}</td></tr>{{end}}
+</tbody></table></div>{{else}}<div class="empty-state"><div class="empty-state-content"><h3>생성된 기업 설치 토큰이 없습니다</h3><p>위 생성 폼에서 설치 범위를 지정하면 토큰과 안전한 설치 명령을 한 번만 표시합니다.</p></div></div>{{end}}</section>
 
 <details class="panel panel-subtle" {{if .Token}}open{{end}}><summary>고급·호환 기능: 단일 서버용 일회용 토큰</summary><p class="muted">기존 자동화와 복구 작업을 위한 호환 기능입니다. 일반적인 다수 서버 설치에는 기업 설치 토큰을 사용하세요.</p>
 {{if .Token}}<div class="alert warn" role="alert"><strong>지금 안전하게 보관하세요</strong><div>이 토큰은 한 번만 표시되며 {{.ExpiresAt.Format "2006-01-02 15:04:05"}} UTC에 만료됩니다.</div></div><div class="code-toolbar"><h3>일회용 토큰</h3><button class="secondary" type="button" data-copy-target="one-use-token" data-copy-status="legacy-copy-status">토큰 복사</button></div><pre id="one-use-token" tabindex="0">{{.Token}}</pre><div class="code-toolbar"><h3>설치 명령</h3><button class="secondary" type="button" data-copy-target="one-use-command" data-copy-status="legacy-copy-status">명령 복사</button></div><pre id="one-use-command" tabindex="0">curl --fail --cacert /path/to/manager-ca.crt {{.AgentURL}}/bootstrap/v1/install.sh -o /tmp/mwaf-install.sh
 sudo sh /tmp/mwaf-install.sh --manager {{.AgentURL}} --token {{.Token}} --ca /path/to/manager-ca.crt</pre><p id="legacy-copy-status" class="copy-status" aria-live="polite"></p>{{else}}
-{{if and .IsSystemAdmin (not .Enterprises)}}<div class="empty">먼저 기업을 등록하세요.</div>{{else}}<form method="post" action="/enrollments" {{if .Error}}aria-describedby="enrollment-error"{{end}}><input type="hidden" name="csrf" value="{{.CSRF}}">{{if .IsSystemAdmin}}<label>기업<select name="enterprise_id" required><option value="">기업 선택</option>{{range .Enterprises}}<option value="{{.ID}}" {{if eq .ID $.FormEnterpriseID}}selected{{end}}>{{.Name}}</option>{{end}}</select></label>{{end}}<label>서버 식별 이름<input name="label" maxlength="255" value="{{.FormEnrollmentLabel}}" placeholder="web-prod-01" required></label><button type="submit">일회용 등록 토큰 생성</button></form>{{end}}{{end}}
+{{if and .IsSystemAdmin (not .Enterprises)}}<div class="empty">먼저 기업을 등록하세요.</div>{{else}}<form method="post" action="/enrollments" {{if .Error}}aria-describedby="enrollment-error"{{end}}><input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="enterprise_id" value="{{.SelectedEnterpriseID}}"><div class="alert"><strong>등록 대상</strong><div>{{.SelectedEnterpriseName}}</div></div><label>서버 식별 이름<input name="label" maxlength="255" value="{{.FormEnrollmentLabel}}" placeholder="web-prod-01" required></label><button type="submit">일회용 등록 토큰 생성</button></form>{{end}}{{end}}
 </details>
 </main></body></html>
 {{end}}

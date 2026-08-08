@@ -4,12 +4,12 @@
 
 호스팅사가 직접 컴파일했거나 제3자 저장소로 설치한 Apache/Nginx를 M-WAF에 연결하는 방법을 설명한다.
 
-`external` 통합은 고객 웹서버와 ModSecurity Connector를 빌드하거나 교체하지 않는다. 호스팅사가 호환성을 확인해 미리 설치한 Connector를 그대로 사용하고 M-WAF는 다음 두 패키지만 설치한다.
+`external` 통합은 고객 웹서버와 ModSecurity Connector를 빌드하거나 교체하지 않는다. 호스팅사가 호환성을 확인해 미리 설치한 Connector를 그대로 사용하며 설치 방식은 두 가지다.
 
-1. `mwaf-agent`
-2. `mwaf-modsecurity-apache-external` 또는 `mwaf-modsecurity-nginx-external`
+1. 기본 `package`: `mwaf-agent`와 Apache/Nginx용 M-WAF external 통합 패키지를 설치한다.
+2. `manual`: 서명된 `mwaf-agent`만 설치하고, 기존 Connector에 M-WAF 전용 include와 로그 회전 설정을 연결한다.
 
-두 번째 패키지는 OWASP CRS, M-WAF 정책 연결 설정, 로그 회전 설정과 외부 통합 진단 도구만 포함한다. Apache, Nginx, libmodsecurity와 Connector에 대한 패키지 의존성이 없다.
+두 방식 모두 Apache, Nginx, libmodsecurity와 Connector를 패키지로 교체하지 않는다. `manual`은 Connector 수동 설치를 허용하는 방식이지, Agent 바이너리나 정책을 검증 없이 복사하는 우회 경로가 아니다. Agent와 정책은 계속 Manager가 제공하고 서명을 검증한다.
 
 ## 지원 조건
 
@@ -73,7 +73,7 @@ Manager의 **설치 및 등록**에서 기업 설치 토큰을 생성한다. 화
 ```sh
 curl --fail \
   --cacert ./mwaf_ca_cert.pem \
-  https://manager.example.com:10443/bootstrap/v1/install.sh \
+  https://manager.example.com:8443/bootstrap/v1/install.sh \
   -o /tmp/mwaf-install.sh
 ```
 
@@ -81,11 +81,12 @@ curl --fail \
 
 ```sh
 sudo sh /tmp/mwaf-install.sh \
-  --manager https://manager.example.com:10443 \
+  --manager https://manager.example.com:8443 \
   --ca ./mwaf_ca_cert.pem \
   --install-token-stdin \
   --webserver apache \
   --integration external \
+  --module-install manual \
   --webserver-bin /opt/hosting/apache/bin/apachectl \
   --integration-config /opt/hosting/apache/conf/extra/mwaf.conf \
   --audit-log /var/log/modsecurity/mwaf-audit.jsonl \
@@ -105,11 +106,12 @@ Apache 기본 ModSecurity 설정이 다른 파일에 있고 기존 Apache 설정
 
 ```sh
 sudo sh /tmp/mwaf-install.sh \
-  --manager https://manager.example.com:10443 \
+  --manager https://manager.example.com:8443 \
   --ca ./mwaf_ca_cert.pem \
   --install-token-stdin \
   --webserver nginx \
   --integration external \
+  --module-install manual \
   --webserver-bin /opt/hosting/nginx/sbin/nginx \
   --integration-config /opt/hosting/nginx/conf/conf.d/mwaf.conf \
   --modsecurity-base /opt/hosting/nginx/conf/modsecurity.conf \
@@ -128,6 +130,7 @@ sudo sh /tmp/mwaf-install.sh \
 | `--install-token-file` | 자동화 도구가 권한 0600 비밀 파일로 제공한 기업 설치 토큰을 읽는다. |
 | `--name` | Manager에 자동 등록할 서버 이름을 지정한다. 생략하면 호스트명을 사용한다. |
 | `--integration external` | 배포판 웹서버·Connector 패키지를 설치하지 않고 기존 Connector를 사용한다. |
+| `--module-install package\|manual` | 기본값은 M-WAF external 통합 패키지를 함께 설치하는 `package`다. `manual`은 Agent 패키지만 설치하고 기존 Connector에 최소 설정을 연결한다. `external`에서만 사용할 수 있다. |
 | `--webserver apache\|nginx` | 한 Agent가 관리할 웹서버 종류를 고정한다. |
 | `--webserver-bin` | Agent가 inventory, configtest와 정책 reload에 사용할 절대 경로다. Apache는 `apachectl` 경로를 사용한다. |
 | `--integration-config` | 기존 Apache/Nginx include 범위 안에 생성할 M-WAF 전용 파일이다. |
@@ -146,9 +149,9 @@ sudo sh /tmp/mwaf-install.sh \
 6. 기존 설정 파일을 덮어쓰지 않는지 여부
 7. 설치한 전용 설정이 실제 웹서버 include 결과에 나타나는지 여부
 8. `apachectl configtest` 또는 `nginx -t` 성공 여부
-9. Agent·통합 패키지 SHA-256과 Manager 서명 번들 일치 여부
+9. Agent와, `package` 방식이면 통합 패키지의 SHA-256 및 Manager 서명 번들 일치 여부
 
-설정 검사나 include 확인이 실패하면 설치기가 만든 전용 통합 설정, 엔진 설정과 로그 회전 설정을 직전 상태로 복원한다. 고객 웹서버 바이너리, Connector와 기존 주 설정은 수정하지 않는다.
+설정 검사에 실패하면 설치기는 기존 M-WAF 전용 통합 설정을 복원하거나 새로 만든 통합 설정을 제거한다. 고객 웹서버 바이너리, Connector와 기존 주 설정은 수정하지 않는다. Agent 패키지 설치 자체는 APT 트랜잭션이므로 자동 제거하지 않는다.
 
 ## 설치 후 확인
 
@@ -173,12 +176,12 @@ systemctl status mwaf-agent --no-pager
 
 ```sh
 test -s /etc/mwaf/active/main.conf
-test -r /etc/mwaf/crs.version
+test -L /etc/mwaf/active
 test -e /var/log/modsecurity/mwaf-audit.jsonl
 journalctl -u mwaf-agent -n 100 --no-pager
 ```
 
-Manager의 **서버** 화면에서 `integration_mode=external`, 웹서버 버전·빌드 해시, Agent와 external 통합 패키지 버전을 확인한다.
+Manager의 **서버** 화면에서 `integration_mode=external`, `installation_mode`, 웹서버 버전·빌드 해시, Connector 로드/configtest 상태와 지원 정책 형식을 확인한다. `manual` 서버에는 M-WAF 모듈 패키지 버전 대신 탐지된 Connector 정보가 표시된다.
 
 ## DEB 설치가 실패한 경우
 
@@ -187,14 +190,14 @@ Manager의 **서버** 화면에서 `integration_mode=external`, 웹서버 버전
 설치 스크립트는 다음 단계 중 하나라도 실패하면 즉시 종료한다.
 
 1. Manager 연결 또는 기업 설치 토큰·단기 등록 세션 검증
-2. 호환 패키지 조회와 다운로드
+2. 호환 Agent 패키지와, `package` 방식이면 통합 패키지 조회·다운로드
 3. SHA-256 검증
 4. APT/DPKG 설치
 5. external Connector와 전용 include 확인
 6. Apache/Nginx configtest와 선택적 reload
 7. Agent 설정 생성과 systemd 서비스 시작
 
-다른 형식의 패키지나 서명되지 않은 파일로 자동 전환하지 않는다. APT는 하나의 명령으로 Agent와 통합 패키지를 설치하지만, 실패 시 먼저 처리된 패키지가 `unpacked` 또는 `installed` 상태로 남을 수 있다. 현재 설치 스크립트는 이 패키지를 자동 제거하지 않는다.
+다른 형식의 패키지나 서명되지 않은 파일로 자동 전환하지 않는다. APT는 `package` 방식에서 Agent와 통합 패키지를 한 명령으로 설치하고, `manual` 방식에서는 Agent만 설치한다. 실패 시 먼저 처리된 패키지가 `unpacked` 또는 `installed` 상태로 남을 수 있으며 설치 스크립트는 이를 자동 제거하지 않는다.
 
 external 설정 도구가 실패한 경우에는 M-WAF가 관리하는 전용 include, `/etc/mwaf/external` 설정과 로그 회전 설정을 실행 직전 상태로 복원한다. 고객 웹서버 바이너리, Connector와 주 설정 파일은 변경하거나 제거하지 않는다.
 
@@ -261,9 +264,9 @@ DEB 설치 단계에서 실패하면 같은 기업 설치 토큰으로 다시 �
 - Manager 번들을 거치지 않은 Agent 바이너리나 CRS 수동 복사
 - `distro`와 `external` 패키지 동시 설치
 
-### 5. DEB를 사용할 수 없는 환경
+### 5. Agent DEB를 사용할 수 없는 환경
 
-현재 MVP의 공식 설치 형식은 Ubuntu 24.04 amd64 DEB뿐이다. `tar.gz` portable 설치, RPM, ARM64와 수동 파일 복사는 아직 지원하지 않는다. 따라서 `dpkg`/APT를 사용할 수 없는 이미지형 서버나 변경 불가능한 어플라이언스에는 설치를 강행하지 않는다.
+현재 Agent의 공식 설치 형식은 Ubuntu 24.04 amd64 DEB뿐이다. Connector는 `external/manual`로 운영자가 설치할 수 있지만 Agent의 `tar.gz` portable 설치, RPM, ARM64와 수동 파일 복사는 아직 지원하지 않는다. 따라서 Agent DEB를 설치할 수 없는 이미지형 서버나 변경 불가능한 어플라이언스에는 설치를 강행하지 않는다.
 
 향후 portable 설치를 추가하더라도 고객 설치 범위는 Agent와 웹서버 통합 구성 두 개로 유지하고, 다음 조건을 충족해야 한다.
 

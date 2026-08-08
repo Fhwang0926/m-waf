@@ -46,7 +46,7 @@ func TestNavigationVisibilityByRole(t *testing.T) {
 	}
 
 	system := render(RoleSystemAdmin)
-	if !strings.Contains(system, "시스템 관리") || !strings.Contains(system, "사용자 관리") {
+	if !strings.Contains(system, "시스템 관리") || !strings.Contains(system, "사용자 관리") || !strings.Contains(system, "CRS 소스") || !strings.Contains(system, "정책 버전") {
 		t.Fatalf("system administrator navigation is incomplete: %s", system)
 	}
 	admin := render(RoleEnterpriseAdmin)
@@ -57,7 +57,7 @@ func TestNavigationVisibilityByRole(t *testing.T) {
 	if strings.Contains(user, "시스템 관리") || strings.Contains(user, "사용자 관리") {
 		t.Fatalf("enterprise user navigation exposes restricted menus: %s", user)
 	}
-	if !strings.Contains(user, `class="primary-link active" href="/"`) {
+	if !strings.Contains(user, `class="side-link active" href="/"`) {
 		t.Fatalf("dashboard navigation is not active: %s", user)
 	}
 }

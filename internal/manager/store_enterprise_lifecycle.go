@@ -16,6 +16,18 @@ const (
 
 var ErrEnterpriseNotActive = errors.New("enterprise is not active")
 var ErrEnterpriseConfirmation = errors.New("enterprise name confirmation does not match")
+var ErrSystemEnterpriseProtected = errors.New("enterprise containing a system administrator is protected")
+
+const enterpriseManagementSelect = `SELECT e.id,e.name,e.status,e.terminated_at,e.created_at,
+  (SELECT COUNT(*) FROM admin_users u WHERE u.enterprise_id=e.id AND u.role='system_admin' AND u.deleted_at IS NULL),
+  (SELECT COUNT(*) FROM admin_users u WHERE u.enterprise_id=e.id),
+  (SELECT COUNT(*) FROM servers srv WHERE srv.enterprise_id=e.id),
+  ((SELECT COUNT(*) FROM enterprise_policies ep WHERE ep.enterprise_id=e.id) +
+   (SELECT COUNT(*) FROM policy_revisions pr WHERE pr.enterprise_id=e.id AND pr.enterprise_policy_id IS NULL)),
+  (SELECT COUNT(*) FROM server_groups sg WHERE sg.enterprise_id=e.id),
+  (SELECT COUNT(*) FROM enrollment_tokens et WHERE et.enterprise_id=e.id),
+  (SELECT COUNT(*) FROM enterprise_install_tokens it WHERE it.enterprise_id=e.id)
+FROM enterprises e`
 
 func lockActiveEnterprise(ctx context.Context, tx *sql.Tx, enterpriseID string) error {
 	var lockedID string
@@ -29,28 +41,30 @@ func lockActiveEnterprise(ctx context.Context, tx *sql.Tx, enterpriseID string) 
 }
 
 func (s *Store) ListEnterpriseManagement(ctx context.Context) ([]EnterpriseRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT e.id,e.name,e.status,e.terminated_at,e.created_at,
-  (SELECT COUNT(*) FROM admin_users u WHERE u.enterprise_id=e.id),
-  (SELECT COUNT(*) FROM servers srv WHERE srv.enterprise_id=e.id),
-  ((SELECT COUNT(*) FROM enterprise_policies ep WHERE ep.enterprise_id=e.id) +
-   (SELECT COUNT(*) FROM policy_revisions pr WHERE pr.enterprise_id=e.id AND pr.enterprise_policy_id IS NULL)),
-  (SELECT COUNT(*) FROM server_groups sg WHERE sg.enterprise_id=e.id),
-  (SELECT COUNT(*) FROM enrollment_tokens et WHERE et.enterprise_id=e.id),
-  (SELECT COUNT(*) FROM enterprise_install_tokens it WHERE it.enterprise_id=e.id)
-FROM enterprises e ORDER BY e.status,e.name`)
+	rows, err := s.db.QueryContext(ctx, enterpriseManagementSelect+` ORDER BY e.status,e.name`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := make([]EnterpriseRecord, 0)
 	for rows.Next() {
-		var item EnterpriseRecord
-		if err := rows.Scan(&item.ID, &item.Name, &item.Status, &item.TerminatedAt, &item.CreatedAt, &item.UserCount, &item.ServerCount, &item.PolicyCount, &item.GroupCount, &item.EnrollmentTokenCount, &item.InstallTokenCount); err != nil {
+		item, err := scanEnterpriseManagement(rows)
+		if err != nil {
 			return nil, err
 		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (s *Store) EnterpriseManagementByID(ctx context.Context, enterpriseID string) (EnterpriseRecord, error) {
+	return scanEnterpriseManagement(s.db.QueryRowContext(ctx, enterpriseManagementSelect+` WHERE e.id=?`, enterpriseID))
+}
+
+func scanEnterpriseManagement(row rowScanner) (EnterpriseRecord, error) {
+	var item EnterpriseRecord
+	err := row.Scan(&item.ID, &item.Name, &item.Status, &item.TerminatedAt, &item.CreatedAt, &item.SystemAdminCount, &item.UserCount, &item.ServerCount, &item.PolicyCount, &item.GroupCount, &item.EnrollmentTokenCount, &item.InstallTokenCount)
+	return item, err
 }
 
 func (s *Store) EnterprisePolicyActive(ctx context.Context, scopeEnterpriseID, policyID string) (bool, error) {
@@ -77,6 +91,13 @@ func (s *Store) DeleteOrTerminateEnterprise(ctx context.Context, enterpriseID, e
 	}
 	if expectedName == "" || expectedName != name {
 		return "", ErrEnterpriseConfirmation
+	}
+	var systemAdminCount uint64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_users WHERE enterprise_id=? AND role='system_admin' AND deleted_at IS NULL`, enterpriseID).Scan(&systemAdminCount); err != nil {
+		return "", err
+	}
+	if systemAdminCount > 0 {
+		return "", ErrSystemEnterpriseProtected
 	}
 
 	var dependencies uint64

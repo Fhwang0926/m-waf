@@ -17,6 +17,7 @@ type Agent struct {
 	WebServer                  string        `json:"web_server,omitempty"`
 	WebServerBinary            string        `json:"web_server_binary,omitempty"`
 	IntegrationMode            string        `json:"integration_mode,omitempty"`
+	InstallationMode           string        `json:"installation_mode,omitempty"`
 	EnrollmentToken            string        `json:"enrollment_token,omitempty"`
 	EnrollmentFile             string        `json:"enrollment_token_file,omitempty"`
 	CACertificate              string        `json:"ca_certificate"`
@@ -98,6 +99,9 @@ func LoadAgent(path string) (Agent, error) {
 	if cfg.IntegrationMode == "" {
 		cfg.IntegrationMode = "distro"
 	}
+	if cfg.InstallationMode == "" {
+		cfg.InstallationMode = "package"
+	}
 	if err := cfg.Validate(); err != nil {
 		return Agent{}, err
 	}
@@ -129,6 +133,9 @@ func (c Agent) Validate() error {
 	}
 	if c.IntegrationMode != "distro" && c.IntegrationMode != "external" {
 		return errors.New("integration_mode must be distro or external")
+	}
+	if c.InstallationMode != "package" && c.InstallationMode != "manual" {
+		return errors.New("installation_mode must be package or manual")
 	}
 	if c.WebServerBinary != "" && !filepath.IsAbs(c.WebServerBinary) {
 		return errors.New("web_server_binary must be an absolute path")

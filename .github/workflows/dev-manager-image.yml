@@ -1,4 +1,4 @@
-name: Verify changes and publish tagged Manager release
+name: Verify changes, publish latest, and create releases
 
 on:
   pull_request:
@@ -23,8 +23,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: mwaf-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: mwaf-${{ github.workflow }}-${{ github.event_name == 'push' && 'publication' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
   TEST_UBUNTU_IMAGE: docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
@@ -79,15 +79,22 @@ jobs:
         id: crs
         run: |
           set -eu
-          echo "version=$(go run ./cmd/mwaf-crs-updater -field version-number)" >> "$GITHUB_OUTPUT"
-          echo "archive=$(go run ./cmd/mwaf-crs-updater -field archive)" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(go run ./cmd/mwaf-crs-updater -field sha256)" >> "$GITHUB_OUTPUT"
+          for channel in stable lts; do
+            echo "${channel}_version=$(go run ./cmd/mwaf-crs-updater -channel "$channel" -field version-number)" >> "$GITHUB_OUTPUT"
+            echo "${channel}_tag=$(go run ./cmd/mwaf-crs-updater -channel "$channel" -field version)" >> "$GITHUB_OUTPUT"
+            echo "${channel}_commit=$(go run ./cmd/mwaf-crs-updater -channel "$channel" -field commit)" >> "$GITHUB_OUTPUT"
+            echo "${channel}_tag_object=$(go run ./cmd/mwaf-crs-updater -channel "$channel" -field tag-object-sha)" >> "$GITHUB_OUTPUT"
+            echo "${channel}_archive=$(go run ./cmd/mwaf-crs-updater -channel "$channel" -field archive)" >> "$GITHUB_OUTPUT"
+            echo "${channel}_sha256=$(go run ./cmd/mwaf-crs-updater -channel "$channel" -field sha256)" >> "$GITHUB_OUTPUT"
+          done
 
       - name: Restore locked CRS archive
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
-          path: dist/coreruleset.tar.gz
-          key: mwaf-crs-${{ runner.os }}-${{ runner.arch }}-${{ steps.crs.outputs.sha256 }}
+          path: |
+            dist/coreruleset.tar.gz
+            dist/coreruleset-lts.tar.gz
+          key: mwaf-crs-${{ runner.os }}-${{ runner.arch }}-${{ steps.crs.outputs.stable_sha256 }}-${{ steps.crs.outputs.lts_sha256 }}
 
       - name: Set up Docker Buildx for install-test fixture
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
@@ -115,9 +122,18 @@ jobs:
       - name: Build Agent and module packages
         env:
           COMMIT: ${{ github.sha }}
-          CRS_ARCHIVE: ${{ steps.crs.outputs.archive }}
-          CRS_SHA256: ${{ steps.crs.outputs.sha256 }}
-          CRS_VERSION: ${{ steps.crs.outputs.version }}
+          CRS_ARCHIVE: ${{ steps.crs.outputs.stable_archive }}
+          CRS_SHA256: ${{ steps.crs.outputs.stable_sha256 }}
+          CRS_VERSION: ${{ steps.crs.outputs.stable_version }}
+          CRS_TAG: ${{ steps.crs.outputs.stable_tag }}
+          CRS_COMMIT: ${{ steps.crs.outputs.stable_commit }}
+          CRS_TAG_OBJECT: ${{ steps.crs.outputs.stable_tag_object }}
+          CRS_LTS_ARCHIVE: ${{ steps.crs.outputs.lts_archive }}
+          CRS_LTS_SHA256: ${{ steps.crs.outputs.lts_sha256 }}
+          CRS_LTS_VERSION: ${{ steps.crs.outputs.lts_version }}
+          CRS_LTS_TAG: ${{ steps.crs.outputs.lts_tag }}
+          CRS_LTS_COMMIT: ${{ steps.crs.outputs.lts_commit }}
+          CRS_LTS_TAG_OBJECT: ${{ steps.crs.outputs.lts_tag_object }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -eu
@@ -125,7 +141,7 @@ jobs:
             refs/tags/v*) package_version=${GITHUB_REF_NAME#v} ;;
             *) package_version="0.1.0~ci.${RUN_NUMBER}" ;;
           esac
-          mkdir -p dist/packages dist/metadata dist/empty
+          mkdir -p dist/packages dist/metadata dist/policy-sources dist/policy-source-metadata dist/empty
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X github.com/Fhwang0926/m-waf/internal/version.Version=${package_version} -X github.com/Fhwang0926/m-waf/internal/version.Commit=${COMMIT}" -o dist/mwaf-agent ./cmd/mwaf-agent
           VERSION="$package_version" COMMIT="$COMMIT" AGENT_BINARY=dist/mwaf-agent OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/agent/deb/build.sh
           if [ -f dist/coreruleset.tar.gz ] && ! echo "$CRS_SHA256  dist/coreruleset.tar.gz" | sha256sum --check >/dev/null 2>&1; then
@@ -136,6 +152,26 @@ jobs:
             mv dist/coreruleset.tar.gz.download dist/coreruleset.tar.gz
           fi
           echo "$CRS_SHA256  dist/coreruleset.tar.gz" | sha256sum --check
+          if [ -f dist/coreruleset-lts.tar.gz ] && ! echo "$CRS_LTS_SHA256  dist/coreruleset-lts.tar.gz" | sha256sum --check >/dev/null 2>&1; then
+            rm -f dist/coreruleset-lts.tar.gz
+          fi
+          if [ ! -f dist/coreruleset-lts.tar.gz ]; then
+            curl -fL "$CRS_LTS_ARCHIVE" -o dist/coreruleset-lts.tar.gz.download
+            mv dist/coreruleset-lts.tar.gz.download dist/coreruleset-lts.tar.gz
+          fi
+          echo "$CRS_LTS_SHA256  dist/coreruleset-lts.tar.gz" | sha256sum --check
+          cp dist/coreruleset.tar.gz "dist/policy-sources/owasp-crs-stable-${CRS_VERSION}.tar.gz"
+          cp dist/coreruleset-lts.tar.gz "dist/policy-sources/owasp-crs-lts-${CRS_LTS_VERSION}.tar.gz"
+          go run ./cmd/mwaf-crs-index \
+            -archive "dist/policy-sources/owasp-crs-stable-${CRS_VERSION}.tar.gz" \
+            -output "dist/policy-sources/owasp-crs-stable-${CRS_VERSION}.json" \
+            -metadata-output "dist/policy-source-metadata/owasp-crs-stable-${CRS_VERSION}.json" \
+            -channel stable -version "$CRS_VERSION" -tag "$CRS_TAG" -commit "$CRS_COMMIT" -tag-object-sha "$CRS_TAG_OBJECT" -tag-signature-verified -archive-sha256 "$CRS_SHA256"
+          go run ./cmd/mwaf-crs-index \
+            -archive "dist/policy-sources/owasp-crs-lts-${CRS_LTS_VERSION}.tar.gz" \
+            -output "dist/policy-sources/owasp-crs-lts-${CRS_LTS_VERSION}.json" \
+            -metadata-output "dist/policy-source-metadata/owasp-crs-lts-${CRS_LTS_VERSION}.json" \
+            -channel lts -version "$CRS_LTS_VERSION" -tag "$CRS_LTS_TAG" -commit "$CRS_LTS_COMMIT" -tag-object-sha "$CRS_LTS_TAG_OBJECT" -tag-signature-verified -archive-sha256 "$CRS_LTS_SHA256"
           WEBSERVER=apache CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
           WEBSERVER=nginx CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
           WEBSERVER=apache INTEGRATION_MODE=external CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
@@ -147,7 +183,7 @@ jobs:
 
       - name: Install Agent and Apache module on clean Ubuntu
         env:
-          CRS_VERSION: ${{ steps.crs.outputs.version }}
+          CRS_VERSION: ${{ steps.crs.outputs.stable_version }}
         run: |
           set -eu
           docker run --rm --platform linux/amd64 -e EXPECTED_CRS_VERSION="$CRS_VERSION" \
@@ -168,7 +204,7 @@ jobs:
 
       - name: Install Agent and Nginx module on clean Ubuntu
         env:
-          CRS_VERSION: ${{ steps.crs.outputs.version }}
+          CRS_VERSION: ${{ steps.crs.outputs.stable_version }}
         run: |
           set -eu
           docker run --rm --platform linux/amd64 -e EXPECTED_CRS_VERSION="$CRS_VERSION" \
@@ -264,21 +300,25 @@ jobs:
           openssl genpkey -algorithm ED25519 -out dist/test-bundle-signing.key
           go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/test-bundle-signing.key -public-key-output dist/package-signing.pub -version "test-${COMMIT}" -commit "$COMMIT"
           test "$(find dist/bundle/packages -type f | wc -l)" -eq 5
+          test "$(find dist/bundle/policy-sources -type f -name '*.json' | wc -l)" -eq 2
+          test "$(find dist/bundle/policy-sources -type f -name '*.tar.gz' | wc -l)" -eq 2
 
       - name: Upload verified package inputs
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v'))
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: verified-package-inputs
           path: |
             dist/packages
             dist/metadata
+            dist/policy-sources
+            dist/policy-source-metadata
           if-no-files-found: error
           retention-days: 3
 
   publish:
-    name: Publish tagged Manager image
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    name: Publish Manager image
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v'))
     needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -311,10 +351,13 @@ jobs:
           path: dist
 
       - name: Sign embedded package bundle
+        id: bundle
         env:
           BUNDLE_SIGNING_KEY_B64: ${{ secrets.RELEASE_BUNDLE_SIGNING_KEY_B64 }}
           COMMIT: ${{ github.sha }}
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REF: ${{ github.ref }}
+          RUN_NUMBER: ${{ github.run_number }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
           GHCR_OWNER: ${{ github.repository_owner }}
@@ -322,7 +365,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist/empty
           test "$(find dist/packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 5
-          test -n "$BUNDLE_SIGNING_KEY_B64" || { echo "RELEASE_BUNDLE_SIGNING_KEY_B64 is required for tagged releases" >&2; exit 1; }
+          test -n "$BUNDLE_SIGNING_KEY_B64" || { echo "RELEASE_BUNDLE_SIGNING_KEY_B64 is required for published images" >&2; exit 1; }
           printf '%s' "$BUNDLE_SIGNING_KEY_B64" | base64 --decode > dist/bundle-signing.key
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
           package_versions=dist/ghcr-package-versions.json
@@ -331,11 +374,20 @@ jobs:
             -H "Authorization: Bearer $GHCR_TOKEN" \
             -H 'X-GitHub-Api-Version: 2022-11-28' \
             "https://api.github.com/users/$GHCR_OWNER/packages/container/m-waf-manager/versions?per_page=100")
-          current_version=${RELEASE_TAG#v}
-          previous_tag=""
+          is_tagged_release=false
+          bundle_version="dev-${RUN_NUMBER}-${COMMIT}"
+          current_version=""
+          previous_image=""
+          case "$RELEASE_REF" in
+            refs/tags/v*)
+              is_tagged_release=true
+              current_version=${RELEASE_TAG#v}
+              bundle_version=$RELEASE_TAG
+              ;;
+          esac
           case "$package_status" in
             404)
-              echo "No previous GHCR package exists; assembling initial release bundle for $RELEASE_TAG"
+              echo "No previous GHCR package exists; assembling an initial bundle"
               ;;
             200)
               jq -r '
@@ -343,26 +395,34 @@ jobs:
                   | select(test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))]
                 | unique[]
               ' "$package_versions" | sort -Vu > dist/ghcr-release-tags.txt
-              cp dist/ghcr-release-tags.txt dist/ghcr-release-candidates.txt
-              printf '%s\n' "$current_version" >> dist/ghcr-release-candidates.txt
-              sort -Vu -o dist/ghcr-release-candidates.txt dist/ghcr-release-candidates.txt
-              latest_known_tag=$(tail -n 1 dist/ghcr-release-candidates.txt)
-              if [ "$latest_known_tag" != "$current_version" ]; then
-                echo "Published GHCR release $latest_known_tag is newer than $current_version; refusing an out-of-order release" >&2
-                exit 1
-              fi
-              previous_tag=$(awk -v current="$current_version" '
-                $0 == current { print prior; found=1; exit }
-                { prior=$0 }
-                END { if (!found) exit 2 }
-              ' dist/ghcr-release-candidates.txt) || {
-                echo "Unable to order GHCR release tags for $current_version" >&2
-                exit 1
-              }
-              if [ -n "$previous_tag" ]; then
-                echo "Using GHCR release $previous_tag as the verified rollback source"
+              if [ "$is_tagged_release" = true ]; then
+                cp dist/ghcr-release-tags.txt dist/ghcr-release-candidates.txt
+                printf '%s\n' "$current_version" >> dist/ghcr-release-candidates.txt
+                sort -Vu -o dist/ghcr-release-candidates.txt dist/ghcr-release-candidates.txt
+                latest_known_tag=$(tail -n 1 dist/ghcr-release-candidates.txt)
+                if [ "$latest_known_tag" != "$current_version" ]; then
+                  echo "Published GHCR release $latest_known_tag is newer than $current_version; refusing an out-of-order release" >&2
+                  exit 1
+                fi
+                previous_tag=$(awk -v current="$current_version" '
+                  $0 == current { print prior; found=1; exit }
+                  { prior=$0 }
+                  END { if (!found) exit 2 }
+                ' dist/ghcr-release-candidates.txt) || {
+                  echo "Unable to order GHCR release tags for $current_version" >&2
+                  exit 1
+                }
+                if [ -n "$previous_tag" ]; then
+                  previous_image="ghcr.io/fhwang0926/m-waf-manager:$previous_tag"
+                  echo "Using GHCR release $previous_tag as the verified rollback source"
+                else
+                  echo "No earlier semantic GHCR release exists; assembling initial release bundle for $RELEASE_TAG"
+                fi
+              elif jq -e 'any(.[].metadata.container.tags[]?; . == "latest")' "$package_versions" >/dev/null; then
+                previous_image="ghcr.io/fhwang0926/m-waf-manager:latest"
+                echo "Using the previously published latest image as the development rollback source"
               else
-                echo "No earlier semantic GHCR release exists; assembling initial release bundle for $RELEASE_TAG"
+                echo "No previous latest image exists; assembling an initial development bundle"
               fi
               ;;
             *)
@@ -371,8 +431,7 @@ jobs:
               ;;
           esac
 
-          if [ -n "$previous_tag" ]; then
-            previous_image="ghcr.io/fhwang0926/m-waf-manager:$previous_tag"
+          if [ -n "$previous_image" ]; then
             docker pull "$previous_image"
             previous_container=$(docker create "$previous_image")
             trap 'docker rm -f "$previous_container" >/dev/null 2>&1 || true' EXIT INT TERM
@@ -381,14 +440,15 @@ jobs:
             docker cp "$previous_container:/etc/mwaf-manager/package-signing.pub" dist/previous-package-signing.pub
             docker rm "$previous_container"
             trap - EXIT INT TERM
-            go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/bundle-signing.key -public-key-output dist/package-signing.pub -version "$RELEASE_TAG" -commit "$COMMIT" -previous-bundle dist/previous-bundle -previous-public-key dist/previous-package-signing.pub
+            go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/bundle-signing.key -public-key-output dist/package-signing.pub -version "$bundle_version" -commit "$COMMIT" -previous-bundle dist/previous-bundle -previous-public-key dist/previous-package-signing.pub
             bundle_package_count=$(find dist/bundle/packages -type f | wc -l)
             test "$bundle_package_count" -ge 8
             test "$bundle_package_count" -le 10
           else
-            go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/bundle-signing.key -public-key-output dist/package-signing.pub -version "$RELEASE_TAG" -commit "$COMMIT"
+            go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/bundle-signing.key -public-key-output dist/package-signing.pub -version "$bundle_version" -commit "$COMMIT"
             test "$(find dist/bundle/packages -type f | wc -l)" -eq 5
           fi
+          echo "version=$bundle_version" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
@@ -409,7 +469,8 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             type=sha,prefix=sha-,format=long
 
       - name: Build and push Manager image with verified packages
@@ -423,10 +484,10 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ steps.bundle.outputs.version }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ github.event.repository.updated_at }}
-            BUNDLE_VERSION=${{ github.ref_name }}
+            BUNDLE_VERSION=${{ steps.bundle.outputs.version }}
           cache-from: type=gha,scope=mwaf-manager-amd64
           cache-to: type=gha,scope=mwaf-manager-amd64,mode=max,ignore-error=true
 
@@ -436,3 +497,45 @@ jobs:
           subject-name: ghcr.io/fhwang0926/m-waf-manager
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+  release:
+    name: Promote version tag to main and create release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+
+      - name: Verify promotion ancestry and update main
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch origin dev
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/dev || {
+            echo "$RELEASE_TAG must point to a commit already contained in dev" >&2
+            exit 1
+          }
+          if git ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
+            git fetch origin main
+            git merge-base --is-ancestor origin/main "$GITHUB_SHA" || {
+              echo "main cannot be fast-forwarded to $RELEASE_TAG" >&2
+              exit 1
+            }
+          fi
+          git push origin "$GITHUB_SHA:refs/heads/main"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 && exit 0
+          gh release create "$RELEASE_TAG" --verify-tag --target "$GITHUB_SHA" --generate-notes --title "M-WAF $RELEASE_TAG"

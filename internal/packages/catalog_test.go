@@ -79,4 +79,8 @@ func TestLoadAndResolveCompatibleModule(t *testing.T) {
 	if _, module, err := catalog.Resolve(model.Inventory{OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", WebServerVersion: "1.30.4", WebServerBuild: "custom", IntegrationMode: model.IntegrationModeExternal}); err != nil || module.ID != "nginx-external" {
 		t.Fatalf("expected external integration package, module=%s err=%v", module.ID, err)
 	}
+	manualAgent, err := catalog.ResolveAgent(model.Inventory{OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", InstallationMode: "manual"})
+	if err != nil || manualAgent.ID != "agent" {
+		t.Fatalf("expected Agent-only resolution for a manual Connector, agent=%s err=%v", manualAgent.ID, err)
+	}
 }

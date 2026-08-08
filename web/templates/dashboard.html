@@ -1,27 +1,42 @@
 {{define "dashboard.html"}}
 <!doctype html>
 <html lang="ko">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>M-WAF 대시보드</title>
-  <link rel="stylesheet" href="/static/app.css">
-</head>
-<body>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 운영 현황</title><link rel="stylesheet" href="/static/app.css"></head>
+<body data-overview-page>
   {{template "navigation" .}}
   <main class="container">
-    <div class="page-head"><div><p class="eyebrow">대시보드</p><h1>운영 현황</h1><p class="muted">보호 서버와 최근 24시간 보안 이벤트를 확인합니다.</p></div><div class="actions"><span class="badge ok">Manager 정상</span><span class="badge {{if .Ready}}info{{else}}warn{{end}}">Package bundle {{if .Ready}}{{.BundleVersion}}{{else}}준비 필요{{end}}</span></div></div>
+    <div class="page-head"><div><p class="eyebrow">관제</p><h1>운영 현황</h1><p class="muted">보호 상태를 확인하고 실패·오프라인·승인 대기 작업부터 처리합니다.</p></div><div class="actions"><span class="badge {{if .BundleReady}}ok{{else}}danger{{end}}" title="{{.BundleStatusTitle}}"><span class="status-dot {{if .BundleReady}}ok{{else}}danger{{end}}"></span>Package bundle {{if .BundleReady}}{{.BundleVersion}}{{else}}준비 필요{{end}}</span></div></div>
     {{if .Notice}}<div class="alert warn" role="alert"><strong>운영 확인 필요</strong><div>{{.Notice}}</div></div>{{end}}
-    <section class="stats">
-      <article><span>활성 서버</span><strong>{{.Summary.ActiveServers}}</strong><small>등록 해제 서버 제외</small></article>
-      <article><span>온라인 서버</span><strong>{{.Summary.OnlineServers}}</strong><small>2분 이내 heartbeat</small></article>
-      <article><span>24시간 이벤트</span><strong>{{.Summary.Events24Hours}}</strong><small>탐지와 차단 합계</small></article>
-      <article><span>24시간 차단</span><strong>{{.Summary.Blocked24Hours}}</strong><small>차단 처리된 요청</small></article>
+
+    <section class="panel search-panel compact" aria-labelledby="overview-filter-heading"><div class="search-panel-head"><div><h2 id="overview-filter-heading">관제 범위</h2><small>기간과 서버를 먼저 선택하고 필요하면 기업·그룹 범위를 지정합니다.</small></div><span class="badge">{{.Overview.RangeLabel}}</span></div><form class="search-form" method="get" action="/"><div class="search-primary two"><label>시간 범위<select name="range"><option value="1h" {{if eq .Overview.Range "1h"}}selected{{end}}>최근 1시간</option><option value="24h" {{if eq .Overview.Range "24h"}}selected{{end}}>최근 24시간</option><option value="7d" {{if eq .Overview.Range "7d"}}selected{{end}}>최근 7일</option></select></label><label>서버<select name="server_id"><option value="">전체 서버</option>{{range .Servers}}<option value="{{.ID}}" {{if eq $.FilterServer .ID}}selected{{end}}>{{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}}</option>{{end}}</select></label></div>{{if or .IsSystemAdmin .Groups}}<details class="search-advanced" {{if or .FilterEnterprise .FilterGroup}}open{{end}}><summary><span>상세 범위</span><small>{{if .IsSystemAdmin}}기업과 {{end}}서버 그룹</small></summary><div class="search-advanced-grid two">{{if .IsSystemAdmin}}<label>기업<select name="enterprise_id"><option value="">전체 기업</option>{{range .Enterprises}}<option value="{{.ID}}" {{if eq $.FilterEnterprise .ID}}selected{{end}}>{{.Name}}</option>{{end}}</select></label>{{end}}<label>그룹<select name="group_id"><option value="">전체 그룹</option>{{range .Groups}}<option value="{{.ID}}" {{if eq $.FilterGroup .ID}}selected{{end}}>{{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}}</option>{{end}}</select></label></div></details>{{end}}<div class="search-footer"><div></div><div class="actions">{{if or .FilterEnterprise .FilterGroup .FilterServer (ne .Overview.Range "24h")}}<a class="search-reset" href="/">조건 지우기</a>{{end}}<button type="submit">범위 적용</button></div></div></form></section>
+
+    <section class="stats" aria-label="핵심 운영 지표">
+      <article><span>전체 탐지</span><strong class="metric-value" data-overview-field="event_count">{{.Overview.Summary.EventCount}}</strong><small>{{.Overview.RangeLabel}}</small></article>
+      <article><span>차단 요청</span><strong class="metric-value" data-overview-field="blocked_count">{{.Overview.Summary.BlockedCount}}</strong><small>차단률 <span data-overview-field="block_rate">{{printf "%.1f" .Overview.Summary.BlockRate}}%</span></small></article>
+      <article><span>온라인 서버</span><strong class="metric-value"><span data-overview-field="online_servers">{{.Overview.Summary.OnlineServers}}</span> / <span data-overview-field="active_servers">{{.Overview.Summary.ActiveServers}}</span></strong><small>2분 이내 Agent 수신</small></article>
+      <article><span>실패·승인 대기</span><strong class="metric-value"><span data-overview-field="failed_rollouts">{{.Overview.Summary.FailedRollouts}}</span> / <span data-overview-field="pending_approval">{{.Overview.Summary.PendingApproval}}</span></strong><small>실패 배포 / 승인 대기</small></article>
     </section>
-    <section class="panel"><div class="panel-head"><h2>최근 등록 서버</h2><a href="/servers">전체 보기</a></div>
-      {{if .Servers}}<div class="table-scroll"><table class="table-wide"><thead><tr>{{if .IsSystemAdmin}}<th>기업</th>{{end}}<th>서버</th><th>웹서버</th><th>상태</th><th>마지막 연결</th></tr></thead><tbody>{{range .Servers}}<tr>{{if $.IsSystemAdmin}}<td>{{.EnterpriseName}}</td>{{end}}<td><strong>{{.Name}}</strong></td><td>{{.Inventory.WebServer}} {{.Inventory.WebServerVersion}}<small>{{if .Inventory.IntegrationMode}}{{.Inventory.IntegrationMode}}{{else}}distro{{end}}</small></td><td><span class="badge {{.StatusClass}}" title="{{.Status}}">{{.StatusLabel}}</span></td><td>{{if .LastHeartbeatAt.Valid}}{{.LastHeartbeatAt.Time.Format "2006-01-02 15:04:05"}} UTC{{else}}대기 중{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<div class="empty">등록된 서버가 없습니다.{{if .CanOperate}}<br><a class="button" href="/enrollments/new">첫 서버 설치 및 등록</a>{{end}}</div>{{end}}
+
+    <div class="operations-layout">
+      <section class="panel"><div class="panel-head"><div><h2>이벤트 추이</h2><small>탐지와 실제 차단 요청을 함께 표시합니다.</small></div><span class="badge info">{{.Overview.RangeLabel}}</span></div>
+        <div class="trend-chart" data-overview-chart aria-label="시간별 이벤트와 차단 추이"></div>
+        <div class="chart-legend"><span><i class="chart-swatch"></i>전체 탐지</span><span><i class="chart-swatch blocked"></i>차단</span></div>
+        <table class="sr-only"><caption>시간별 이벤트 수치</caption><thead><tr><th>시각</th><th>이벤트</th><th>차단</th></tr></thead><tbody data-overview-series>{{range .Overview.Series}}<tr data-at="{{.At.Format "2006-01-02T15:04:05Z07:00"}}" data-events="{{.Events}}" data-blocked="{{.Blocked}}"><td>{{.At.Format "2006-01-02 15:04"}}</td><td>{{.Events}}</td><td>{{.Blocked}}</td></tr>{{end}}</tbody></table>
+      </section>
+      <section class="panel"><div class="panel-head"><div><h2>조치 필요</h2><small>운영 영향도가 높은 순서로 확인하세요.</small></div><span class="badge {{if .Overview.Actions}}warn{{else}}ok{{end}}" data-action-count>{{len .Overview.Actions}}건</span></div>
+        <div class="action-list" data-overview-actions>{{range .Overview.Actions}}<a class="action-item" href="{{.URL}}"><span class="status-dot {{.Level}}"></span><span><strong>{{.Title}} · {{.TargetName}}</strong><small>{{.Detail}}</small></span><span class="action-arrow">열기</span></a>{{else}}<div class="empty">즉시 조치가 필요한 항목이 없습니다.</div>{{end}}</div>
+      </section>
+    </div>
+
+    <section class="rank-grid" aria-label="상위 이벤트 순위">
+      <article class="panel"><div class="panel-head"><h2>상위 Rule</h2><a href="/events">전체 보기</a></div><ol class="rank-list" data-overview-rank="top_rules">{{range .Overview.TopRules}}<li><span class="rank-number"></span><a class="rank-label mono" href="{{.URL}}">{{.Label}}</a><span class="rank-value">{{.Count}}건</span></li>{{else}}<li class="muted">수집된 Rule이 없습니다.</li>{{end}}</ol></article>
+      <article class="panel"><div class="panel-head"><h2>상위 요청 URL</h2><a href="/events">전체 보기</a></div><ol class="rank-list" data-overview-rank="top_uris">{{range .Overview.TopURIs}}<li><span class="rank-number"></span><a class="rank-label mono" href="{{.URL}}" title="{{.Label}}">{{.Label}}</a><span class="rank-value">{{.Count}}건</span></li>{{else}}<li class="muted">수집된 URL이 없습니다.</li>{{end}}</ol></article>
+      <article class="panel"><div class="panel-head"><h2>상위 서버</h2><a href="/servers">전체 보기</a></div><ol class="rank-list" data-overview-rank="top_servers">{{range .Overview.TopServers}}<li><span class="rank-number"></span><a class="rank-label" href="{{.URL}}">{{.Label}}</a><span class="rank-value">{{.Count}}건</span></li>{{else}}<li class="muted">수집된 서버 이벤트가 없습니다.</li>{{end}}</ol></article>
+    </section>
+
+    <section class="panel"><div class="panel-head"><div><h2>최근 중요 이벤트</h2><small>행을 선택하면 요청의 전체 Rule 묶음을 확인할 수 있습니다.</small></div><a href="/events">이벤트 관제 열기</a></div>
+      {{if .Overview.Recent}}<div class="table-scroll"><table class="table-wide"><thead><tr><th>시간</th>{{if .IsSystemAdmin}}<th>기업</th>{{end}}<th>서버</th><th>요청</th><th>Rule</th><th>처리</th></tr></thead><tbody>{{range .Overview.Recent}}<tr><td>{{.OccurredAt.Format "01-02 15:04:05"}}<small>UTC</small></td>{{if $.IsSystemAdmin}}<td>{{.EnterpriseName}}</td>{{end}}<td><a href="/servers/{{.AgentID}}">{{.ServerName}}</a></td><td><a class="mono cell-truncate" href="/events?event={{.ID}}">{{.Method}} {{.URI}}</a></td><td>{{.RuleID}}<small>{{.SeverityLabel}}</small></td><td><span class="badge {{if .Blocked}}danger{{else}}warn{{end}}"><span class="status-dot {{if .Blocked}}danger{{else}}warn{{end}}"></span>{{if .Blocked}}차단{{else}}탐지{{end}}</span></td></tr>{{end}}</tbody></table></div>{{else}}<div class="empty">선택한 범위에 이벤트가 없습니다.</div>{{end}}
     </section>
   </main>
-</body>
-</html>
+</body></html>
 {{end}}

@@ -11,6 +11,7 @@ web_server=""
 web_server_binary=""
 server_name=""
 integration_mode="distro"
+installation_mode="package"
 integration_config=""
 audit_log="/var/log/modsecurity/audit.jsonl"
 web_group="www-data"
@@ -28,6 +29,7 @@ while [ "$#" -gt 0 ]; do
     --webserver) web_server=$2; shift 2 ;;
     --webserver-bin) web_server_binary=$2; shift 2 ;;
     --integration) integration_mode=$2; shift 2 ;;
+    --module-install) installation_mode=$2; shift 2 ;;
     --integration-config) integration_config=$2; shift 2 ;;
     --audit-log) audit_log=$2; shift 2 ;;
     --web-group) web_group=$2; shift 2 ;;
@@ -73,6 +75,11 @@ if [ -z "$token" ]; then
 fi
 [ ! -s /var/lib/mwaf-agent/server-id ] || { echo "this server is already enrolled; use the existing M-WAF Agent identity" >&2; exit 1; }
 case "$integration_mode" in distro|external) ;; *) echo "--integration must be distro or external" >&2; exit 2 ;; esac
+case "$installation_mode" in package|manual) ;; *) echo "--module-install must be package or manual" >&2; exit 2 ;; esac
+if [ "$installation_mode" = manual ] && [ "$integration_mode" != external ]; then
+  echo "manual module installation requires --integration external" >&2
+  exit 2
+fi
 if [ -n "$web_server_binary" ]; then
   [ -n "$web_server" ] || { echo "--webserver is required with --webserver-bin" >&2; exit 2; }
   case "$web_server_binary" in /*) ;; *) echo "--webserver-bin must be an absolute path" >&2; exit 2 ;; esac
@@ -145,8 +152,8 @@ fi
 hostname_value=$(hostname 2>/dev/null || printf 'unknown')
 [ -n "$server_name" ] || server_name=$hostname_value
 if [ -z "$token" ]; then
-  session_payload=$(printf '{"name":"%s","inventory":{"hostname":"%s","os_id":"%s","os_version":"%s","architecture":"%s","web_server":"%s","web_server_version":"%s","web_server_build_hash":"%s","integration_mode":"%s"}}' \
-    "$(json_escape "$server_name")" "$(json_escape "$hostname_value")" "$(json_escape "$os_id")" "$(json_escape "$os_version")" "$architecture" "$web_server" "$(json_escape "$web_version")" "$web_build" "$integration_mode")
+session_payload=$(printf '{"name":"%s","inventory":{"hostname":"%s","os_id":"%s","os_version":"%s","architecture":"%s","web_server":"%s","web_server_version":"%s","web_server_build_hash":"%s","integration_mode":"%s","installation_mode":"%s"}}' \
+    "$(json_escape "$server_name")" "$(json_escape "$hostname_value")" "$(json_escape "$os_id")" "$(json_escape "$os_version")" "$architecture" "$web_server" "$(json_escape "$web_version")" "$web_build" "$integration_mode" "$installation_mode")
   install_auth_file=$(mktemp)
   chmod 0600 "$install_auth_file"
   trap 'rm -f "$install_auth_file"' EXIT INT TERM
@@ -156,42 +163,145 @@ if [ -z "$token" ]; then
   rm -f "$install_auth_file"
   [ -n "$token" ] || { echo "Manager did not issue an enrollment session" >&2; exit 1; }
 fi
-payload=$(printf '{"token":"%s","inventory":{"hostname":"%s","os_id":"%s","os_version":"%s","architecture":"%s","web_server":"%s","web_server_version":"%s","web_server_build_hash":"%s","integration_mode":"%s"}}' \
-  "$(json_escape "$token")" "$(json_escape "$hostname_value")" "$(json_escape "$os_id")" "$(json_escape "$os_version")" "$architecture" "$web_server" "$(json_escape "$web_version")" "$web_build" "$integration_mode")
+payload=$(printf '{"token":"%s","inventory":{"hostname":"%s","os_id":"%s","os_version":"%s","architecture":"%s","web_server":"%s","web_server_version":"%s","web_server_build_hash":"%s","integration_mode":"%s","installation_mode":"%s"}}' \
+  "$(json_escape "$token")" "$(json_escape "$hostname_value")" "$(json_escape "$os_id")" "$(json_escape "$os_version")" "$architecture" "$web_server" "$(json_escape "$web_version")" "$web_build" "$integration_mode" "$installation_mode")
 
 resolution=$(curl --fail --silent --show-error --cacert "$ca_file" -H 'Content-Type: application/json' -H 'Accept: text/plain' --data "$payload" "$manager/bootstrap/v1/packages/resolve")
 agent_url=$(printf '%s\n' "$resolution" | sed -n '2p')
 agent_sha=$(printf '%s\n' "$resolution" | sed -n '3p')
 module_url=$(printf '%s\n' "$resolution" | sed -n '4p')
 module_sha=$(printf '%s\n' "$resolution" | sed -n '5p')
-[ -n "$agent_url" ] && [ -n "$agent_sha" ] && [ -n "$module_url" ] && [ -n "$module_sha" ] || { echo "invalid package resolution" >&2; exit 1; }
+[ -n "$agent_url" ] && [ -n "$agent_sha" ] || { echo "invalid Agent package resolution" >&2; exit 1; }
+if [ "$installation_mode" = package ]; then
+  [ -n "$module_url" ] && [ -n "$module_sha" ] || { echo "invalid module package resolution" >&2; exit 1; }
+fi
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 agent_file="$tmp_dir/mwaf-agent.deb"
 module_file="$tmp_dir/mwaf-module.deb"
 curl --fail --silent --show-error --cacert "$ca_file" -H "Authorization: Bearer $token" -o "$agent_file" "$agent_url"
-curl --fail --silent --show-error --cacert "$ca_file" -H "Authorization: Bearer $token" -o "$module_file" "$module_url"
+if [ "$installation_mode" = package ]; then
+  curl --fail --silent --show-error --cacert "$ca_file" -H "Authorization: Bearer $token" -o "$module_file" "$module_url"
+fi
 
 actual_agent=$(hash_text < "$agent_file")
-actual_module=$(hash_text < "$module_file")
 [ "$actual_agent" = "$agent_sha" ] || { echo "agent checksum mismatch" >&2; exit 1; }
-[ "$actual_module" = "$module_sha" ] || { echo "module checksum mismatch" >&2; exit 1; }
+if [ "$installation_mode" = package ]; then
+  actual_module=$(hash_text < "$module_file")
+  [ "$actual_module" = "$module_sha" ] || { echo "module checksum mismatch" >&2; exit 1; }
+fi
 
 case "$os_id" in
   ubuntu|debian)
     command -v apt-get >/dev/null 2>&1 || { echo "apt-get is required" >&2; exit 1; }
-    DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y "$module_file" "$agent_file"
+    if [ "$installation_mode" = package ]; then
+      DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y "$module_file" "$agent_file"
+    else
+      DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y "$agent_file" logrotate
+    fi
     ;;
   *) echo "unsupported distribution: $os_id" >&2; exit 1 ;;
 esac
 
-if [ "$integration_mode" = external ]; then
+if [ "$integration_mode" = external ] && [ "$installation_mode" = package ]; then
   [ -x /usr/lib/mwaf/configure-external ] || { echo "external integration helper is missing from module package" >&2; exit 1; }
   set -- --webserver "$web_server" --binary "$web_cmd" --integration-config "$integration_config" --audit-log "$audit_log" --web-group "$web_group"
   if [ -n "$modsecurity_base" ]; then set -- "$@" --modsecurity-base "$modsecurity_base"; fi
   if [ "$reload_web_server" -eq 1 ]; then set -- "$@" --reload; fi
   /usr/lib/mwaf/configure-external "$@"
+fi
+
+if [ "$installation_mode" = manual ]; then
+  marker="# Managed by M-WAF manual integration."
+  if [ "$web_server" = apache ]; then
+    "$web_cmd" -M 2>&1 | grep -q security2_module || { echo "Apache security2_module is not loaded" >&2; exit 1; }
+  else
+    { "$web_cmd" -V; "$web_cmd" -T; } 2>&1 | grep -Eq 'modsecurity|ngx_http_modsecurity_module' || { echo "Nginx ModSecurity connector is not loaded" >&2; exit 1; }
+  fi
+  install -d -m 0750 /etc/mwaf/revisions/manual-bootstrap
+  if [ ! -e /etc/mwaf/active ]; then
+    printf '%s\n' '# Managed by M-WAF Agent.' 'SecRuleEngine DetectionOnly' 'SecRequestBodyAccess On' > /etc/mwaf/revisions/manual-bootstrap/00-engine.conf
+    printf '%s\n' '# Compatibility entry managed by M-WAF Agent.' > /etc/mwaf/revisions/manual-bootstrap/main.conf
+    chmod 0640 /etc/mwaf/revisions/manual-bootstrap/*.conf
+    ln -s /etc/mwaf/revisions/manual-bootstrap /etc/mwaf/active
+  fi
+  install -d -o root -g "$web_group" -m 0770 "$(dirname "$audit_log")"
+  touch "$audit_log"
+  chown root:"$web_group" "$audit_log"
+  chmod 0660 "$audit_log"
+  cat > /etc/logrotate.d/mwaf-modsecurity-manual <<EOF
+$audit_log {
+    daily
+    rotate 14
+    maxsize 100M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su root $web_group
+}
+EOF
+  integration_backup="$tmp_dir/integration.backup"
+  integration_existed=0
+  if [ -e "$integration_config" ]; then
+    grep -Fqx "$marker" "$integration_config" || { echo "refusing to replace an unmanaged integration config: $integration_config" >&2; exit 1; }
+    cp -p "$integration_config" "$integration_backup"
+    integration_existed=1
+  fi
+  install -d -m 0755 "$(dirname "$integration_config")"
+  if [ "$web_server" = apache ]; then
+    cat > "$integration_config" <<EOF
+$marker
+<IfModule security2_module>
+    SecAuditEngine RelevantOnly
+    SecAuditLogRelevantStatus "^(?:5|4(?!04))"
+    SecAuditLogParts ABIJDEFHZ
+    SecAuditLogType Serial
+    SecAuditLog $audit_log
+    SecAuditLogFormat JSON
+    Include /etc/mwaf/active/*.conf
+</IfModule>
+EOF
+  else
+    install -d -m 0750 /etc/mwaf/manual
+    engine_config=/etc/mwaf/manual/modsecurity.conf
+    {
+      printf '%s\n' "$marker"
+      if [ -n "$modsecurity_base" ]; then printf 'Include %s\n' "$modsecurity_base"; fi
+      printf '%s\n' \
+        'SecAuditEngine RelevantOnly' \
+        'SecAuditLogRelevantStatus "^(?:5|4(?!04))"' \
+        'SecAuditLogParts ABIJDEFHZ' \
+        'SecAuditLogType Serial' \
+        "SecAuditLog $audit_log" \
+        'SecAuditLogFormat JSON' \
+        'Include /etc/mwaf/active/*.conf'
+    } > "$engine_config"
+    cat > "$integration_config" <<EOF
+$marker
+modsecurity on;
+modsecurity_rules_file $engine_config;
+EOF
+  fi
+  chmod 0640 "$integration_config"
+  if [ "$web_server" = apache ]; then
+    configtest_output=$("$web_cmd" configtest 2>&1) || configtest_status=$?
+  else
+    configtest_output=$("$web_cmd" -t 2>&1) || configtest_status=$?
+  fi
+  if [ "${configtest_status:-0}" -ne 0 ]; then
+    if [ "$integration_existed" -eq 1 ]; then cp -p "$integration_backup" "$integration_config"; else rm -f "$integration_config"; fi
+    echo "web-server configtest failed; manual M-WAF config was restored: $configtest_output" >&2
+    exit 1
+  fi
+  install -d -m 0750 /var/lib/mwaf-agent
+  printf '%s\n' "manual:$web_server:$web_version:$web_build" > /var/lib/mwaf-agent/connector.version
+  chmod 0640 /var/lib/mwaf-agent/connector.version
+  if [ "$reload_web_server" -eq 1 ]; then
+    if [ "$web_server" = apache ]; then "$web_cmd" graceful; else "$web_cmd" -s reload; fi
+  fi
 fi
 
 install -d -m 0750 /etc/mwaf-agent /var/lib/mwaf-agent /var/lib/mwaf-agent/spool
@@ -205,6 +315,7 @@ cat > /etc/mwaf-agent/agent.json <<EOF
   "web_server": "$(json_escape "$web_server")",
   "web_server_binary": "$(json_escape "$web_cmd")",
   "integration_mode": "$(json_escape "$integration_mode")",
+  "installation_mode": "$(json_escape "$installation_mode")",
   "enrollment_token_file": "/etc/mwaf-agent/enrollment.token",
   "ca_certificate": "/etc/mwaf-agent/manager-ca.crt",
   "certificate": "/var/lib/mwaf-agent/agent.crt",
@@ -225,4 +336,4 @@ cat > /etc/mwaf-agent/agent.json <<EOF
 EOF
 chmod 0640 /etc/mwaf-agent/agent.json
 systemctl enable --now mwaf-agent
-echo "M-WAF Agent and $web_server $integration_mode integration were installed from Manager bundle"
+echo "M-WAF Agent and $web_server $integration_mode/$installation_mode integration were installed"

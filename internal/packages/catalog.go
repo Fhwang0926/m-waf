@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Fhwang0926/m-waf/internal/crsindex"
 	"github.com/Fhwang0926/m-waf/internal/model"
 )
 
@@ -29,6 +30,8 @@ type Catalog struct {
 	raw      []byte
 	manifest model.BundleManifest
 	byID     map[string]model.PackageArtifact
+	sources  map[string]model.PolicySourceArtifact
+	indexes  map[string]crsindex.Index
 }
 
 func Load(root, publicKeyPath string, expectedCommit string, allowUnsigned bool) (*Catalog, error) {
@@ -47,8 +50,11 @@ func Load(root, publicKeyPath string, expectedCommit string, allowUnsigned bool)
 	if err := dec.Decode(&manifest); err != nil {
 		return nil, fmt.Errorf("decode bundle manifest: %w", err)
 	}
-	if manifest.SchemaVersion != 1 {
+	if manifest.SchemaVersion != 1 && manifest.SchemaVersion != 2 {
 		return nil, fmt.Errorf("unsupported bundle schema version %d", manifest.SchemaVersion)
+	}
+	if manifest.SchemaVersion == 2 && len(manifest.PolicySources) == 0 {
+		return nil, errors.New("bundle schema v2 requires policy_sources")
 	}
 	if manifest.BundleVersion == "" || manifest.SourceCommit == "" {
 		return nil, errors.New("bundle version and source commit are required")
@@ -57,7 +63,10 @@ func Load(root, publicKeyPath string, expectedCommit string, allowUnsigned bool)
 		return nil, fmt.Errorf("bundle commit %q does not match manager commit %q", manifest.SourceCommit, expectedCommit)
 	}
 
-	catalog := &Catalog{root: root, raw: raw, manifest: manifest, byID: make(map[string]model.PackageArtifact, len(manifest.Artifacts))}
+	catalog := &Catalog{
+		root: root, raw: raw, manifest: manifest, byID: make(map[string]model.PackageArtifact, len(manifest.Artifacts)),
+		sources: make(map[string]model.PolicySourceArtifact, len(manifest.PolicySources)), indexes: make(map[string]crsindex.Index, len(manifest.PolicySources)),
+	}
 	for _, artifact := range manifest.Artifacts {
 		if err := catalog.validateArtifact(artifact); err != nil {
 			return nil, err
@@ -67,10 +76,58 @@ func Load(root, publicKeyPath string, expectedCommit string, allowUnsigned bool)
 		}
 		catalog.byID[artifact.ID] = artifact
 	}
+	for _, source := range manifest.PolicySources {
+		index, err := catalog.validatePolicySource(source)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := catalog.sources[source.ID]; exists {
+			return nil, fmt.Errorf("duplicate policy source id %q", source.ID)
+		}
+		catalog.sources[source.ID] = source
+		catalog.indexes[source.ID] = index
+	}
 	return catalog, nil
 }
 
 func (c *Catalog) Manifest() model.BundleManifest { return c.manifest }
+
+func (c *Catalog) PolicySources() []model.PolicySourceArtifact {
+	return append([]model.PolicySourceArtifact(nil), c.manifest.PolicySources...)
+}
+
+func (c *Catalog) PolicySource(id string) (model.PolicySourceArtifact, crsindex.Index, bool) {
+	source, ok := c.sources[id]
+	if !ok {
+		return model.PolicySourceArtifact{}, crsindex.Index{}, false
+	}
+	return source, c.indexes[id], true
+}
+
+func (c *Catalog) PolicySourceFiles(id string) (map[string][]byte, error) {
+	source, ok := c.sources[id]
+	if !ok || source.ArchivePath == "" || source.ArchiveSize <= 0 {
+		return nil, errors.New("self-contained CRS source archive is unavailable")
+	}
+	clean := filepath.Clean(filepath.FromSlash(source.ArchivePath))
+	if filepath.IsAbs(clean) || clean == "." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
+		return nil, errors.New("policy source archive path is unsafe")
+	}
+	file, err := os.Open(filepath.Join(c.root, clean))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	hasher := sha256.New()
+	raw, err := io.ReadAll(io.TeeReader(io.LimitReader(file, source.ArchiveSize+1), hasher))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) != source.ArchiveSize || !strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), source.ArchiveSHA256) {
+		return nil, errors.New("policy source archive hash or size mismatch")
+	}
+	return crsindex.PolicyFilesFromArchive(bytes.NewReader(raw))
+}
 
 func (c *Catalog) ManifestSHA256() string {
 	sum := sha256.Sum256(c.raw)
@@ -123,6 +180,25 @@ func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, mod
 		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("no %s module package for %s %s %s", inventory.WebServer, inventory.OSID, inventory.OSVersion, inventory.Architecture)
 	}
 	return *agent, *module, nil
+}
+
+func (c *Catalog) ResolveAgent(inventory model.Inventory) (model.PackageArtifact, error) {
+	rollbackTargets := make(map[string]bool)
+	for _, artifact := range c.manifest.Artifacts {
+		if artifact.RollbackID != "" {
+			rollbackTargets[artifact.RollbackID] = true
+		}
+	}
+	var matches []model.PackageArtifact
+	for _, artifact := range c.manifest.Artifacts {
+		if artifact.Kind == "agent" && !rollbackTargets[artifact.ID] && matchesBase(artifact, inventory) {
+			matches = append(matches, artifact)
+		}
+	}
+	if len(matches) != 1 {
+		return model.PackageArtifact{}, fmt.Errorf("expected one Agent package for %s %s %s, found %d", inventory.OSID, inventory.OSVersion, inventory.Architecture, len(matches))
+	}
+	return matches[0], nil
 }
 
 // ResolveCRS returns a signed Agent/module pair that contains the requested CRS
@@ -250,6 +326,73 @@ func (c *Catalog) validateArtifact(artifact model.PackageArtifact) error {
 		return fmt.Errorf("package artifact %q checksum mismatch", artifact.ID)
 	}
 	return nil
+}
+
+func (c *Catalog) validatePolicySource(source model.PolicySourceArtifact) (crsindex.Index, error) {
+	if source.ID == "" || source.Provider != "github" || source.Repository != "https://github.com/coreruleset/coreruleset" || (source.Channel != "stable" && source.Channel != "lts") || !strings.HasPrefix(source.Tag, "v4.") || source.Version == "" || source.Commit == "" || len(source.ArchiveSHA256) != 64 || len(source.IndexSHA256) != 64 || source.IndexSize <= 0 {
+		return crsindex.Index{}, fmt.Errorf("policy source %q is incomplete", source.ID)
+	}
+	clean := filepath.Clean(filepath.FromSlash(source.IndexPath))
+	if filepath.IsAbs(clean) || clean == "." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean == ".." {
+		return crsindex.Index{}, fmt.Errorf("policy source %q has unsafe index path", source.ID)
+	}
+	file, err := os.Open(filepath.Join(c.root, clean))
+	if err != nil {
+		return crsindex.Index{}, fmt.Errorf("open policy source %q: %w", source.ID, err)
+	}
+	defer file.Close()
+	hasher := sha256.New()
+	limited := io.LimitReader(file, source.IndexSize+1)
+	raw, err := io.ReadAll(io.TeeReader(limited, hasher))
+	if err != nil {
+		return crsindex.Index{}, err
+	}
+	if int64(len(raw)) != source.IndexSize || !strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), source.IndexSHA256) {
+		return crsindex.Index{}, fmt.Errorf("policy source %q index hash or size mismatch", source.ID)
+	}
+	var index crsindex.Index
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&index); err != nil {
+		return crsindex.Index{}, fmt.Errorf("decode policy source %q: %w", source.ID, err)
+	}
+	if index.SchemaVersion != crsindex.SchemaVersion || index.Source.Provider != source.Provider || index.Source.Repository != source.Repository || index.Source.Channel != source.Channel || strings.TrimPrefix(index.Source.Version, "v") != strings.TrimPrefix(source.Version, "v") || index.Source.Tag != source.Tag || index.Source.Commit != source.Commit || !strings.EqualFold(index.Source.ArchiveSHA256, source.ArchiveSHA256) || index.Statistics.RuleCount != len(index.Rules) {
+		return crsindex.Index{}, fmt.Errorf("policy source %q metadata does not match its index", source.ID)
+	}
+	if source.ArtifactFormat == "policy-bundle-v3" {
+		if source.TagObjectSHA == "" || !source.TagSignatureVerified {
+			return crsindex.Index{}, fmt.Errorf("policy source %q does not have a verified annotated tag", source.ID)
+		}
+		if source.ArchivePath == "" || source.ArchiveSize <= 0 {
+			return crsindex.Index{}, fmt.Errorf("policy source %q is missing its immutable archive", source.ID)
+		}
+		archivePath := filepath.Clean(filepath.FromSlash(source.ArchivePath))
+		if filepath.IsAbs(archivePath) || archivePath == "." || strings.HasPrefix(archivePath, ".."+string(filepath.Separator)) || archivePath == ".." {
+			return crsindex.Index{}, fmt.Errorf("policy source %q has unsafe archive path", source.ID)
+		}
+		archive, err := os.Open(filepath.Join(c.root, archivePath))
+		if err != nil {
+			return crsindex.Index{}, fmt.Errorf("open policy source archive %q: %w", source.ID, err)
+		}
+		hasher := sha256.New()
+		written, copyErr := io.Copy(hasher, io.LimitReader(archive, source.ArchiveSize+1))
+		closeErr := archive.Close()
+		if copyErr != nil {
+			return crsindex.Index{}, copyErr
+		}
+		if closeErr != nil {
+			return crsindex.Index{}, closeErr
+		}
+		if written != source.ArchiveSize || !strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), source.ArchiveSHA256) {
+			return crsindex.Index{}, fmt.Errorf("policy source %q archive hash or size mismatch", source.ID)
+		}
+	}
+	for _, packageID := range source.CompatiblePackageIDs {
+		if _, exists := c.byID[packageID]; !exists {
+			return crsindex.Index{}, fmt.Errorf("policy source %q references missing package %q", source.ID, packageID)
+		}
+	}
+	return index, nil
 }
 
 func matchesBase(artifact model.PackageArtifact, inventory model.Inventory) bool {

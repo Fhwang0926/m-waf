@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -62,6 +63,14 @@ func statusLabel(status string) string {
 		return "승인 대기"
 	case "PENDING":
 		return "대기"
+	case "TRANSITION_PENDING":
+		return "전환 정책 대기"
+	case "PACKAGE_PENDING":
+		return "패키지 적용 대기"
+	case "POLICY_PENDING":
+		return "정책 적용 대기"
+	case "ROLLBACK_PENDING":
+		return "롤백 대기"
 	case "DEFERRED":
 		return "연결 대기"
 	case "COMPLETED":
@@ -111,8 +120,27 @@ func statusClass(status string) string {
 	}
 }
 
-func (s ServerRecord) StatusLabel() string                { return statusLabel(s.Status) }
-func (s ServerRecord) StatusClass() string                { return statusClass(s.Status) }
+func (s ServerRecord) StatusLabel() string { return statusLabel(s.Status) }
+func (s ServerRecord) StatusClass() string { return statusClass(s.Status) }
+func (s ServerRecord) LastHeartbeatAge() string {
+	if !s.LastHeartbeatAt.Valid {
+		return "수신 대기"
+	}
+	elapsed := time.Since(s.LastHeartbeatAt.Time)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	switch {
+	case elapsed < time.Minute:
+		return "방금"
+	case elapsed < time.Hour:
+		return fmt.Sprintf("%d분 전", int(elapsed/time.Minute))
+	case elapsed < 24*time.Hour:
+		return fmt.Sprintf("%d시간 전", int(elapsed/time.Hour))
+	default:
+		return fmt.Sprintf("%d일 전", int(elapsed/(24*time.Hour)))
+	}
+}
 func (s ServerRecord) PolicyDeploymentLabel() string      { return statusLabel(s.PolicyDeploymentStatus) }
 func (s ServerRecord) PolicyDeploymentClass() string      { return statusClass(s.PolicyDeploymentStatus) }
 func (s ServerRecord) PackageDeploymentLabel() string     { return statusLabel(s.PackageDeploymentStatus) }
@@ -126,9 +154,11 @@ func (p EnterprisePolicyRecord) RolloutStatusLabel() string {
 func (p EnterprisePolicyRecord) RolloutStatusClass() string {
 	return statusClass(p.LatestRolloutStatus)
 }
-func (p PolicyRevisionRecord) ModeLabel() string  { return modeLabel(p.Mode) }
-func (p PolicyRolloutRecord) StatusLabel() string { return statusLabel(p.Status) }
-func (p PolicyRolloutRecord) StatusClass() string { return statusClass(p.Status) }
+func (p PolicyRevisionRecord) ModeLabel() string        { return modeLabel(p.Mode) }
+func (p PolicyRolloutRecord) StatusLabel() string       { return statusLabel(p.Status) }
+func (p PolicyRolloutRecord) StatusClass() string       { return statusClass(p.Status) }
+func (p PolicyRolloutTargetRecord) StatusLabel() string { return statusLabel(p.Status) }
+func (p PolicyRolloutTargetRecord) StatusClass() string { return statusClass(p.Status) }
 
 func (p PolicyRolloutRecord) TypeLabel() string {
 	switch p.Type {

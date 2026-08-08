@@ -61,7 +61,8 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	clearSetupCSRFCookie(w)
 	setSessionCookie(w, token, time.Unix(session.ExpiresAt, 0))
 	s.audit(r, user.Username, "system_admin.setup", user.ID, "success")
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	s.TriggerPolicySync()
+	http.Redirect(w, r, "/open-source-policies?setup=1", http.StatusSeeOther)
 }
 
 func (s *Server) renderSetup(w http.ResponseWriter, r *http.Request, status int, message string) {
@@ -86,13 +87,90 @@ func (s *Server) enterprises(w http.ResponseWriter, r *http.Request) {
 	s.renderEnterprises(w, r, http.StatusOK, "", "")
 }
 
+func (s *Server) enterpriseDetail(w http.ResponseWriter, r *http.Request) {
+	enterpriseID := strings.TrimSpace(r.PathValue("id"))
+	enterprise, err := s.store.EnterpriseManagementByID(r.Context(), enterpriseID)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.renderAdminError(w, r, http.StatusNotFound, "기업을 찾을 수 없습니다", "삭제되었거나 존재하지 않는 기업입니다.")
+		return
+	}
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 상세를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+
+	users, err := s.store.ListUsers(r.Context(), enterpriseID)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "소속 사용자를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	session := sessionFrom(r)
+	activeUserCount := 0
+	for i := range users {
+		users[i].Manageable = enterprise.Active() && sessionCanManageUser(session, users[i])
+		if users[i].Active {
+			activeUserCount++
+		}
+	}
+	servers, err := s.store.ListServers(r.Context(), enterpriseID, 5000)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "소속 서버를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	policies, err := s.store.ListEnterprisePolicies(r.Context(), enterpriseID, 5000)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	groups, err := s.store.ListGroups(r.Context(), enterpriseID)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+
+	data := map[string]any{
+		"Enterprise":         enterprise,
+		"Users":              users,
+		"ActiveUserCount":    activeUserCount,
+		"Servers":            servers,
+		"Policies":           policies,
+		"Groups":             groups,
+		"VisibleUserCount":   len(users),
+		"HasDeletedUserData": enterprise.UserCount > uint64(len(users)),
+	}
+	_ = s.templates.ExecuteTemplate(w, "enterprise-detail.html", s.viewData(r, "enterprises", data))
+}
+
 func (s *Server) renderEnterprises(w http.ResponseWriter, r *http.Request, status int, pageError, formName string) {
 	items, err := s.store.ListEnterpriseManagement(r.Context())
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	data := map[string]any{"Enterprises": items, "Error": pageError, "FormName": formName}
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	filterStatus := strings.TrimSpace(r.URL.Query().Get("status"))
+	filtered := items[:0]
+	for _, item := range items {
+		if query != "" && !strings.Contains(strings.ToLower(item.Name), query) {
+			continue
+		}
+		if filterStatus == "active" && !item.Active() {
+			continue
+		}
+		if filterStatus == "terminated" && item.Active() {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	data := map[string]any{
+		"Enterprises":     filtered,
+		"EnterpriseTotal": len(items),
+		"Error":           pageError,
+		"FormName":        formName,
+		"FilterQuery":     strings.TrimSpace(r.URL.Query().Get("q")),
+		"FilterStatus":    filterStatus,
+		"CreateOpen":      r.URL.Query().Get("create") == "1" || (r.Method == http.MethodPost && r.URL.Path == "/enterprises" && pageError != ""),
+	}
 	if r.URL.Query().Get("created") == "1" {
 		data["Notice"] = "기업이 등록되었습니다. 사용자 관리에서 기업 관리자를 추가하세요."
 	} else if r.URL.Query().Get("deleted") == "1" {
@@ -127,6 +205,8 @@ func (s *Server) deleteEnterprise(w http.ResponseWriter, r *http.Request) {
 			s.renderEnterprises(w, r, http.StatusConflict, "이미 운영 종료된 기업입니다.", "")
 		case errors.Is(err, ErrEnterpriseConfirmation):
 			s.renderEnterprises(w, r, http.StatusBadRequest, "입력한 기업명이 일치하지 않습니다.", "")
+		case errors.Is(err, ErrSystemEnterpriseProtected):
+			s.renderEnterprises(w, r, http.StatusConflict, "시스템 관리자가 소속된 기업은 삭제하거나 운영 종료할 수 없습니다.", "")
 		default:
 			s.renderEnterprises(w, r, http.StatusInternalServerError, "기업 삭제 또는 운영 종료를 처리할 수 없습니다.", "")
 		}
@@ -158,6 +238,7 @@ func (s *Server) createEnterprise(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "enterprise.create", item.ID, "success")
+	s.TriggerPolicySync()
 	http.Redirect(w, r, "/enterprises?created=1", http.StatusSeeOther)
 }
 
@@ -223,7 +304,49 @@ func (s *Server) renderUsersWithForm(w http.ResponseWriter, r *http.Request, sta
 	for i := range items {
 		items[i].Manageable = sessionCanManageUser(session, items[i])
 	}
-	data := map[string]any{"Users": items, "Error": pageError}
+	filterQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+	filterEnterprise := strings.TrimSpace(r.URL.Query().Get("enterprise_id"))
+	filterRole := strings.TrimSpace(r.URL.Query().Get("role"))
+	filterStatus := strings.TrimSpace(r.URL.Query().Get("status"))
+	query := strings.ToLower(filterQuery)
+	enterpriseUsers := make([]UserRecord, 0, len(items))
+	systemUsers := make([]UserRecord, 0, 1)
+	totalEnterpriseUsers := 0
+	for _, item := range items {
+		if item.Role == RoleSystemAdmin || item.EnterpriseID == "" {
+			systemUsers = append(systemUsers, item)
+			continue
+		}
+		totalEnterpriseUsers++
+		if query != "" && !strings.Contains(strings.ToLower(item.DisplayName), query) && !strings.Contains(strings.ToLower(item.Username), query) && !strings.Contains(strings.ToLower(item.EnterpriseName), query) {
+			continue
+		}
+		if session.IsSystemAdmin() && filterEnterprise != "" && item.EnterpriseID != filterEnterprise {
+			continue
+		}
+		if filterRole != "" && string(item.Role) != filterRole {
+			continue
+		}
+		if filterStatus == "active" && !item.Active {
+			continue
+		}
+		if filterStatus == "inactive" && item.Active {
+			continue
+		}
+		enterpriseUsers = append(enterpriseUsers, item)
+	}
+	data := map[string]any{
+		"Users":              enterpriseUsers,
+		"SystemUsers":        systemUsers,
+		"UserTotal":          totalEnterpriseUsers,
+		"Error":              pageError,
+		"FilterQuery":        filterQuery,
+		"FilterEnterpriseID": filterEnterprise,
+		"FilterRole":         filterRole,
+		"FilterStatus":       filterStatus,
+		"CreateOpen":         r.URL.Query().Get("create") == "1" || pageError != "",
+		"FormEnterpriseID":   filterEnterprise,
+	}
 	for key, value := range form {
 		data[key] = value
 	}
@@ -259,7 +382,7 @@ func (s *Server) renderUserEdit(w http.ResponseWriter, r *http.Request, status i
 		s.renderAdminError(w, r, http.StatusNotFound, "사용자를 찾을 수 없습니다", "삭제되었거나 관리 권한이 없는 사용자입니다.")
 		return
 	}
-	data := map[string]any{"User": user, "IsSelf": user.ID == session.UserID, "Error": pageError, "FormDisplayName": user.DisplayName, "FormRole": string(user.Role), "FormActive": user.Active}
+	data := map[string]any{"User": user, "IsSelf": user.ID == session.UserID, "Error": pageError, "FormDisplayName": user.DisplayName, "FormRole": string(user.Role), "FormActive": user.Active, "ScopeLabel": user.EnterpriseName}
 	for key, value := range form {
 		data[key] = value
 	}
@@ -404,6 +527,41 @@ func (s *Server) viewData(r *http.Request, active string, values map[string]any)
 	values["IsSystemAdmin"] = session.IsSystemAdmin()
 	values["CanOperate"] = session.CanOperate()
 	values["CanManageUsers"] = session.CanManageUsers()
+	if _, exists := values["ScopeLabel"]; !exists {
+		if session.IsSystemAdmin() {
+			values["ScopeLabel"] = "전체 기업"
+			filterEnterprise, _ := values["FilterEnterprise"].(string)
+			if filterEnterprise == "" {
+				filterEnterprise, _ = values["FilterEnterpriseID"].(string)
+			}
+			if enterprises, ok := values["Enterprises"].([]EnterpriseRecord); ok {
+				for _, enterprise := range enterprises {
+					if enterprise.ID == filterEnterprise {
+						values["ScopeLabel"] = enterprise.Name
+						break
+					}
+				}
+			}
+		} else {
+			values["ScopeLabel"] = session.EnterpriseName
+		}
+	}
+	values["BundleReady"] = s.catalog != nil
+	values["BundleVersion"] = ""
+	values["BundleStatusLabel"] = "Manager 연결됨 · Bundle 확인 필요"
+	values["BundleStatusCompact"] = "확인"
+	values["BundleStatusTitle"] = "Manager는 연결되었지만 서명된 package bundle을 사용할 수 없습니다."
+	if s.catalog != nil {
+		bundleVersion := s.catalog.Manifest().BundleVersion
+		values["BundleVersion"] = bundleVersion
+		values["BundleStatusLabel"] = "Manager 연결됨 · Bundle " + bundleVersion
+		values["BundleStatusCompact"] = "정상"
+		values["BundleStatusTitle"] = "Manager와 서명된 package bundle을 사용할 수 있습니다."
+	}
+	values["DevLiveReload"] = s.cfg.DevLiveReload
+	if s.cfg.DevLiveReload {
+		values["DevInstanceID"] = s.instanceID
+	}
 	return values
 }
 
@@ -412,12 +570,7 @@ func (s *Server) requestEnterpriseID(r *http.Request) (string, bool) {
 }
 
 func (s *Server) enterpriseIDForSession(ctx context.Context, session sessionData, requested string) (string, bool) {
-	if !session.IsSystemAdmin() {
-		return session.EnterpriseID, session.EnterpriseID != ""
-	}
-	if requested == "" {
-		return "", false
-	}
+	requested = session.TenantScope().MutationEnterpriseID(requested)
 	exists, err := s.store.EnterpriseExists(ctx, requested)
 	return requested, err == nil && exists
 }

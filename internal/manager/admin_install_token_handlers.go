@@ -19,16 +19,23 @@ const (
 func (s *Server) renderEnrollment(w http.ResponseWriter, r *http.Request, extra map[string]any) {
 	w.Header().Set("Cache-Control", "no-store")
 	session := sessionFrom(r)
-	items, err := s.store.ListEnterpriseInstallTokens(r.Context(), session.ScopeEnterpriseID(), 200)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 설치 토큰을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
+	requestedEnterpriseID := strings.TrimSpace(r.URL.Query().Get("enterprise_id"))
+	if value, exists := extra["FormEnterpriseID"]; exists {
+		if formEnterpriseID, ok := value.(string); ok && strings.TrimSpace(formEnterpriseID) != "" {
+			requestedEnterpriseID = strings.TrimSpace(formEnterpriseID)
+		}
 	}
+	selectedEnterpriseID, selected := s.enterpriseIDForSession(r.Context(), session, requestedEnterpriseID)
+	if !selected && requestedEnterpriseID != "" {
+		selectedEnterpriseID, selected = s.enterpriseIDForSession(r.Context(), session, "")
+	}
+	selectedEnterpriseName := session.EnterpriseName
 	data := map[string]any{
-		"InstallTokens":   items,
-		"AgentURL":        s.cfg.AgentPublicURL,
-		"CABase64":        base64.StdEncoding.EncodeToString([]byte(s.ca.CertificatePEM())),
-		"FormExpiresDays": strconv.Itoa(defaultInstallTokenDays),
+		"AgentURL":             s.cfg.PublicURL,
+		"CABase64":             base64.StdEncoding.EncodeToString([]byte(s.ca.CertificatePEM())),
+		"FormExpiresDays":      strconv.Itoa(defaultInstallTokenDays),
+		"FormEnterpriseID":     selectedEnterpriseID,
+		"SelectedEnterpriseID": selectedEnterpriseID,
 	}
 	if session.IsSystemAdmin() {
 		enterprises, err := s.store.ListEnterprises(r.Context())
@@ -37,6 +44,25 @@ func (s *Server) renderEnrollment(w http.ResponseWriter, r *http.Request, extra 
 			return
 		}
 		data["Enterprises"] = enterprises
+		for _, enterprise := range enterprises {
+			if enterprise.ID == selectedEnterpriseID {
+				selectedEnterpriseName = enterprise.Name
+				break
+			}
+		}
+	}
+	if selected {
+		items, err := s.store.ListEnterpriseInstallTokens(r.Context(), selectedEnterpriseID, 200)
+		if err != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 설치 토큰을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+		data["InstallTokens"] = items
+	}
+	data["SelectedEnterpriseName"] = selectedEnterpriseName
+	data["ScopeLabel"] = selectedEnterpriseName
+	if !selected {
+		data["Error"] = "설치 작업에 사용할 활성 기업 범위를 찾을 수 없습니다."
 	}
 	if r.URL.Query().Get("revoked") == "1" {
 		data["Notice"] = "기업 설치 토큰을 폐기했습니다. 이미 등록된 Agent의 mTLS 연결에는 영향을 주지 않습니다."
@@ -104,7 +130,7 @@ func (s *Server) createInstallToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "enterprise_install_token.create", record.ID, "success")
-	s.renderEnrollment(w, r, map[string]any{"InstallToken": token, "InstallTokenRecord": record})
+	s.renderEnrollment(w, r, map[string]any{"InstallToken": token, "InstallTokenRecord": record, "FormEnterpriseID": enterpriseID})
 }
 
 func (s *Server) revokeInstallToken(w http.ResponseWriter, r *http.Request) {
@@ -113,16 +139,21 @@ func (s *Server) revokeInstallToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.FormValue("confirm") != "confirmed" {
-		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusBadRequest, "Error": "기업 설치 토큰 폐기 내용을 확인해야 합니다."})
+		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusBadRequest, "Error": "기업 설치 토큰 폐기 내용을 확인해야 합니다.", "FormEnterpriseID": strings.TrimSpace(r.FormValue("enterprise_id"))})
 		return
 	}
 	session := sessionFrom(r)
+	enterpriseID, ok := s.enterpriseIDForSession(r.Context(), session, strings.TrimSpace(r.FormValue("enterprise_id")))
+	if !ok {
+		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusBadRequest, "Error": "유효한 기업을 선택하세요.", "FormEnterpriseID": strings.TrimSpace(r.FormValue("enterprise_id"))})
+		return
+	}
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
 		s.renderAdminError(w, r, http.StatusNotFound, "설치 토큰을 찾을 수 없습니다", "이미 폐기되었거나 접근할 수 없는 토큰입니다.")
 		return
 	}
-	if err := s.store.RevokeEnterpriseInstallToken(r.Context(), id, session.ScopeEnterpriseID()); err != nil {
+	if err := s.store.RevokeEnterpriseInstallToken(r.Context(), id, enterpriseID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			s.renderAdminError(w, r, http.StatusNotFound, "설치 토큰을 찾을 수 없습니다", "이미 폐기되었거나 접근할 수 없는 토큰입니다.")
 			return
@@ -131,7 +162,7 @@ func (s *Server) revokeInstallToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "enterprise_install_token.revoke", id, "success")
-	http.Redirect(w, r, "/enrollments/new?revoked=1", http.StatusSeeOther)
+	http.Redirect(w, r, "/enrollments/new?revoked=1&enterprise_id="+enterpriseID, http.StatusSeeOther)
 }
 
 func (s *Server) apiCreateInstallToken(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +202,6 @@ func (s *Server) apiCreateInstallToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": record.ID, "token": token, "token_prefix": record.TokenPrefix, "expires_at": record.ExpiresAt,
-		"max_enrollments": request.MaxUses, "agent_api": s.cfg.AgentPublicURL,
+		"max_enrollments": request.MaxUses, "agent_api": s.cfg.PublicURL,
 	})
 }

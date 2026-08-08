@@ -2,8 +2,6 @@ package manager
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -11,7 +9,6 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/fs"
 	"log/slog"
 	"mime"
 	"net"
@@ -27,6 +24,7 @@ import (
 	"github.com/Fhwang0926/m-waf/internal/config"
 	"github.com/Fhwang0926/m-waf/internal/model"
 	"github.com/Fhwang0926/m-waf/internal/packages"
+	"github.com/Fhwang0926/m-waf/internal/protocol"
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
 	"github.com/Fhwang0926/m-waf/internal/version"
 	webassets "github.com/Fhwang0926/m-waf/web"
@@ -44,6 +42,7 @@ const (
 
 type Server struct {
 	cfg              config.Manager
+	instanceID       string
 	store            *Store
 	catalog          *packages.Catalog
 	catalogErr       error
@@ -58,6 +57,12 @@ type Server struct {
 	downloadLimiter  *requestLimiter
 	policySyncMu     sync.Mutex
 	policySyncSignal chan struct{}
+	overviewCacheMu  sync.Mutex
+	overviewCache    map[string]overviewCacheEntry
+	sourceMu         sync.RWMutex
+	sourceSyncMu     sync.Mutex
+	runtimeSources   map[string]runtimePolicySource
+	lastCRSSync      time.Time
 	logger           *slog.Logger
 }
 
@@ -79,12 +84,16 @@ func NewServer(cfg config.Manager, store *Store, logger *slog.Logger) (*Server, 
 		return nil, err
 	}
 	catalog, catalogErr := packages.Load(cfg.BundleRoot, cfg.BundlePublicKey, version.Commit, cfg.BundleAllowUnsigned)
-	return &Server{
-		cfg: cfg, store: store, catalog: catalog, catalogErr: catalogErr, ca: ca, policySigner: policySigner, policyCatalog: policyCatalog, templates: templates,
+	server := &Server{
+		cfg: cfg, instanceID: randomID(), store: store, catalog: catalog, catalogErr: catalogErr, ca: ca, policySigner: policySigner, policyCatalog: policyCatalog, templates: templates,
 		sessions: newSessionManager(cfg.SessionKey), loginLimiter: newLoginLimiter(),
 		bootstrapLimiter: newRequestLimiter(60, time.Minute), installLimiter: newRequestLimiter(60, time.Minute), downloadLimiter: newRequestLimiter(8, time.Minute), logger: logger,
-		policySyncSignal: make(chan struct{}, 1),
-	}, nil
+		policySyncSignal: make(chan struct{}, 1), overviewCache: make(map[string]overviewCacheEntry), runtimeSources: make(map[string]runtimePolicySource),
+	}
+	if err := server.loadRuntimePolicySources(); err != nil {
+		return nil, fmt.Errorf("load Manager CRS sources: %w", err)
+	}
+	return server, nil
 }
 
 func (s *Server) TriggerPolicySync() {
@@ -103,106 +112,18 @@ func (s *Server) SyncCatalog(ctx context.Context) error {
 		}
 		return nil
 	}
-	return s.store.SyncCatalog(ctx, s.catalog)
-}
-
-func (s *Server) AdminHandler() http.Handler {
-	mux := http.NewServeMux()
-	staticFS, _ := fs.Sub(webassets.Assets, "static")
-	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(staticFS)))
-	mux.HandleFunc("GET /health/live", s.live)
-	mux.HandleFunc("GET /health/ready", s.ready)
-	mux.HandleFunc("GET /setup", s.setup)
-	mux.HandleFunc("POST /setup", s.setup)
-	mux.HandleFunc("GET /login", s.login)
-	mux.HandleFunc("POST /login", s.login)
-	mux.Handle("POST /logout", s.requireAdmin(http.HandlerFunc(s.logout)))
-	mux.Handle("GET /account", s.requireAdmin(http.HandlerFunc(s.account)))
-	mux.Handle("POST /account/password", s.requireAdmin(http.HandlerFunc(s.updateOwnPassword)))
-	mux.Handle("GET /", s.requireAdmin(http.HandlerFunc(s.dashboard)))
-	mux.Handle("GET /servers", s.requireAdmin(http.HandlerFunc(s.servers)))
-	mux.Handle("POST /servers/{id}/commands", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.createServerCommand))))
-	mux.Handle("POST /servers/{id}/packages", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.deployServerPackages))))
-	mux.Handle("POST /servers/{id}/revoke", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.revokeServer))))
-	mux.Handle("GET /events", s.requireAdmin(http.HandlerFunc(s.events)))
-	mux.Handle("GET /policies", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.policies))))
-	mux.Handle("GET /policies/new", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.newPolicy))))
-	mux.Handle("POST /policies", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.createPolicy))))
-	mux.Handle("GET /policies/{id}", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.enterprisePolicyDetail))))
-	mux.Handle("POST /policies/{id}/strategy", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.updateEnterprisePolicyStrategy))))
-	mux.Handle("POST /policies/{id}/convert", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.convertLegacyEnterprisePolicy))))
-	mux.Handle("POST /policies/{id}/rollback", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.rollbackEnterprisePolicy))))
-	mux.Handle("POST /policies/{id}/rollouts/{rollout_id}/approve", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.approveEnterprisePolicyRollout))))
-	mux.Handle("POST /policies/{id}/rollouts/{rollout_id}/retry", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.retryEnterprisePolicyRollout))))
-	mux.Handle("GET /system-policies", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.systemPolicies))))
-	mux.Handle("GET /groups", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.groups))))
-	mux.Handle("POST /groups", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.createGroup))))
-	mux.Handle("POST /groups/{id}", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.updateGroup))))
-	mux.Handle("POST /groups/{id}/delete", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.deleteGroup))))
-	mux.Handle("GET /enrollments/new", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.newEnrollment))))
-	mux.Handle("POST /enrollments", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.createEnrollment))))
-	mux.Handle("POST /install-tokens", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.createInstallToken))))
-	mux.Handle("POST /install-tokens/{id}/revoke", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.revokeInstallToken))))
-	mux.Handle("GET /enterprises", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.enterprises))))
-	mux.Handle("POST /enterprises", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.createEnterprise))))
-	mux.Handle("POST /enterprises/{id}/delete", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.deleteEnterprise))))
-	mux.Handle("GET /settings", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.systemSettings))))
-	mux.Handle("POST /settings", s.requireAdmin(s.requireRole(RoleSystemAdmin, http.HandlerFunc(s.updateSystemSettings))))
-	mux.Handle("GET /users", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.users))))
-	mux.Handle("POST /users", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.createUser))))
-	mux.Handle("GET /users/{id}", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.editUser))))
-	mux.Handle("POST /users/{id}", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.updateUser))))
-	mux.Handle("POST /users/{id}/delete", s.requireAdmin(s.requireRole(RoleEnterpriseAdmin, http.HandlerFunc(s.deleteUser))))
-	mux.Handle("GET /api/v1/servers", s.requireAdmin(http.HandlerFunc(s.apiServers)))
-	mux.Handle("GET /api/v1/events", s.requireAdmin(http.HandlerFunc(s.apiEvents)))
-	mux.Handle("POST /api/v1/enrollment-tokens", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.apiCreateEnrollment))))
-	mux.Handle("POST /api/v1/enterprise-install-tokens", s.requireAdmin(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.apiCreateInstallToken))))
-	return s.securityHeaders(s.requestLog(mux))
-}
-
-func (s *Server) AgentHandler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health/live", s.live)
-	mux.HandleFunc("GET /health/ready", s.ready)
-	mux.Handle("GET /bootstrap/v1/install.sh", s.limitBootstrap(http.HandlerFunc(s.bootstrapInstaller)))
-	mux.Handle("POST /bootstrap/v1/sessions", s.limitBootstrap(http.HandlerFunc(s.createBootstrapSession)))
-	mux.Handle("POST /bootstrap/v1/packages/resolve", s.limitBootstrap(http.HandlerFunc(s.resolvePackages)))
-	mux.HandleFunc("GET /bootstrap/v1/packages/{id}", s.bootstrapPackage)
-	mux.Handle("GET /packages/v1/keys", s.limitBootstrap(http.HandlerFunc(s.packagePublicKey)))
-	mux.Handle("POST /agent/v1/enroll", s.limitBootstrap(http.HandlerFunc(s.enroll)))
-	mux.Handle("POST /agent/v1/heartbeat", s.requireAgent(http.HandlerFunc(s.heartbeat)))
-	mux.Handle("POST /agent/v1/certificate/renew", s.requireAgent(http.HandlerFunc(s.renewCertificate)))
-	mux.Handle("GET /agent/v1/desired-state", s.requireAgent(http.HandlerFunc(s.desiredState)))
-	mux.Handle("GET /agent/v1/policy-key", s.requireAgent(http.HandlerFunc(s.policyPublicKey)))
-	mux.Handle("GET /agent/v1/artifacts/{id}", s.requireAgent(http.HandlerFunc(s.policyArtifact)))
-	mux.Handle("GET /agent/v1/packages/{id}", s.requireAgent(http.HandlerFunc(s.agentPackage)))
-	mux.Handle("POST /agent/v1/events/batch", s.requireAgent(http.HandlerFunc(s.eventBatch)))
-	mux.Handle("POST /agent/v1/policies/{id}/result", s.requireAgent(http.HandlerFunc(s.policyResult)))
-	mux.Handle("POST /agent/v1/package-deployments/{id}/result", s.requireAgent(http.HandlerFunc(s.packageDeploymentResult)))
-	mux.Handle("GET /agent/v1/commands/next", s.requireAgent(http.HandlerFunc(s.nextAgentCommand)))
-	mux.Handle("POST /agent/v1/commands/{id}/result", s.requireAgent(http.HandlerFunc(s.agentCommandResult)))
-	return s.securityHeaders(s.requestLog(mux))
-}
-
-func (s *Server) AgentTLSConfig() (*tls.Config, error) {
-	certPEM, err := os.ReadFile(s.cfg.AgentCACertificate)
-	if err != nil {
-		return nil, err
+	if err := s.store.SyncCatalog(ctx, s.catalog); err != nil {
+		return err
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(certPEM) {
-		return nil, errors.New("append agent CA certificate")
-	}
-	return &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		ClientAuth: tls.VerifyClientCertIfGiven,
-		ClientCAs:  pool,
-		NextProtos: []string{"h2", "http/1.1"},
-	}, nil
+	return s.syncBundlePolicySources(ctx)
 }
 
 func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "live", "version": version.Version, "commit": version.Commit})
+	payload := map[string]any{"status": "live", "version": version.Version, "commit": version.Commit}
+	if s.cfg.DevLiveReload {
+		payload["instance_id"] = s.instanceID
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
@@ -285,25 +206,39 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	session := sessionFrom(r)
-	summary, err := s.store.DashboardSummary(r.Context(), session.ScopeEnterpriseID(), time.Now().UTC())
+	enterpriseID, ok := s.effectiveEnterpriseFilter(r, r.URL.Query().Get("enterprise_id"))
+	if !ok {
+		s.renderAdminError(w, r, http.StatusBadRequest, "기업 필터가 올바르지 않습니다", "활성 기업을 다시 선택하세요.")
+		return
+	}
+	overview, err := s.loadOverview(r.Context(), overviewFilterFromRequest(r, enterpriseID), time.Now().UTC())
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "운영 현황을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	servers, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 10)
+	servers, err := s.store.ListServers(r.Context(), enterpriseID, 500)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 현황을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	bundleVersion := "unavailable"
-	if s.catalog != nil {
-		bundleVersion = s.catalog.Manifest().BundleVersion
+	groups, err := s.store.ListGroups(r.Context(), enterpriseID)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
 	}
-	data := s.viewData(r, "dashboard", map[string]any{"Summary": summary, "Servers": servers, "BundleVersion": bundleVersion, "Ready": s.catalog != nil})
+	data := map[string]any{"Overview": overview, "Servers": servers, "Groups": groups, "FilterEnterprise": enterpriseID, "FilterGroup": r.URL.Query().Get("group_id"), "FilterServer": r.URL.Query().Get("server_id")}
+	if session.IsSystemAdmin() {
+		enterprises, enterpriseErr := s.store.ListEnterprises(r.Context())
+		if enterpriseErr != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+		data["Enterprises"] = enterprises
+	}
 	if s.catalogErr != nil {
 		data["Notice"] = "Package bundle을 사용할 수 없습니다: " + s.catalogErr.Error()
 	}
-	_ = s.templates.ExecuteTemplate(w, "dashboard.html", data)
+	_ = s.templates.ExecuteTemplate(w, "dashboard.html", s.viewData(r, "dashboard", data))
 }
 
 func (s *Server) servers(w http.ResponseWriter, r *http.Request) {
@@ -312,7 +247,12 @@ func (s *Server) servers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) renderServers(w http.ResponseWriter, r *http.Request, status int, pageError string) {
 	session := sessionFrom(r)
-	items, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 500)
+	enterpriseID, ok := s.effectiveEnterpriseFilter(r, r.URL.Query().Get("enterprise_id"))
+	if !ok {
+		s.renderAdminError(w, r, http.StatusBadRequest, "기업 필터가 올바르지 않습니다", "활성 기업을 다시 선택하세요.")
+		return
+	}
+	items, err := s.store.ListServers(r.Context(), enterpriseID, 500)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
@@ -323,77 +263,162 @@ func (s *Server) renderServers(w http.ResponseWriter, r *http.Request, status in
 			items[i].CanRollbackPackages = rollbackErr == nil
 		}
 	}
+	groups, err := s.store.ListGroups(r.Context(), enterpriseID)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	groupID := truncate(strings.TrimSpace(r.URL.Query().Get("group_id")), 64)
+	groupMembers := make(map[string]bool)
+	if groupID != "" {
+		for _, group := range groups {
+			if group.ID == groupID {
+				for _, member := range group.Members {
+					groupMembers[member.ID] = true
+				}
+				break
+			}
+		}
+	}
+	queryText := strings.ToLower(truncate(strings.TrimSpace(r.URL.Query().Get("q")), 255))
+	filterStatus := strings.ToUpper(truncate(strings.TrimSpace(r.URL.Query().Get("status")), 32))
+	filtered := make([]ServerRecord, 0, len(items))
+	for _, item := range items {
+		if groupID != "" && !groupMembers[item.ID] {
+			continue
+		}
+		if filterStatus == "REVOKED" {
+			if !item.Revoked {
+				continue
+			}
+		} else if filterStatus != "" && (item.Revoked || item.Status != filterStatus) {
+			continue
+		}
+		if queryText != "" && !strings.Contains(strings.ToLower(item.Name+" "+item.Inventory.Hostname+" "+item.Inventory.WebServer), queryText) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
-	_ = s.templates.ExecuteTemplate(w, "servers.html", s.viewData(r, "servers", map[string]any{"Servers": items, "Notice": strings.TrimSpace(r.URL.Query().Get("notice")), "Error": pageError}))
+	hasServerFilter := strings.TrimSpace(r.URL.Query().Get("enterprise_id")) != "" || groupID != "" || filterStatus != "" || queryText != ""
+	data := map[string]any{"Servers": filtered, "ServerTotal": len(items), "Groups": groups, "FilterEnterprise": enterpriseID, "FilterGroup": groupID, "FilterStatus": filterStatus, "FilterQuery": r.URL.Query().Get("q"), "HasServerFilter": hasServerFilter, "Notice": strings.TrimSpace(r.URL.Query().Get("notice")), "Error": pageError}
+	if session.IsSystemAdmin() {
+		enterprises, enterpriseErr := s.store.ListEnterprises(r.Context())
+		if enterpriseErr != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+		data["Enterprises"] = enterprises
+	}
+	_ = s.templates.ExecuteTemplate(w, "servers.html", s.viewData(r, "servers", data))
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	session := sessionFrom(r)
-	filter := EventFilter{ServerID: truncate(strings.TrimSpace(r.URL.Query().Get("server")), 64), Severity: strings.TrimSpace(r.URL.Query().Get("severity")), Query: truncate(strings.TrimSpace(r.URL.Query().Get("q")), 255)}
-	if len(filter.Severity) != 1 || filter.Severity[0] < '0' || filter.Severity[0] > '7' {
-		filter.Severity = ""
+	enterpriseID, ok := s.effectiveEnterpriseFilter(r, r.URL.Query().Get("enterprise_id"))
+	if !ok {
+		s.renderAdminError(w, r, http.StatusBadRequest, "기업 필터가 올바르지 않습니다", "활성 기업을 다시 선택하세요.")
+		return
 	}
-	switch r.URL.Query().Get("result") {
-	case "blocked":
-		value := true
-		filter.Blocked = &value
-	case "detected":
-		value := false
-		filter.Blocked = &value
-	}
-	page, err := strconv.Atoi(r.URL.Query().Get("page"))
-	if err != nil || page < 1 {
-		page = 1
-	} else if page > 10000 {
-		page = 10000
-	}
+	filter, rangeKey := eventFilterFromRequest(r, enterpriseID)
+	page := queryPage(r)
 	const pageSize = 100
-	filter.Offset = (page - 1) * pageSize
-	items, err := s.store.ListEventsFiltered(r.Context(), session.ScopeEnterpriseID(), filter, pageSize+1)
+	if filter.CursorDirection == "" {
+		filter.Offset = (page - 1) * pageSize
+	}
+	items, err := s.store.ListEventsFiltered(r.Context(), "", filter, pageSize+1)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "이벤트 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	hasNext := len(items) > pageSize
-	if hasNext {
-		items = items[:pageSize]
-	}
-	servers, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 500)
+	pageResult := paginateEventRecords(items, pageSize, page, filter.CursorDirection)
+	items = pageResult.Items
+	servers, err := s.store.ListServers(r.Context(), enterpriseID, 500)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "이벤트 필터를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	query := r.URL.Query()
-	query.Del("page")
-	pageURL := func(target int) string {
-		values := url.Values{}
-		for key, entries := range query {
-			for _, entry := range entries {
-				values.Add(key, entry)
-			}
+	groups, err := s.store.ListGroups(r.Context(), enterpriseID)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "이벤트 그룹 필터를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	data := map[string]any{"Events": items, "Servers": servers, "Groups": groups, "Range": rangeKey, "FilterEnterprise": enterpriseID, "FilterGroup": filter.GroupID, "FilterServer": filter.ServerID, "FilterSeverity": filter.Severity, "FilterRuleID": filter.RuleID, "FilterQuery": filter.Query, "FilterResult": r.URL.Query().Get("result"), "FilterChips": eventFilterChips(r, session), "SelectedEvent": r.URL.Query().Get("event"), "Page": page, "HasNext": pageResult.HasNext}
+	if session.IsSystemAdmin() {
+		enterprises, enterpriseErr := s.store.ListEnterprises(r.Context())
+		if enterpriseErr != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
 		}
-		values.Set("page", strconv.Itoa(target))
-		return "/events?" + values.Encode()
+		data["Enterprises"] = enterprises
 	}
-	data := map[string]any{"Events": items, "Servers": servers, "FilterServer": filter.ServerID, "FilterSeverity": filter.Severity, "FilterQuery": filter.Query, "FilterResult": r.URL.Query().Get("result"), "Page": page, "HasNext": hasNext}
-	if page > 1 {
-		data["PreviousURL"] = pageURL(page - 1)
+	if pageResult.HasPrevious && len(items) != 0 {
+		data["PreviousURL"] = eventPageURL(r, max(page-1, 1), encodeEventCursor(items[0], eventCursorAfter))
 	}
-	if hasNext {
-		data["NextURL"] = pageURL(page + 1)
+	if pageResult.HasNext && len(items) != 0 {
+		data["NextURL"] = eventPageURL(r, page+1, encodeEventCursor(items[len(items)-1], eventCursorBefore))
 	}
 	_ = s.templates.ExecuteTemplate(w, "events.html", s.viewData(r, "events", data))
 }
 
 func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListEnterprisePolicies(r.Context(), sessionFrom(r).ScopeEnterpriseID(), 500)
+	session := sessionFrom(r)
+	enterpriseID, ok := s.effectiveEnterpriseFilter(r, r.URL.Query().Get("enterprise_id"))
+	if !ok {
+		s.renderAdminError(w, r, http.StatusBadRequest, "기업 필터가 올바르지 않습니다", "활성 기업을 다시 선택하세요.")
+		return
+	}
+	items, err := s.store.ListEnterprisePolicies(r.Context(), enterpriseID, 500)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	_ = s.templates.ExecuteTemplate(w, "policies.html", s.viewData(r, "policies", map[string]any{"Policies": items}))
+	policyTotal := len(items)
+	systemPolicyID := truncate(strings.TrimSpace(r.URL.Query().Get("system_policy_id")), 255)
+	filterLabel := ""
+	if systemPolicyID != "" {
+		filtered := make([]EnterprisePolicyRecord, 0, len(items))
+		for _, item := range items {
+			if item.CurrentSystemPolicyID == systemPolicyID {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+		filterLabel = systemPolicyID
+		if policyTemplate, ok := s.systemPolicyTemplate(r.Context(), systemPolicyID); ok {
+			filterLabel = policyTemplate.Name + " " + policyTemplate.Version
+		}
+	}
+	filterQuery := truncate(strings.TrimSpace(r.URL.Query().Get("q")), 255)
+	filterStrategy := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("strategy")))
+	filterRollout := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("rollout")))
+	query := strings.ToLower(filterQuery)
+	filtered := make([]EnterprisePolicyRecord, 0, len(items))
+	for _, item := range items {
+		if query != "" && !strings.Contains(strings.ToLower(item.Name+" "+item.Description+" "+item.EnterpriseName+" "+item.TargetLabel()), query) {
+			continue
+		}
+		if filterStrategy != "" && item.UpdateStrategy != filterStrategy {
+			continue
+		}
+		if filterRollout != "" && item.LatestRolloutStatus != filterRollout {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	hasPolicyFilter := strings.TrimSpace(r.URL.Query().Get("enterprise_id")) != "" || systemPolicyID != "" || filterQuery != "" || filterStrategy != "" || filterRollout != ""
+	data := map[string]any{"Policies": filtered, "PolicyTotal": policyTotal, "FilterEnterprise": enterpriseID, "FilterSystemPolicyID": systemPolicyID, "FilterSystemPolicyLabel": filterLabel, "FilterQuery": filterQuery, "FilterStrategy": filterStrategy, "FilterRollout": filterRollout, "HasPolicyFilter": hasPolicyFilter}
+	if session.IsSystemAdmin() {
+		enterprises, enterpriseErr := s.store.ListEnterprises(r.Context())
+		if enterpriseErr != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+		data["Enterprises"] = enterprises
+	}
+	_ = s.templates.ExecuteTemplate(w, "policies.html", s.viewData(r, "policies", data))
 }
 
 func (s *Server) newPolicy(w http.ResponseWriter, r *http.Request) {
@@ -402,18 +427,33 @@ func (s *Server) newPolicy(w http.ResponseWriter, r *http.Request) {
 
 func policyFormState(r *http.Request) map[string]any {
 	return map[string]any{
-		"FormTemplateKey":   strings.TrimSpace(r.FormValue("template_key")),
-		"FormName":          truncate(strings.TrimSpace(r.FormValue("name")), 255),
-		"FormDescription":   truncate(strings.TrimSpace(r.FormValue("description")), 1024),
-		"FormTarget":        strings.TrimSpace(r.FormValue("target")),
-		"FormStrategy":      strings.TrimSpace(r.FormValue("update_strategy")),
-		"FormMode":          strings.TrimSpace(r.FormValue("mode")),
-		"FormParanoia":      strings.TrimSpace(r.FormValue("paranoia_level")),
-		"FormScore":         strings.TrimSpace(r.FormValue("inbound_score")),
-		"FormRequestBody":   r.FormValue("request_body") == "on",
-		"FormExcludedPaths": r.FormValue("excluded_paths"),
-		"FormExcludedIPs":   r.FormValue("excluded_ips"),
-		"FormCustomRules":   r.FormValue("custom_rules"),
+		"FormTemplateKey":           strings.TrimSpace(r.FormValue("template_key")),
+		"FormName":                  truncate(strings.TrimSpace(r.FormValue("name")), 255),
+		"FormDescription":           truncate(strings.TrimSpace(r.FormValue("description")), 1024),
+		"FormTarget":                strings.TrimSpace(r.FormValue("target")),
+		"FormStrategy":              strings.TrimSpace(r.FormValue("update_strategy")),
+		"FormMode":                  strings.TrimSpace(r.FormValue("mode")),
+		"FormParanoia":              strings.TrimSpace(r.FormValue("paranoia_level")),
+		"FormExecutingParanoia":     strings.TrimSpace(r.FormValue("executing_paranoia_level")),
+		"FormScore":                 strings.TrimSpace(r.FormValue("inbound_score")),
+		"FormOutboundScore":         strings.TrimSpace(r.FormValue("outbound_score")),
+		"FormRequestBody":           r.FormValue("request_body") == "on",
+		"FormResponseBody":          r.FormValue("response_body") == "on",
+		"FormEarlyBlocking":         r.FormValue("early_blocking") == "on",
+		"FormSamplingPercentage":    strings.TrimSpace(r.FormValue("sampling_percentage")),
+		"FormExcludedPaths":         r.FormValue("excluded_paths"),
+		"FormExcludedIPs":           r.FormValue("excluded_ips"),
+		"FormRuleExclusions":        r.FormValue("rule_exclusions"),
+		"FormTagExclusions":         r.FormValue("tag_exclusions"),
+		"FormTargetExclusions":      r.FormValue("target_exclusions"),
+		"FormConditionalExclusions": r.FormValue("conditional_exclusions"),
+		"FormBypassField":           r.FormValue("bypass_field"),
+		"FormBypassOperator":        r.FormValue("bypass_operator"),
+		"FormBypassValue":           r.FormValue("bypass_value"),
+		"FormBypassReason":          r.FormValue("bypass_reason"),
+		"FormBypassExpiresAt":       r.FormValue("bypass_expires_at"),
+		"FormCustomRules":           r.FormValue("custom_rules"),
+		"FormGuidedRules":           r.FormValue("guided_rules_json"),
 	}
 }
 
@@ -429,11 +469,29 @@ func (s *Server) renderPolicyForm(w http.ResponseWriter, r *http.Request, status
 		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	defaultTemplate := s.policyCatalog.Default()
+	defaultTemplate := s.defaultSystemPolicyTemplate(r.Context())
+	requestedKey := strings.TrimSpace(r.URL.Query().Get("template_key"))
+	if value, ok := form["FormTemplateKey"].(string); ok && strings.TrimSpace(value) != "" {
+		requestedKey = strings.TrimSpace(value)
+	}
+	if requestedKey != "" {
+		if requested, ok := s.latestSystemPolicyTemplate(r.Context(), requestedKey); ok {
+			defaultTemplate = requested
+		}
+	}
+	policyTemplates, err := s.publishedSystemPolicyTemplates(r.Context())
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "시스템 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
 	data := map[string]any{
-		"Servers": servers, "Groups": groups, "PolicyTemplates": s.policyCatalog.ListLatest(), "DefaultTemplate": defaultTemplate,
-		"Error": pageError, "FormTemplateKey": defaultTemplate.Key, "FormStrategy": PolicyStrategyManual, "FormMode": "DetectionOnly",
-		"FormParanoia": "1", "FormScore": "5", "FormRequestBody": true,
+		"Servers": servers, "Groups": groups, "PolicyTemplates": policyTemplates, "DefaultTemplate": defaultTemplate,
+		"Error": pageError, "FormTemplateKey": defaultTemplate.Key, "FormStrategy": PolicyStrategyManual, "FormMode": defaultTemplate.Defaults.Mode,
+		"FormParanoia": strconv.Itoa(defaultTemplate.Defaults.ParanoiaLevel), "FormExecutingParanoia": strconv.Itoa(defaultTemplate.Defaults.ExecutingParanoiaLevel),
+		"FormScore": strconv.Itoa(defaultTemplate.Defaults.InboundScore), "FormOutboundScore": strconv.Itoa(defaultTemplate.Defaults.OutboundScore),
+		"FormRequestBody": defaultTemplate.Defaults.RequestBody, "FormResponseBody": defaultTemplate.Defaults.ResponseBody,
+		"FormEarlyBlocking": defaultTemplate.Defaults.EarlyBlocking, "FormSamplingPercentage": strconv.Itoa(defaultTemplate.Defaults.SamplingPercentage),
+		"FormBypassExpiresAt": time.Now().Add(24 * time.Hour).Format("2006-01-02T15:04"),
 	}
 	for key, value := range form {
 		data[key] = value
@@ -450,22 +508,29 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	form := policyFormState(r)
+	if r.FormValue("publish_confirm") != "confirmed" {
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "변경 내용과 단계 배포 영향을 확인해야 합니다.", form)
+		return
+	}
 	name := truncate(strings.TrimSpace(r.FormValue("name")), 255)
 	description := truncate(strings.TrimSpace(r.FormValue("description")), 1024)
 	target := strings.TrimSpace(r.FormValue("target"))
 	templateKey := strings.TrimSpace(r.FormValue("template_key"))
 	if templateKey == "" {
-		templateKey = s.policyCatalog.Default().Key
+		templateKey = s.defaultSystemPolicyTemplate(r.Context()).Key
 	}
-	policyTemplate, ok := s.policyCatalog.Latest(templateKey)
+	policyTemplate, ok := s.latestSystemPolicyTemplate(r.Context(), templateKey)
 	if !ok {
 		s.renderPolicyForm(w, r, http.StatusBadRequest, "지원하지 않는 시스템 정책 템플릿입니다.", form)
 		return
 	}
 	mode := strings.TrimSpace(r.FormValue("mode"))
 	paranoiaLevel, paranoiaErr := strconv.Atoi(strings.TrimSpace(r.FormValue("paranoia_level")))
+	executingParanoiaLevel, executingErr := strconv.Atoi(strings.TrimSpace(r.FormValue("executing_paranoia_level")))
 	inboundScore, scoreErr := strconv.Atoi(strings.TrimSpace(r.FormValue("inbound_score")))
-	if name == "" || target == "" || paranoiaErr != nil || scoreErr != nil {
+	outboundScore, outboundErr := strconv.Atoi(strings.TrimSpace(r.FormValue("outbound_score")))
+	samplingPercentage, samplingErr := strconv.Atoi(strings.TrimSpace(r.FormValue("sampling_percentage")))
+	if name == "" || target == "" || paranoiaErr != nil || executingErr != nil || scoreErr != nil || outboundErr != nil || samplingErr != nil {
 		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 이름, 대상과 유효한 세부 설정을 확인하세요.", form)
 		return
 	}
@@ -482,7 +547,24 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		CRSTrack: policyTemplate.CRSTrack, CRSVersion: policyTemplate.CRSVersion, Target: target,
 		AutoUpdate: strategy == PolicyStrategyAutomatic, PolicyOrigin: "administrator", MigrationStatus: "CURRENT",
 	}
-	artifact, settingsJSON, err := buildManagedPolicyArtifact(mode, paranoiaLevel, inboundScore, r.FormValue("request_body") == "on", r.FormValue("excluded_paths"), r.FormValue("excluded_ips"), r.FormValue("custom_rules"), metadata)
+	guidedRules, guidedErr := guidedRulesFromForm(r)
+	customRules, mergeErr := mergeGuidedPolicyRules(r.FormValue("custom_rules"), guidedRules)
+	if guidedErr != nil || mergeErr != nil {
+		message := "안내형 규칙 입력이 올바르지 않습니다."
+		if guidedErr != nil {
+			message = guidedErr.Error()
+		} else if mergeErr != nil {
+			message = mergeErr.Error()
+		}
+		s.renderPolicyForm(w, r, http.StatusBadRequest, message, form)
+		return
+	}
+	exclusions, exclusionErr := enterprisePolicyExclusionsFromForm(r)
+	if exclusionErr != nil {
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 예외가 올바르지 않습니다: "+exclusionErr.Error(), form)
+		return
+	}
+	_, _, err := buildEnterprisePolicyArtifact(policyTemplate, mode, paranoiaLevel, inboundScore, r.FormValue("request_body") == "on", r.FormValue("excluded_paths"), r.FormValue("excluded_ips"), customRules, metadata)
 	if err != nil {
 		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 설정이 올바르지 않습니다: "+err.Error(), form)
 		return
@@ -515,17 +597,23 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 대상에 실제로 적용 가능한 서버가 없습니다. 정책 우선순위와 대상 구성을 확인하세요.", form)
 		return
 	}
-	revisionID := randomID()
-	hash, signature := s.policySigner.Sign(artifact)
-	relativePath := filepath.Join("policies", revisionID+".conf")
-	fullPath := filepath.Join(s.cfg.ArtifactRoot, relativePath)
-	if err := writeArtifact(fullPath, artifact); err != nil {
-		s.renderPolicyForm(w, r, http.StatusInternalServerError, "정책 파일을 안전하게 저장할 수 없습니다. 잠시 후 다시 시도하세요.", form)
-		return
+	settings := PolicySettings{
+		SchemaVersion: policyTemplate.SchemaVersion, TemplateKey: policyTemplate.Key, TemplateVersion: policyTemplate.Version,
+		CRSTrack: policyTemplate.CRSTrack, CRSVersion: policyTemplate.CRSVersion, Target: target, AutoUpdate: strategy == PolicyStrategyAutomatic,
+		PolicyOrigin: "administrator", MigrationStatus: "CURRENT", ParanoiaLevel: paranoiaLevel,
+		ExecutingParanoiaLevel: executingParanoiaLevel, InboundScore: inboundScore, OutboundScore: outboundScore,
+		RequestBody: r.FormValue("request_body") == "on", ResponseBody: r.FormValue("response_body") == "on",
+		EarlyBlocking: r.FormValue("early_blocking") == "on", SamplingPercentage: samplingPercentage, ExcludedPaths: uniqueNonEmptyLines(r.FormValue("excluded_paths")),
+		ExcludedIPs: uniqueNonEmptyLines(r.FormValue("excluded_ips")), Exclusions: exclusions, CustomRules: customRules,
 	}
-	revision := PolicyRevisionInput{
-		ID: revisionID, SystemPolicyVersionID: policyTemplate.Reference(), Name: name, Description: description, Mode: mode,
-		SettingsJSON: settingsJSON, ArtifactPath: filepath.ToSlash(relativePath), ArtifactSHA256: hash, ArtifactSignature: signature, PolicyOrigin: "administrator",
+	origin := "administrator"
+	if r.FormValue("confirm_legacy_policy") == "confirmed" {
+		origin = "administrator-legacy-confirmed"
+	}
+	revision, fullPath, err := s.preparePolicyRevision(policyTemplate, name, description, mode, settings, "", origin)
+	if err != nil {
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 개정본을 만들 수 없습니다: "+err.Error(), form)
+		return
 	}
 	rolloutID, err := s.store.CreateEnterprisePolicyWithRollout(r.Context(), enterpriseID, policyID, name, description, target, policyTemplate.Key, strategy, session.UserID, revision, "SEED", "QUEUED", serverIDs)
 	if err != nil {
@@ -571,7 +659,7 @@ func (s *Server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, sessionFrom(r).Username, "enrollment.create", label, "success")
-	s.renderEnrollment(w, r, map[string]any{"Token": token, "ExpiresAt": expires})
+	s.renderEnrollment(w, r, map[string]any{"Token": token, "ExpiresAt": expires, "FormEnterpriseID": enterpriseID})
 }
 
 func (s *Server) apiServers(w http.ResponseWriter, r *http.Request) {
@@ -584,12 +672,35 @@ func (s *Server) apiServers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListEvents(r.Context(), sessionFrom(r).ScopeEnterpriseID(), 500)
+	enterpriseID, ok := s.effectiveEnterpriseFilter(r, r.URL.Query().Get("enterprise_id"))
+	if !ok {
+		writeProblem(w, http.StatusBadRequest, "invalid enterprise filter")
+		return
+	}
+	filter, rangeKey := eventFilterFromRequest(r, enterpriseID)
+	page := queryPage(r)
+	pageSize := 100
+	if requested, parseErr := strconv.Atoi(r.URL.Query().Get("page_size")); parseErr == nil && requested >= 1 && requested <= 500 {
+		pageSize = requested
+	}
+	if filter.CursorDirection == "" {
+		filter.Offset = (page - 1) * pageSize
+	}
+	items, err := s.store.ListEventsFiltered(r.Context(), "", filter, pageSize+1)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "load events")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	pageResult := paginateEventRecords(items, pageSize, page, filter.CursorDirection)
+	items = pageResult.Items
+	previousCursor, nextCursor := "", ""
+	if pageResult.HasPrevious && len(items) != 0 {
+		previousCursor = encodeEventCursor(items[0], eventCursorAfter)
+	}
+	if pageResult.HasNext && len(items) != 0 {
+		nextCursor = encodeEventCursor(items[len(items)-1], eventCursorBefore)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "page": page, "page_size": pageSize, "has_previous": pageResult.HasPrevious, "has_next": pageResult.HasNext, "previous_cursor": previousCursor, "next_cursor": nextCursor, "range": rangeKey, "generated_at": time.Now().UTC()})
 }
 
 func (s *Server) apiCreateEnrollment(w http.ResponseWriter, r *http.Request) {
@@ -621,7 +732,7 @@ func (s *Server) apiCreateEnrollment(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, sessionFrom(r).Username, "enrollment.create", request.Label, "success")
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "expires_at": expires, "agent_api": s.cfg.AgentPublicURL})
+	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "expires_at": expires, "agent_api": s.cfg.PublicURL})
 }
 
 func (s *Server) bootstrapInstaller(w http.ResponseWriter, _ *http.Request) {
@@ -652,21 +763,34 @@ func (s *Server) resolvePackages(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusUnauthorized, "invalid enrollment token")
 		return
 	}
-	agent, module, err := s.catalog.Resolve(request.Inventory)
+	var agent, module model.PackageArtifact
+	var err error
+	packageIDs := make([]string, 0, 2)
+	if request.Inventory.InstallationMode == "manual" {
+		agent, err = s.catalog.ResolveAgent(request.Inventory)
+		packageIDs = append(packageIDs, agent.ID)
+	} else {
+		agent, module, err = s.catalog.Resolve(request.Inventory)
+		packageIDs = append(packageIDs, agent.ID, module.ID)
+	}
 	if err != nil {
 		writeProblem(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	if err := s.store.AllowEnrollmentPackages(r.Context(), request.Token, []string{agent.ID, module.ID}); err != nil {
+	if err := s.store.AllowEnrollmentPackages(r.Context(), request.Token, packageIDs); err != nil {
 		writeProblem(w, http.StatusUnauthorized, "invalid enrollment token")
 		return
 	}
 	expires := time.Now().UTC().Add(s.cfg.EnrollmentTTL)
+	moduleDownload := model.PackageDownload{}
+	if module.ID != "" {
+		moduleDownload = packageDownload(s.cfg.PublicURL, module)
+	}
 	resolution := model.PackageResolution{
 		BundleVersion: s.catalog.Manifest().BundleVersion,
 		ExpiresAt:     expires,
-		Agent:         packageDownload(s.cfg.AgentPublicURL, agent),
-		Module:        packageDownload(s.cfg.AgentPublicURL, module),
+		Agent:         packageDownload(s.cfg.PublicURL, agent),
+		Module:        moduleDownload,
 	}
 	if strings.Contains(r.Header.Get("Accept"), "text/plain") {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -736,7 +860,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.TriggerPolicySync()
-	writeJSON(w, http.StatusCreated, model.EnrollResponse{ServerID: serverID, CertificatePEM: certificate, CACertificate: s.ca.CertificatePEM(), PolicyPublicKey: s.policySigner.PublicPEM(), AgentAPI: s.cfg.AgentPublicURL})
+	writeJSON(w, http.StatusCreated, model.EnrollResponse{ServerID: serverID, CertificatePEM: certificate, CACertificate: s.ca.CertificatePEM(), PolicyPublicKey: s.policySigner.PublicPEM(), AgentAPI: s.cfg.PublicURL})
 }
 
 func (s *Server) renewCertificate(w http.ResponseWriter, r *http.Request) {
@@ -776,7 +900,7 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if state.RevisionID != "" {
-		state.ArtifactURL = "/agent/v1/artifacts/" + state.RevisionID
+		state.ArtifactURL = protocol.PolicyArtifactPath(state.RevisionID)
 	}
 	if state.PackageDeployment != nil {
 		if s.catalog == nil {
@@ -992,6 +1116,9 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		if s.cfg.DevLiveReload {
+			w.Header().Set("Cache-Control", "no-store")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1007,11 +1134,11 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 }
 
 func packageDownload(base string, artifact model.PackageArtifact) model.PackageDownload {
-	return model.PackageDownload{ID: artifact.ID, Name: artifact.Name, Version: artifact.Version, URL: base + "/bootstrap/v1/packages/" + artifact.ID, Size: artifact.Size, SHA256: artifact.SHA256, RollbackID: artifact.RollbackID}
+	return model.PackageDownload{ID: artifact.ID, Name: artifact.Name, Version: artifact.Version, URL: base + protocol.BootstrapPackagePath(artifact.ID), Size: artifact.Size, SHA256: artifact.SHA256, RollbackID: artifact.RollbackID}
 }
 
 func agentPackageDownload(artifact model.PackageArtifact) model.PackageDownload {
-	return model.PackageDownload{ID: artifact.ID, Name: artifact.Name, Version: artifact.Version, URL: "/agent/v1/packages/" + artifact.ID, Size: artifact.Size, SHA256: artifact.SHA256, RollbackID: artifact.RollbackID}
+	return model.PackageDownload{ID: artifact.ID, Name: artifact.Name, Version: artifact.Version, URL: protocol.AgentPackagePath(artifact.ID), Size: artifact.Size, SHA256: artifact.SHA256, RollbackID: artifact.RollbackID}
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any, limit int64) error {

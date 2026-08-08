@@ -1,6 +1,12 @@
 package manager
 
-import "time"
+import (
+	"database/sql"
+	"strings"
+	"time"
+
+	"github.com/Fhwang0926/m-waf/internal/systempolicy"
+)
 
 const (
 	PolicyStrategyManual    = "MANUAL"
@@ -23,10 +29,18 @@ type SystemPolicyVersionRecord struct {
 	Status          string
 	TemplateSHA256  string
 	SourceCommit    string
+	Defaults        systempolicy.Defaults
 	MigrationNotes  []string
 	EnterpriseCount int
 	ServerCount     int
 	CreatedAt       time.Time
+}
+
+func (p SystemPolicyVersionRecord) DefaultModeLabel() string {
+	if p.Defaults.Mode == "DetectionOnly" {
+		return "탐지만"
+	}
+	return "차단"
 }
 
 func (p SystemPolicyVersionRecord) StatusLabel() string {
@@ -40,6 +54,10 @@ func (p SystemPolicyVersionRecord) StatusLabel() string {
 	default:
 		return p.Status
 	}
+}
+
+func (p SystemPolicyVersionRecord) CanWithdraw() bool {
+	return p.Status == systempolicy.StatusDeprecated && p.EnterpriseCount == 0
 }
 
 type EnterprisePolicyRecord struct {
@@ -63,9 +81,12 @@ type EnterprisePolicyRecord struct {
 	PreviousRevisionID         string
 	CurrentMode                string
 	CurrentSettings            PolicySettings
+	CurrentConfiguration       *PolicyConfiguration
 	LatestRolloutID            string
 	LatestRolloutStatus        string
 	HasActiveRollout           bool
+	MigrationRequired          bool
+	MigrationDetail            string
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
 }
@@ -84,6 +105,21 @@ func (p EnterprisePolicyRecord) StrategyLabel() string {
 		return "버전 고정"
 	default:
 		return p.UpdateStrategy
+	}
+}
+
+func (p EnterprisePolicyRecord) TargetLabel() string {
+	kind, _, ok := strings.Cut(p.Target, ":")
+	if !ok {
+		return "기존 대상"
+	}
+	switch kind {
+	case "server":
+		return "개별 서버"
+	case "group":
+		return "서버 그룹"
+	default:
+		return "기존 대상"
 	}
 }
 
@@ -127,6 +163,7 @@ type PolicyRolloutRecord struct {
 type PolicyRolloutTargetRecord struct {
 	RolloutID              string
 	ServerID               string
+	ServerName             string
 	BatchNo                int
 	Status                 string
 	ResumeStatus           string
@@ -146,6 +183,7 @@ type PolicyRolloutTargetRecord struct {
 	PackageStatus          string
 	PolicyStatus           string
 	TransitionPolicyStatus string
+	StabilizedAt           sql.NullTime
 	UpdatedAt              time.Time
 }
 
@@ -161,4 +199,5 @@ type PolicyRevisionInput struct {
 	ArtifactSHA256        string
 	ArtifactSignature     string
 	PolicyOrigin          string
+	Configuration         *PolicyConfiguration
 }

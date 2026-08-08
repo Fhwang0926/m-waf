@@ -2,3 +2,6 @@ services:
   mariadb:
     ports:
       - "${MWAF_DEV_DB_BIND:-127.0.0.1}:${MWAF_DEV_DB_PORT:-3306}:3306"
+    networks:
+      - db_net
+      - manager_net

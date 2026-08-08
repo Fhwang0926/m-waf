@@ -12,6 +12,7 @@ type EnterpriseRecord struct {
 	Name                 string
 	Status               string
 	TerminatedAt         sql.NullTime
+	SystemAdminCount     uint64
 	UserCount            uint64
 	ServerCount          uint64
 	PolicyCount          uint64
@@ -21,7 +22,8 @@ type EnterpriseRecord struct {
 	CreatedAt            time.Time
 }
 
-func (e EnterpriseRecord) Active() bool { return e.Status == "ACTIVE" }
+func (e EnterpriseRecord) Active() bool    { return e.Status == "ACTIVE" }
+func (e EnterpriseRecord) Protected() bool { return e.SystemAdminCount > 0 }
 func (e EnterpriseRecord) StatusLabel() string {
 	if e.Active() {
 		return "운영 중"
@@ -31,7 +33,9 @@ func (e EnterpriseRecord) StatusLabel() string {
 func (e EnterpriseRecord) DependencyCount() uint64 {
 	return e.UserCount + e.ServerCount + e.PolicyCount + e.GroupCount + e.EnrollmentTokenCount + e.InstallTokenCount
 }
-func (e EnterpriseRecord) CanDeletePermanently() bool { return e.DependencyCount() == 0 }
+func (e EnterpriseRecord) CanDeletePermanently() bool {
+	return !e.Protected() && e.DependencyCount() == 0
+}
 
 type UserRecord struct {
 	ID             string
@@ -59,9 +63,19 @@ func (s *Store) HasAdminUsers(ctx context.Context) (bool, error) {
 }
 
 func (s *Store) CreateInitialSystemAdmin(ctx context.Context, username, displayName, passwordHash string) (UserRecord, error) {
-	id := randomID()
-	result, err := s.db.ExecContext(ctx, `INSERT INTO admin_users(id,username,display_name,password_hash,role,is_active,bootstrap_key)
-SELECT ?,?,?,?,'system_admin',TRUE,1 FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM admin_users)`, id, username, displayName, passwordHash)
+	userID := randomID()
+	enterpriseID := randomID()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return UserRecord{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO enterprises(id,name,status) VALUES (?,'M-WAF 시스템 운영','ACTIVE')`, enterpriseID); err != nil {
+		return UserRecord{}, err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO admin_users(id,enterprise_id,username,display_name,password_hash,role,is_active,bootstrap_key)
+SELECT ?,?,?,?,?, 'system_admin',TRUE,1 FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM admin_users)`, userID, enterpriseID, username, displayName, passwordHash)
 	if err != nil {
 		return UserRecord{}, err
 	}
@@ -72,19 +86,25 @@ SELECT ?,?,?,?,'system_admin',TRUE,1 FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM a
 	if created != 1 {
 		return UserRecord{}, ErrSetupComplete
 	}
-	return s.UserByID(ctx, id)
+	if _, err := tx.ExecContext(ctx, `UPDATE enterprises SET created_by=? WHERE id=?`, userID, enterpriseID); err != nil {
+		return UserRecord{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return UserRecord{}, err
+	}
+	return s.UserByID(ctx, userID)
 }
 
 func (s *Store) UserByUsername(ctx context.Context, username string) (UserRecord, error) {
 	return scanUser(s.db.QueryRowContext(ctx, `SELECT u.id,COALESCE(u.enterprise_id,''),COALESCE(e.name,''),u.username,u.display_name,u.password_hash,u.role,u.is_active,u.last_login_at,u.created_at
-FROM admin_users u LEFT JOIN enterprises e ON e.id=u.enterprise_id
-WHERE u.username=? AND u.deleted_at IS NULL AND (u.enterprise_id IS NULL OR e.status='ACTIVE')`, username))
+FROM admin_users u JOIN enterprises e ON e.id=u.enterprise_id
+WHERE u.username=? AND u.deleted_at IS NULL AND e.status='ACTIVE'`, username))
 }
 
 func (s *Store) UserByID(ctx context.Context, id string) (UserRecord, error) {
 	return scanUser(s.db.QueryRowContext(ctx, `SELECT u.id,COALESCE(u.enterprise_id,''),COALESCE(e.name,''),u.username,u.display_name,u.password_hash,u.role,u.is_active,u.last_login_at,u.created_at
-FROM admin_users u LEFT JOIN enterprises e ON e.id=u.enterprise_id
-WHERE u.id=? AND u.deleted_at IS NULL AND (u.enterprise_id IS NULL OR e.status='ACTIVE')`, id))
+FROM admin_users u JOIN enterprises e ON e.id=u.enterprise_id
+WHERE u.id=? AND u.deleted_at IS NULL AND e.status='ACTIVE'`, id))
 }
 
 type rowScanner interface {
@@ -125,7 +145,7 @@ func (s *Store) ResetSystemAdminPassword(ctx context.Context, username, password
 
 	var userID string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM admin_users
-WHERE username=? AND role='system_admin' AND enterprise_id IS NULL AND is_active=TRUE AND deleted_at IS NULL FOR UPDATE`, username).Scan(&userID)
+WHERE username=? AND role='system_admin' AND is_active=TRUE AND deleted_at IS NULL FOR UPDATE`, username).Scan(&userID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrActiveSystemAdminNotFound
 	}
@@ -133,7 +153,7 @@ WHERE username=? AND role='system_admin' AND enterprise_id IS NULL AND is_active
 		return err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE admin_users SET password_hash=?
-WHERE id=? AND role='system_admin' AND enterprise_id IS NULL AND is_active=TRUE AND deleted_at IS NULL`, passwordHash, userID)
+WHERE id=? AND role='system_admin' AND is_active=TRUE AND deleted_at IS NULL`, passwordHash, userID)
 	if err != nil {
 		return err
 	}

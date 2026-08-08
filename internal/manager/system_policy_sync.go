@@ -2,15 +2,18 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/Fhwang0926/m-waf/internal/policybundle"
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
-	"github.com/Fhwang0926/m-waf/internal/version"
 )
 
 const systemPolicyServerLimit = 5000
@@ -19,11 +22,14 @@ func (s *Server) SyncSystemPolicies(ctx context.Context) error {
 	s.policySyncMu.Lock()
 	defer s.policySyncMu.Unlock()
 
-	if err := s.store.SyncSystemPolicyCatalog(ctx, s.policyCatalog, version.Commit); err != nil {
-		return fmt.Errorf("sync system policy catalog: %w", err)
+	if err := s.syncCRSReleaseIndexes(ctx); err != nil {
+		return fmt.Errorf("index verified CRS sources: %w", err)
 	}
 	if err := s.store.BackfillEnterprisePolicyDomains(ctx); err != nil {
 		return fmt.Errorf("backfill enterprise policies: %w", err)
+	}
+	if err := s.store.BackfillStructuredPolicyConfigurations(ctx); err != nil {
+		return fmt.Errorf("backfill structured policy configurations: %w", err)
 	}
 	servers, err := s.store.ListServers(ctx, "", systemPolicyServerLimit)
 	if err != nil {
@@ -74,13 +80,27 @@ func (s *Server) seedEnterprisePolicies(ctx context.Context, servers []ServerRec
 			hasEnterpriseDefault[policy.EnterpriseID] = true
 		}
 	}
+	enterprises, err := s.store.ListEnterprises(ctx)
+	if err != nil {
+		return fmt.Errorf("list enterprises for default policy seed: %w", err)
+	}
 	targets := make(map[string][]ServerRecord)
+	for _, enterprise := range enterprises {
+		if !hasEnterpriseDefault[enterprise.ID] {
+			targets[enterprise.ID] = nil
+		}
+	}
 	for _, server := range servers {
 		if !server.Revoked && server.EnterpriseID != "" && server.DesiredPolicyRevision == "" && !hasEnterpriseDefault[server.EnterpriseID] {
 			targets[server.EnterpriseID] = append(targets[server.EnterpriseID], server)
 		}
 	}
-	policyTemplate := s.policyCatalog.Default()
+	policyTemplate := s.defaultSystemPolicyTemplate(ctx)
+	if policyTemplate.Reference() == "@" {
+		// A clean installation waits until a system administrator publishes the
+		// first canonical crs-baseline from a verified CRS source.
+		return nil
+	}
 	var seedErrors []error
 	for enterpriseID, targetServers := range targets {
 		policyID := randomID()
@@ -88,7 +108,10 @@ func (s *Server) seedEnterprisePolicies(ctx context.Context, servers []ServerRec
 			SchemaVersion: policyTemplate.SchemaVersion, TemplateKey: policyTemplate.Key, TemplateVersion: policyTemplate.Version,
 			CRSTrack: policyTemplate.CRSTrack, CRSVersion: policyTemplate.CRSVersion, Target: "enterprise:" + enterpriseID,
 			AutoUpdate: false, PolicyOrigin: "system-seed", MigrationStatus: "CURRENT", ParanoiaLevel: policyTemplate.Defaults.ParanoiaLevel,
-			InboundScore: policyTemplate.Defaults.InboundScore, RequestBody: policyTemplate.Defaults.RequestBody,
+			ExecutingParanoiaLevel: policyTemplate.Defaults.ExecutingParanoiaLevel, InboundScore: policyTemplate.Defaults.InboundScore,
+			OutboundScore: policyTemplate.Defaults.OutboundScore, RequestBody: policyTemplate.Defaults.RequestBody,
+			ResponseBody: policyTemplate.Defaults.ResponseBody, EarlyBlocking: policyTemplate.Defaults.EarlyBlocking,
+			SamplingPercentage: policyTemplate.Defaults.SamplingPercentage,
 		}
 		revision, fullPath, err := s.preparePolicyRevision(policyTemplate, policyTemplate.Name, policyTemplate.Description, policyTemplate.Defaults.Mode, settings, "", "system-seed")
 		if err != nil {
@@ -118,7 +141,7 @@ func (s *Server) prepareAvailablePolicyUpdate(ctx context.Context, policy Enterp
 	if blocked {
 		return nil
 	}
-	targetTemplate, ok := splitSystemPolicyReference(s.policyCatalog, policy.LatestSystemPolicyID)
+	targetTemplate, ok := s.systemPolicyTemplate(ctx, policy.LatestSystemPolicyID)
 	if !ok || targetTemplate.Status != systempolicy.StatusPublished {
 		return errors.New("latest published system policy is unavailable")
 	}
@@ -132,8 +155,26 @@ func (s *Server) prepareAvailablePolicyUpdate(ctx context.Context, policy Enterp
 	settings.PolicyOrigin = "system-migration"
 	settings.MigrationStatus = "READY"
 	settings.MigratedFrom = policy.CurrentRevisionID
+	if detail := s.changedEnterpriseRuleImpact(ctx, policy.CurrentSystemPolicyID, targetTemplate, settings); detail != "" {
+		if err := s.store.SetPolicyMigrationImpact(ctx, policy.ID, targetTemplate.Reference(), detail); err != nil {
+			return err
+		}
+		return nil
+	}
 	revision, fullPath, err := s.preparePolicyRevision(targetTemplate, policy.Name, policy.Description, policy.CurrentMode, settings, policy.CurrentRevisionID, "system-migration")
 	if err != nil {
+		var migrationErr PolicyMigrationRequiredError
+		if errors.As(err, &migrationErr) {
+			if markErr := s.store.SetPolicyMigrationImpact(ctx, policy.ID, targetTemplate.Reference(), migrationErr.Detail); markErr != nil {
+				return markErr
+			}
+			s.logger.Warn("enterprise_policy_migration_required", "enterprise_policy_id", policy.ID, "target", targetTemplate.Reference(), "detail", migrationErr.Detail)
+			return nil
+		}
+		return err
+	}
+	if err := s.store.ClearPolicyMigrationImpact(ctx, policy.ID, targetTemplate.Reference()); err != nil {
+		_ = os.Remove(fullPath)
 		return err
 	}
 	status := "AWAITING_APPROVAL"
@@ -153,8 +194,36 @@ func (s *Server) prepareAvailablePolicyUpdate(ctx context.Context, policy Enterp
 	return nil
 }
 
+func (s *Server) changedEnterpriseRuleImpact(ctx context.Context, currentSystemPolicyID string, target systempolicy.Template, settings PolicySettings) string {
+	current, ok := s.systemPolicyTemplate(ctx, currentSystemPolicyID)
+	if !ok || current.Defaults.CRSSource == nil || target.Defaults.CRSSource == nil {
+		return ""
+	}
+	_, previousIndex, previousOK, previousErr := s.indexedPolicySource(ctx, current.Defaults.CRSSource.ID)
+	_, targetIndex, targetOK, targetErr := s.indexedPolicySource(ctx, target.Defaults.CRSSource.ID)
+	if previousErr != nil || targetErr != nil || !previousOK || !targetOK {
+		return ""
+	}
+	previous := make(map[int]string, len(previousIndex.Rules))
+	for _, rule := range previousIndex.Rules {
+		previous[rule.ID] = rule.ContentHash
+	}
+	changed := make(map[int]bool)
+	for _, rule := range targetIndex.Rules {
+		if old, exists := previous[rule.ID]; exists && old != rule.ContentHash {
+			changed[rule.ID] = true
+		}
+	}
+	for _, exclusion := range settings.Exclusions {
+		if (exclusion.Type == PolicyExclusionRule || exclusion.Type == PolicyExclusionTarget) && changed[exclusion.RuleID] {
+			return fmt.Sprintf("내용이 변경된 CRS Rule %d을 기업 예외가 참조하여 수동 검토가 필요합니다", exclusion.RuleID)
+		}
+	}
+	return ""
+}
+
 func (s *Server) processPolicyRollout(ctx context.Context, rollout PolicyRolloutRecord) error {
-	targetTemplate, ok := splitSystemPolicyReference(s.policyCatalog, rollout.TargetSystemPolicyVersionID)
+	targetTemplate, ok := s.systemPolicyTemplate(ctx, rollout.TargetSystemPolicyVersionID)
 	if !ok {
 		_ = s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "FAILED", "시스템 정책 버전을 찾을 수 없습니다.")
 		return errors.New("target system policy version is unavailable")
@@ -193,6 +262,7 @@ func (s *Server) processPolicyRollout(ctx context.Context, rollout PolicyRollout
 		}
 	}
 	var deferredCanary *PolicyRolloutTargetRecord
+	var appliedCanary *PolicyRolloutTargetRecord
 	canaryApplied := false
 	for index := range targets {
 		target := &targets[index]
@@ -201,6 +271,9 @@ func (s *Server) processPolicyRollout(ctx context.Context, rollout PolicyRollout
 		}
 		if target.Status == "APPLIED" || target.Status == "ROLLED_BACK" {
 			canaryApplied = true
+			if target.Status == "APPLIED" {
+				appliedCanary = target
+			}
 		}
 		if target.Status == "DEFERRED" {
 			deferredCanary = target
@@ -219,6 +292,19 @@ func (s *Server) processPolicyRollout(ctx context.Context, rollout PolicyRollout
 				break
 			}
 		}
+	}
+	if rollout.Type == "UPDATE" && rollout.FromRevisionID != "" && rollout.Status == "CANARY" && appliedCanary != nil && hasPendingExpansionTargets(targets) {
+		ready, failure, err := s.evaluateCanaryGate(ctx, rollout, targetTemplate, *appliedCanary)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return nil
+		}
+		if failure != "" {
+			return s.recoverFailedCanary(ctx, rollout, *appliedCanary, failure)
+		}
+		_ = s.store.Audit(ctx, randomID(), "system:policy-rollout", "policy_rollout.canary_gate", rollout.ID+":"+appliedCanary.ServerID, "success", "internal")
 	}
 	currentBatch := -1
 	for _, target := range targets {
@@ -271,10 +357,83 @@ func (s *Server) processPolicyRollout(ctx context.Context, rollout PolicyRollout
 	return nil
 }
 
+func hasPendingExpansionTargets(targets []PolicyRolloutTargetRecord) bool {
+	for _, target := range targets {
+		if target.BatchNo > 0 && target.Status != "APPLIED" && target.Status != "ROLLED_BACK" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) evaluateCanaryGate(ctx context.Context, rollout PolicyRolloutRecord, targetTemplate systempolicy.Template, canary PolicyRolloutTargetRecord) (bool, string, error) {
+	if !canary.StabilizedAt.Valid {
+		return false, "", nil
+	}
+	observationStart := canary.StabilizedAt.Time.UTC()
+	observationEnd := observationStart.Add(10 * time.Minute)
+	if time.Now().UTC().Before(observationEnd) {
+		return false, "", nil
+	}
+	if !canary.Online {
+		return true, "카나리 관찰 종료 시 최근 heartbeat가 없습니다.", nil
+	}
+	if normalizeCRSVersion(canary.InventoryCRSVersion) != normalizeCRSVersion(targetTemplate.CRSVersion) {
+		return true, "카나리의 실제 CRS 버전이 대상 시스템 정책과 다릅니다.", nil
+	}
+	if canary.CurrentPolicyRevision != canary.FinalRevisionID || canary.PolicyStatus != "APPLIED" {
+		return true, "카나리의 실제 정책 revision을 확인할 수 없습니다.", nil
+	}
+	baseline, err := s.store.CountBlockedEvents(ctx, canary.ServerID, observationStart.Add(-60*time.Minute), observationStart, "")
+	if err != nil {
+		return false, "", err
+	}
+	observed, err := s.store.CountBlockedEvents(ctx, canary.ServerID, observationStart, observationEnd, canary.FinalRevisionID)
+	if err != nil {
+		return false, "", err
+	}
+	baselineRate := float64(baseline) / 60
+	observedRate := float64(observed) / 10
+	threshold := math.Max(5, baselineRate*3)
+	if observedRate > threshold {
+		return true, fmt.Sprintf("카나리 차단률이 %.2f건/분으로 허용 기준 %.2f건/분을 초과했습니다. 기준선은 %.2f건/분입니다.", observedRate, threshold, baselineRate), nil
+	}
+	return true, "", nil
+}
+
+func (s *Server) recoverFailedCanary(ctx context.Context, rollout PolicyRolloutRecord, canary PolicyRolloutTargetRecord, detail string) error {
+	_ = s.store.Audit(ctx, randomID(), "system:policy-rollout", "policy_rollout.canary_gate", rollout.ID+":"+canary.ServerID+":"+truncate(detail, 512), "failed", "internal")
+	if err := s.store.UpdatePolicyRolloutTarget(ctx, rollout.ID, canary.ServerID, "FAILED", truncate(detail, 4096)); err != nil {
+		return err
+	}
+	if err := s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "FAILED", truncate(detail, 4096)); err != nil {
+		return err
+	}
+	policy, err := s.store.EnterprisePolicyByID(ctx, rollout.EnterpriseID, rollout.EnterprisePolicyID)
+	if err != nil {
+		return err
+	}
+	fromRevision, err := s.store.PolicyRevisionByID(ctx, rollout.EnterprisePolicyID, rollout.FromRevisionID)
+	if err != nil {
+		return err
+	}
+	_, err = s.store.CreatePolicyRollout(ctx, policy, policy.CurrentRevisionID, "RECOVERY", "QUEUED", "", nil, fromRevision.ID, fromRevision.SystemPolicyVersionID, []string{canary.ServerID})
+	result := "success"
+	if err != nil {
+		result = "failed"
+	}
+	_ = s.store.Audit(ctx, randomID(), "system:policy-rollout", "policy_rollout.canary_recovery", rollout.ID+":"+canary.ServerID+":"+truncate(detail, 512), result, "internal")
+	return err
+}
+
 func (s *Server) advanceRolloutTarget(ctx context.Context, rollout PolicyRolloutRecord, targetTemplate systempolicy.Template, transitionRevisionID *string, target PolicyRolloutTargetRecord) error {
 	switch target.Status {
 	case "PENDING", "DEFERRED":
-		if normalizeCRSVersion(target.InventoryCRSVersion) == normalizeCRSVersion(targetTemplate.CRSVersion) {
+		needsV2Package, err := s.rolloutNeedsV2Package(ctx, rollout, targetTemplate)
+		if err != nil {
+			return err
+		}
+		if targetTemplate.Defaults.ArtifactFormat == policybundle.FormatV3 || normalizeCRSVersion(target.InventoryCRSVersion) == normalizeCRSVersion(targetTemplate.CRSVersion) && !needsV2Package {
 			return s.store.AssignPolicyForRollout(ctx, rollout.ID, rollout.EnterpriseID, target.ServerID, target.FinalRevisionID, "", "POLICY_PENDING")
 		}
 		if rollout.FromRevisionID != "" {
@@ -321,6 +480,21 @@ func (s *Server) advanceRolloutTarget(ctx context.Context, rollout PolicyRollout
 	return nil
 }
 
+func (s *Server) rolloutNeedsV2Package(ctx context.Context, rollout PolicyRolloutRecord, target systempolicy.Template) (bool, error) {
+	if target.Defaults.ArtifactFormat != policybundle.Format {
+		return false, nil
+	}
+	if rollout.FromRevisionID == "" {
+		return true, nil
+	}
+	from, err := s.store.PolicyRevisionByID(ctx, rollout.EnterprisePolicyID, rollout.FromRevisionID)
+	if err != nil {
+		return false, err
+	}
+	base, ok := s.systemPolicyTemplate(ctx, from.SystemPolicyVersionID)
+	return !ok || base.Defaults.ArtifactFormat != policybundle.Format, nil
+}
+
 func (s *Server) queueRolloutPackage(ctx context.Context, rollout PolicyRolloutRecord, targetTemplate systempolicy.Template, target PolicyRolloutTargetRecord) error {
 	if s.catalog == nil {
 		return errors.New("서명 패키지 catalog를 사용할 수 없습니다.")
@@ -328,6 +502,9 @@ func (s *Server) queueRolloutPackage(ctx context.Context, rollout PolicyRolloutR
 	server, err := s.store.ServerByID(ctx, rollout.EnterpriseID, target.ServerID)
 	if err != nil {
 		return err
+	}
+	if server.Inventory.InstallationMode == "manual" {
+		return errors.New("수동 Connector 서버에는 legacy CRS 모듈 패키지를 배포할 수 없습니다.")
 	}
 	agentPackage, modulePackage, err := s.catalog.ResolveCRS(server.Inventory, targetTemplate.CRSVersion)
 	if err != nil {
@@ -345,6 +522,13 @@ func (s *Server) handleRolloutFailure(ctx context.Context, rollout PolicyRollout
 	policy, err := s.store.EnterprisePolicyByID(ctx, rollout.EnterpriseID, rollout.EnterprisePolicyID)
 	if err != nil {
 		return err
+	}
+	if rollout.Type == "UPDATE" && rollout.FromRevisionID != "" {
+		for _, target := range targets {
+			if target.BatchNo == 0 && target.Status == "FAILED" && rolloutTargetChanged(target) {
+				return s.recoverFailedCanary(ctx, rollout, target, detail)
+			}
+		}
 	}
 	if rollout.Type != "UPDATE" || policy.UpdateStrategy != PolicyStrategyAutomatic || rollout.FromRevisionID == "" {
 		return s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "PAUSED", truncate(detail, 4096))
@@ -374,18 +558,100 @@ func rolloutTargetChanged(target PolicyRolloutTargetRecord) bool {
 }
 
 func (s *Server) preparePolicyRevision(policyTemplate systempolicy.Template, name, description, mode string, settings PolicySettings, parentRevisionID, origin string) (PolicyRevisionInput, string, error) {
+	revisionID := randomID()
 	metadata := ManagedPolicyMetadata{
 		SchemaVersion: settings.SchemaVersion, TemplateKey: settings.TemplateKey, TemplateVersion: settings.TemplateVersion,
 		CRSTrack: settings.CRSTrack, CRSVersion: settings.CRSVersion, Target: settings.Target, AutoUpdate: settings.AutoUpdate,
 		PolicyOrigin: settings.PolicyOrigin, MigrationStatus: settings.MigrationStatus, MigratedFrom: parentRevisionID,
 	}
-	artifact, settingsJSON, err := buildManagedPolicyArtifact(mode, settings.ParanoiaLevel, settings.InboundScore, settings.RequestBody, strings.Join(settings.ExcludedPaths, "\n"), strings.Join(settings.ExcludedIPs, "\n"), settings.CustomRules, metadata)
+	artifact, settingsJSON, err := buildEnterprisePolicyArtifact(policyTemplate, mode, settings.ParanoiaLevel, settings.InboundScore, settings.RequestBody, strings.Join(settings.ExcludedPaths, "\n"), strings.Join(settings.ExcludedIPs, "\n"), settings.CustomRules, metadata)
 	if err != nil {
 		return PolicyRevisionInput{}, "", err
 	}
-	revisionID := randomID()
+	var normalized PolicySettings
+	if err := json.Unmarshal([]byte(settingsJSON), &normalized); err != nil {
+		return PolicyRevisionInput{}, "", err
+	}
+	normalized.ExecutingParanoiaLevel = settings.ExecutingParanoiaLevel
+	normalized.OutboundScore = settings.OutboundScore
+	normalized.ResponseBody = settings.ResponseBody
+	normalized.EarlyBlocking = settings.EarlyBlocking
+	normalized.SamplingPercentage = settings.SamplingPercentage
+	normalized.LegacyPolicyConfirmed = settings.LegacyPolicyConfirmed
+	normalized.Exclusions = append([]PolicyExclusion(nil), settings.Exclusions...)
+	configuration, legacy, err := structuredConfigurationFromPolicy("", revisionID, policyTemplate, mode, normalized)
+	if err != nil {
+		return PolicyRevisionInput{}, "", err
+	}
+	for _, rule := range configuration.CustomRules {
+		if rule.LegacyIDRange {
+			return PolicyRevisionInput{}, "", PolicyMigrationRequiredError{Detail: fmt.Sprintf("legacy Rule ID %d를 현재 %s ID 범위로 변경해야 새 개정본을 만들 수 있습니다", rule.RuleID, rule.SourceScope)}
+		}
+	}
+	if legacy {
+		if origin == "administrator" || origin == "system-migration" && !settings.LegacyPolicyConfirmed {
+			return PolicyRevisionInput{}, "", PolicyMigrationRequiredError{Detail: "legacy 전체 엔진 우회를 Rule·Target·Tag 예외로 전환하거나 명시적으로 유지 확인해야 합니다"}
+		}
+	}
+	normalized.ParanoiaLevel = configuration.BlockingParanoiaLevel
+	normalized.ExecutingParanoiaLevel = configuration.ExecutingParanoiaLevel
+	normalized.InboundScore = configuration.InboundAnomalyThreshold
+	normalized.OutboundScore = configuration.OutboundAnomalyThreshold
+	normalized.RequestBody = configuration.RequestBodyAccess
+	normalized.ResponseBody = configuration.ResponseBodyAccess
+	normalized.EarlyBlocking = configuration.EarlyBlocking
+	normalized.SamplingPercentage = configuration.SamplingPercentage
+	if !legacy || origin == "system-migration" {
+		// An unused acknowledgement is cleared, and a used acknowledgement is
+		// consumed by one migration so a later CRS update requires review again.
+		normalized.LegacyPolicyConfirmed = false
+	}
+	settingsRaw, err := json.Marshal(normalized)
+	if err != nil {
+		return PolicyRevisionInput{}, "", err
+	}
+	settingsJSON = string(settingsRaw)
+	extension := ".conf"
+	if policyTemplate.Defaults.ArtifactFormat == policybundle.Format || policyTemplate.Defaults.ArtifactFormat == policybundle.FormatV3 {
+		if policyTemplate.Defaults.CRSSource == nil {
+			return PolicyRevisionInput{}, "", errors.New("policy bundle requires a verified CRS source")
+		}
+		normalized.ArtifactFormat = policyTemplate.Defaults.ArtifactFormat
+		settingsRaw, err = json.Marshal(normalized)
+		if err != nil {
+			return PolicyRevisionInput{}, "", err
+		}
+		settingsJSON = string(settingsRaw)
+		_, sourceIndex, ok, indexErr := s.indexedPolicySource(context.Background(), configuration.CRSReleaseID)
+		if indexErr != nil {
+			return PolicyRevisionInput{}, "", indexErr
+		}
+		if !ok {
+			return PolicyRevisionInput{}, "", errors.New("verified CRS source index is unavailable")
+		}
+		if err := validateConfigurationRuleIDs(configuration, sourceIndex); err != nil {
+			return PolicyRevisionInput{}, "", err
+		}
+		bundleInput := policyBundleInputFromConfiguration(configuration)
+		if policyTemplate.Defaults.ArtifactFormat == policybundle.FormatV3 {
+			files, filesErr := s.policySourceFiles(policyTemplate.Defaults.CRSSource.ID)
+			if filesErr != nil {
+				return PolicyRevisionInput{}, "", filesErr
+			}
+			artifact, _, err = policybundle.BuildWithCRS(*policyTemplate.Defaults.CRSSource, bundleInput, files)
+		} else {
+			artifact, _, err = policybundle.Build(*policyTemplate.Defaults.CRSSource, bundleInput)
+		}
+		if err != nil {
+			return PolicyRevisionInput{}, "", err
+		}
+		extension = ".tar.gz"
+		if policyTemplate.Defaults.ArtifactFormat == policybundle.FormatV3 {
+			extension = ".v3.tar.gz"
+		}
+	}
 	hash, signature := s.policySigner.Sign(artifact)
-	relativePath := filepath.Join("policies", revisionID+".conf")
+	relativePath := filepath.Join("policies", revisionID+extension)
 	fullPath := filepath.Join(s.cfg.ArtifactRoot, relativePath)
 	if err := writeArtifact(fullPath, artifact); err != nil {
 		return PolicyRevisionInput{}, "", err
@@ -393,17 +659,41 @@ func (s *Server) preparePolicyRevision(policyTemplate systempolicy.Template, nam
 	return PolicyRevisionInput{
 		ID: revisionID, SystemPolicyVersionID: policyTemplate.Reference(), ParentRevisionID: parentRevisionID,
 		Name: truncate(name, 255), Description: truncate(description, 1024), Mode: mode, SettingsJSON: settingsJSON,
-		ArtifactPath: filepath.ToSlash(relativePath), ArtifactSHA256: hash, ArtifactSignature: signature, PolicyOrigin: origin,
+		ArtifactPath: filepath.ToSlash(relativePath), ArtifactSHA256: hash, ArtifactSignature: signature, PolicyOrigin: origin, Configuration: &configuration,
 	}, fullPath, nil
+}
+
+func policyBundleInputFromConfiguration(configuration PolicyConfiguration) policybundle.Input {
+	input := policybundle.Input{
+		Mode: configuration.EngineMode, RequestBody: configuration.RequestBodyAccess, ResponseBody: configuration.ResponseBodyAccess,
+		CRSSetup: configuration.CRSSetupMap(),
+	}
+	for _, item := range configuration.Exclusions {
+		exclusion := policybundle.Exclusion{
+			Type: item.Type, LoadStage: item.LoadStage, RuleID: item.RuleID, RuleTag: item.RuleTag, Target: item.Target,
+			GeneratedRuleID: item.GeneratedRuleID, Enabled: item.Enabled,
+		}
+		for _, condition := range item.Conditions {
+			exclusion.Conditions = append(exclusion.Conditions, policybundle.Condition{Field: condition.Field, Operator: condition.Operator, Value: condition.Value})
+		}
+		input.Exclusions = append(input.Exclusions, exclusion)
+	}
+	for _, item := range configuration.CustomRules {
+		input.CustomRules = append(input.CustomRules, policybundle.CustomRule{RuleID: item.RuleID, Scope: item.SourceScope, Canonical: item.CanonicalSecRule, Enabled: item.Enabled})
+	}
+	return input
 }
 
 func (s *Server) prepareTransitionRevision(target systempolicy.Template, policy EnterprisePolicyRecord, parentRevisionID string) (PolicyRevisionInput, string, error) {
 	settings := PolicySettings{
 		SchemaVersion: target.SchemaVersion, TemplateKey: target.Key, TemplateVersion: target.Version, CRSTrack: target.CRSTrack,
 		CRSVersion: target.CRSVersion, Target: policy.Target, PolicyOrigin: "system-transition", MigrationStatus: "TRANSITION",
-		ParanoiaLevel: 1, InboundScore: 5, RequestBody: true,
+		ParanoiaLevel: 1, ExecutingParanoiaLevel: 1, InboundScore: 5, OutboundScore: 4, RequestBody: true, SamplingPercentage: 100,
 	}
-	return s.preparePolicyRevision(target, policy.Name+" 전환 보호", "CRS 변경 중 사용하는 최소 DetectionOnly 정책", "DetectionOnly", settings, parentRevisionID, "system-transition")
+	legacyTarget := target
+	legacyTarget.Defaults.ArtifactFormat = ""
+	legacyTarget.Defaults.CRSSource = nil
+	return s.preparePolicyRevision(legacyTarget, policy.Name+" 전환 보호", "CRS 변경 중 사용하는 최소 DetectionOnly 정책", "DetectionOnly", settings, parentRevisionID, "system-transition")
 }
 
 func (s *Server) enterprisePolicyWinners(ctx context.Context, policies []EnterprisePolicyRecord, servers []ServerRecord) (map[string][]string, error) {
