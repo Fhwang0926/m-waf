@@ -175,7 +175,13 @@ func (c *Client) DesiredState(ctx context.Context) (model.DesiredState, error) {
 }
 
 func (c *Client) SendEvents(ctx context.Context, batch model.EventBatch) error {
-	return c.doJSON(ctx, http.MethodPost, protocol.EventBatchPath, batch, nil)
+	token := strings.TrimSpace(c.cfg.EventVerificationToken)
+	if token == "" {
+		return errors.New("event verification token is required")
+	}
+	headers := make(http.Header)
+	headers.Set(protocol.EventVerificationHeader, token)
+	return c.doJSONWithHeaders(ctx, http.MethodPost, protocol.EventBatchPath, batch, nil, headers)
 }
 
 func (c *Client) SendPolicyResult(ctx context.Context, revisionID, status, detail string) error {
@@ -280,6 +286,10 @@ func (c *Client) doBytes(ctx context.Context, path string, limit int64) ([]byte,
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, requestBody, responseBody any) error {
+	return c.doJSONWithHeaders(ctx, method, path, requestBody, responseBody, nil)
+}
+
+func (c *Client) doJSONWithHeaders(ctx context.Context, method, path string, requestBody, responseBody any, headers http.Header) error {
 	var body io.Reader
 	if requestBody != nil {
 		raw, err := json.Marshal(requestBody)
@@ -294,6 +304,11 @@ func (c *Client) doJSON(ctx context.Context, method, path string, requestBody, r
 	}
 	if requestBody != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for name, values := range headers {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
 	}
 	resp, err := c.httpClient().Do(req)
 	if err != nil {

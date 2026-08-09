@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
@@ -26,6 +27,7 @@ type OverviewSummary struct {
 	BlockRate       float64 `json:"block_rate"`
 	FailedRollouts  int     `json:"failed_rollouts"`
 	PendingApproval int     `json:"pending_approval"`
+	UniqueSourceIPs int     `json:"unique_source_ips"`
 }
 
 type OverviewPoint struct {
@@ -52,22 +54,23 @@ type OverviewAction struct {
 }
 
 type OverviewData struct {
-	GeneratedAt time.Time        `json:"generated_at"`
-	Range       string           `json:"range"`
-	RangeLabel  string           `json:"range_label"`
-	RangeStart  time.Time        `json:"range_start"`
-	RangeEnd    time.Time        `json:"range_end"`
-	Summary     OverviewSummary  `json:"summary"`
-	Series      []OverviewPoint  `json:"series"`
-	TopRules    []OverviewRank   `json:"top_rules"`
-	TopURIs     []OverviewRank   `json:"top_uris"`
-	TopServers  []OverviewRank   `json:"top_servers"`
-	Actions     []OverviewAction `json:"actions"`
-	Recent      []EventRecord    `json:"recent_events"`
+	GeneratedAt   time.Time        `json:"generated_at"`
+	Range         string           `json:"range"`
+	RangeLabel    string           `json:"range_label"`
+	RangeStart    time.Time        `json:"range_start"`
+	RangeEnd      time.Time        `json:"range_end"`
+	Summary       OverviewSummary  `json:"summary"`
+	Series        []OverviewPoint  `json:"series"`
+	TopRules      []OverviewRank   `json:"top_rules"`
+	TopCategories []OverviewRank   `json:"top_categories"`
+	TopURIs       []OverviewRank   `json:"top_uris"`
+	TopServers    []OverviewRank   `json:"top_servers"`
+	Actions       []OverviewAction `json:"actions"`
+	Recent        []IncidentRecord `json:"recent_events"`
 }
 
 func (s *Store) CountBlockedEvents(ctx context.Context, serverID string, from, to time.Time, policyRevision string) (int, error) {
-	query := `SELECT COUNT(*) FROM security_events WHERE agent_id=? AND blocked=1 AND occurred_at>=? AND occurred_at<?`
+	query := `SELECT COUNT(*) FROM security_incidents WHERE agent_id=? AND blocked=1 AND occurred_at>=? AND occurred_at<?`
 	args := []any{serverID, from.UTC(), to.UTC()}
 	if policyRevision != "" {
 		query += ` AND policy_revision=?`
@@ -127,10 +130,6 @@ func (s *Store) Overview(ctx context.Context, filter OverviewFilter, now time.Ti
 		if server.Revoked {
 			continue
 		}
-		data.Summary.ActiveServers++
-		if server.Status == "ONLINE" {
-			data.Summary.OnlineServers++
-		}
 		if server.PolicyDeploymentStatus == "FAILED" || server.PackageDeploymentStatus == "FAILED" {
 			data.Actions = append(data.Actions, OverviewAction{Kind: "deployment", Level: "danger", Title: "배포 실패", Detail: firstNonEmpty(server.PolicyDeploymentDetail, server.PackageDeploymentDetail, "정책 또는 패키지 배포 결과를 확인하세요."), TargetName: server.Name, URL: "/servers/" + server.ID})
 		}
@@ -147,18 +146,22 @@ func (s *Store) Overview(ctx context.Context, filter OverviewFilter, now time.Ti
 			data.Actions = append(data.Actions, OverviewAction{Kind: "agent", Level: level, Title: title, Detail: detail, TargetName: server.Name, URL: "/servers/" + server.ID})
 		}
 	}
+	data.Summary.ActiveServers, data.Summary.OnlineServers, err = s.overviewServerCounts(ctx, filter, now)
+	if err != nil {
+		return OverviewData{}, err
+	}
 
-	where, args := overviewEventWhere(filter)
-	countQuery := `SELECT COUNT(*),COALESCE(SUM(se.blocked),0) FROM security_events se JOIN servers s ON s.id=se.agent_id` + where
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&data.Summary.EventCount, &data.Summary.BlockedCount); err != nil {
+	where, args := overviewIncidentWhere(filter)
+	countQuery := `SELECT COUNT(*),COALESCE(SUM(si.blocked),0),COUNT(DISTINCT si.client_ip) FROM security_incidents si JOIN servers s ON s.id=si.agent_id` + where
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&data.Summary.EventCount, &data.Summary.BlockedCount, &data.Summary.UniqueSourceIPs); err != nil {
 		return OverviewData{}, err
 	}
 	if data.Summary.EventCount > 0 {
 		data.Summary.BlockRate = float64(data.Summary.BlockedCount) * 100 / float64(data.Summary.EventCount)
 	}
 
-	seriesQuery := `SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(se.occurred_at)/?)*?),COUNT(*),COALESCE(SUM(se.blocked),0)
-FROM security_events se JOIN servers s ON s.id=se.agent_id` + where + ` GROUP BY 1 ORDER BY 1`
+	seriesQuery := `SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(si.occurred_at)/?)*?),COUNT(*),COALESCE(SUM(si.blocked),0)
+FROM security_incidents si JOIN servers s ON s.id=si.agent_id` + where + ` GROUP BY 1 ORDER BY 1`
 	seriesArgs := append([]any{bucketSeconds, bucketSeconds}, args...)
 	rows, err := s.db.QueryContext(ctx, seriesQuery, seriesArgs...)
 	if err != nil {
@@ -176,15 +179,23 @@ FROM security_events se JOIN servers s ON s.id=se.agent_id` + where + ` GROUP BY
 		return OverviewData{}, err
 	}
 
-	data.TopRules, err = s.overviewRanks(ctx, "se.rule_id", "se.rule_id<>''", "/events?rule_id=", where, args)
+	eventWhere, eventArgs := overviewEventWhere(filter)
+	data.TopRules, err = s.overviewRanks(ctx, "se.rule_id", "se.rule_id<>''", "/events?rule_id=", eventWhere, eventArgs)
 	if err != nil {
 		return OverviewData{}, err
 	}
-	data.TopURIs, err = s.overviewRanks(ctx, "se.uri", "se.uri<>''", "/events?q=", where, args)
+	data.TopCategories, err = s.overviewIncidentRanks(ctx, "si.category", "si.category<>''", "/events?category=", where, args)
 	if err != nil {
 		return OverviewData{}, err
 	}
-	data.TopServers, err = s.overviewRanks(ctx, "se.agent_id", "se.agent_id<>''", "/events?server=", where, args)
+	for index := range data.TopCategories {
+		data.TopCategories[index].Label = attackCategoryLabel(data.TopCategories[index].Key)
+	}
+	data.TopURIs, err = s.overviewIncidentRanks(ctx, "si.uri", "si.uri<>''", "/events?q=", where, args)
+	if err != nil {
+		return OverviewData{}, err
+	}
+	data.TopServers, err = s.overviewIncidentRanks(ctx, "si.agent_id", "si.agent_id<>''", "/events?server=", where, args)
 	if err != nil {
 		return OverviewData{}, err
 	}
@@ -197,8 +208,8 @@ FROM security_events se JOIN servers s ON s.id=se.agent_id` + where + ` GROUP BY
 		}
 	}
 
-	eventFilter := EventFilter{EnterpriseID: filter.EnterpriseID, GroupID: filter.GroupID, ServerID: filter.ServerID, Since: since}
-	data.Recent, err = s.ListEventsFiltered(ctx, "", eventFilter, 8)
+	incidentFilter := IncidentFilter{EnterpriseID: filter.EnterpriseID, GroupID: filter.GroupID, ServerID: filter.ServerID, Since: since}
+	data.Recent, err = s.ListIncidents(ctx, "", incidentFilter, 8)
 	if err != nil {
 		return OverviewData{}, err
 	}
@@ -244,6 +255,29 @@ FROM security_events se JOIN servers s ON s.id=se.agent_id` + where + ` GROUP BY
 	return data, nil
 }
 
+func (s *Store) overviewServerCounts(ctx context.Context, filter OverviewFilter, now time.Time) (int, int, error) {
+	conditions := []string{"s.revoked_at IS NULL"}
+	args := []any{now.UTC().Add(-serverOfflineAfter)}
+	if filter.EnterpriseID != "" {
+		conditions = append(conditions, "s.enterprise_id=?")
+		args = append(args, filter.EnterpriseID)
+	}
+	if filter.GroupID != "" {
+		conditions = append(conditions, `EXISTS (SELECT 1 FROM server_group_members gm JOIN server_groups g ON g.id=gm.group_id WHERE gm.server_id=s.id AND g.id=? AND g.enterprise_id=s.enterprise_id)`)
+		args = append(args, filter.GroupID)
+	}
+	if filter.ServerID != "" {
+		conditions = append(conditions, "s.id=?")
+		args = append(args, filter.ServerID)
+	}
+	query := `SELECT COUNT(*),COALESCE(SUM(s.status='ONLINE' AND s.last_heartbeat_at>=?),0) FROM servers s WHERE ` + strings.Join(conditions, " AND ")
+	var active, online int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&active, &online); err != nil {
+		return 0, 0, err
+	}
+	return active, online, nil
+}
+
 func overviewEventWhere(filter OverviewFilter) (string, []any) {
 	conditions := []string{"se.occurred_at>=?"}
 	args := []any{filter.Since.UTC()}
@@ -262,8 +296,45 @@ func overviewEventWhere(filter OverviewFilter) (string, []any) {
 	return " WHERE " + strings.Join(conditions, " AND "), args
 }
 
+func overviewIncidentWhere(filter OverviewFilter) (string, []any) {
+	conditions := []string{"si.occurred_at>=?"}
+	args := []any{filter.Since.UTC()}
+	if filter.EnterpriseID != "" {
+		conditions = append(conditions, "si.enterprise_id=?")
+		args = append(args, filter.EnterpriseID)
+	}
+	if filter.GroupID != "" {
+		conditions = append(conditions, `EXISTS (SELECT 1 FROM server_group_members gm JOIN server_groups g ON g.id=gm.group_id WHERE gm.server_id=si.agent_id AND g.id=? AND g.enterprise_id=si.enterprise_id)`)
+		args = append(args, filter.GroupID)
+	}
+	if filter.ServerID != "" {
+		conditions = append(conditions, "si.agent_id=?")
+		args = append(args, filter.ServerID)
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
 func (s *Store) overviewRanks(ctx context.Context, field, extra, urlPrefix, where string, args []any) ([]OverviewRank, error) {
 	query := `SELECT ` + field + `,` + field + `,COUNT(*),COALESCE(SUM(se.blocked),0) FROM security_events se JOIN servers s ON s.id=se.agent_id` + where + ` AND ` + extra + ` GROUP BY 1 ORDER BY 3 DESC LIMIT 5`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]OverviewRank, 0, 5)
+	for rows.Next() {
+		var item OverviewRank
+		if err := rows.Scan(&item.Key, &item.Label, &item.Count, &item.Blocked); err != nil {
+			return nil, err
+		}
+		item.URL = urlPrefix + url.QueryEscape(item.Key)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) overviewIncidentRanks(ctx context.Context, field, extra, urlPrefix, where string, args []any) ([]OverviewRank, error) {
+	query := `SELECT ` + field + `,` + field + `,COUNT(*),COALESCE(SUM(si.blocked),0) FROM security_incidents si JOIN servers s ON s.id=si.agent_id` + where + ` AND ` + extra + ` GROUP BY 1 ORDER BY 3 DESC LIMIT 5`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -304,11 +375,14 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (s *Store) EventByID(ctx context.Context, scopeEnterpriseID string, id uint64) (EventRecord, error) {
-	query := `SELECT se.id,se.agent_id,s.name,COALESCE(s.enterprise_id,''),COALESCE(e.name,'미지정'),se.occurred_at,se.transaction_id,se.service,se.method,se.uri,se.status_code,se.rule_id,se.message,se.severity,se.blocked,se.policy_revision,COALESCE(pr.enterprise_policy_id,'')
+	query := `SELECT se.id,COALESCE(se.incident_id,0),se.request_id,se.agent_id,s.name,COALESCE(s.enterprise_id,''),COALESCE(e.name,'미지정'),se.occurred_at,se.transaction_id,se.service,se.method,se.uri,se.client_ip,COALESCE(si.country_code,'ZZ'),se.status_code,se.rule_id,se.message,se.matched_variable,se.rule_tags_json,se.severity,se.blocked,se.policy_revision,COALESCE(pr.enterprise_policy_id,'')
 FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN enterprises e ON e.id=s.enterprise_id
-LEFT JOIN policy_revisions pr ON pr.id=se.policy_revision WHERE se.id=? AND (?='' OR s.enterprise_id=?)`
+LEFT JOIN policy_revisions pr ON pr.id=se.policy_revision LEFT JOIN security_incidents si ON si.id=se.incident_id WHERE se.id=? AND (?='' OR s.enterprise_id=?)`
 	var item EventRecord
-	err := s.db.QueryRowContext(ctx, query, id, scopeEnterpriseID, scopeEnterpriseID).Scan(&item.ID, &item.AgentID, &item.ServerName, &item.EnterpriseID, &item.EnterpriseName, &item.OccurredAt, &item.TransactionID, &item.Service, &item.Method, &item.URI, &item.StatusCode, &item.RuleID, &item.Message, &item.Severity, &item.Blocked, &item.PolicyRevision, &item.PolicyID)
+	var rawIP, tags []byte
+	err := s.db.QueryRowContext(ctx, query, id, scopeEnterpriseID, scopeEnterpriseID).Scan(&item.ID, &item.IncidentID, &item.RequestID, &item.AgentID, &item.ServerName, &item.EnterpriseID, &item.EnterpriseName, &item.OccurredAt, &item.TransactionID, &item.Service, &item.Method, &item.URI, &rawIP, &item.CountryCode, &item.StatusCode, &item.RuleID, &item.Message, &item.MatchedVariable, &tags, &item.Severity, &item.Blocked, &item.PolicyRevision, &item.PolicyID)
+	item.ClientIP = displayStoredIP(rawIP)
+	_ = json.Unmarshal(tags, &item.RuleTags)
 	return item, err
 }
 
@@ -316,9 +390,10 @@ func (s *Store) TransactionEvents(ctx context.Context, scopeEnterpriseID string,
 	if event.TransactionID == "" {
 		return []EventRecord{event}, nil
 	}
-	query := `SELECT se.id,se.agent_id,s.name,COALESCE(s.enterprise_id,''),COALESCE(e.name,'미지정'),se.occurred_at,se.transaction_id,se.service,se.method,se.uri,se.status_code,se.rule_id,se.message,se.severity,se.blocked,se.policy_revision,COALESCE(pr.enterprise_policy_id,'')
+	query := `SELECT se.id,COALESCE(se.incident_id,0),se.request_id,se.agent_id,s.name,COALESCE(s.enterprise_id,''),COALESCE(e.name,'미지정'),se.occurred_at,se.transaction_id,se.service,se.method,se.uri,se.client_ip,COALESCE(si.country_code,'ZZ'),se.status_code,se.rule_id,se.message,se.matched_variable,se.rule_tags_json,se.severity,se.blocked,se.policy_revision,COALESCE(pr.enterprise_policy_id,'')
 FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN enterprises e ON e.id=s.enterprise_id
 LEFT JOIN policy_revisions pr ON pr.id=se.policy_revision
+LEFT JOIN security_incidents si ON si.id=se.incident_id
 WHERE se.agent_id=? AND se.transaction_id=? AND (?='' OR s.enterprise_id=?) ORDER BY se.occurred_at,se.id LIMIT 100`
 	rows, err := s.db.QueryContext(ctx, query, event.AgentID, event.TransactionID, scopeEnterpriseID, scopeEnterpriseID)
 	if err != nil {
@@ -328,9 +403,12 @@ WHERE se.agent_id=? AND se.transaction_id=? AND (?='' OR s.enterprise_id=?) ORDE
 	items := make([]EventRecord, 0)
 	for rows.Next() {
 		var item EventRecord
-		if err := rows.Scan(&item.ID, &item.AgentID, &item.ServerName, &item.EnterpriseID, &item.EnterpriseName, &item.OccurredAt, &item.TransactionID, &item.Service, &item.Method, &item.URI, &item.StatusCode, &item.RuleID, &item.Message, &item.Severity, &item.Blocked, &item.PolicyRevision, &item.PolicyID); err != nil {
+		var rawIP, tags []byte
+		if err := rows.Scan(&item.ID, &item.IncidentID, &item.RequestID, &item.AgentID, &item.ServerName, &item.EnterpriseID, &item.EnterpriseName, &item.OccurredAt, &item.TransactionID, &item.Service, &item.Method, &item.URI, &rawIP, &item.CountryCode, &item.StatusCode, &item.RuleID, &item.Message, &item.MatchedVariable, &tags, &item.Severity, &item.Blocked, &item.PolicyRevision, &item.PolicyID); err != nil {
 			return nil, err
 		}
+		item.ClientIP = displayStoredIP(rawIP)
+		_ = json.Unmarshal(tags, &item.RuleTags)
 		items = append(items, item)
 	}
 	return items, rows.Err()

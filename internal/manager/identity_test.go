@@ -41,6 +41,65 @@ func TestEnterpriseScope(t *testing.T) {
 	}
 }
 
+func TestSystemAdministratorConsoleProjection(t *testing.T) {
+	actual := sessionData{Role: RoleSystemAdmin, ActualRole: RoleSystemAdmin, EnterpriseID: "enterprise-a", EnterpriseName: "System Enterprise"}
+	enterprise := actual.asEnterpriseConsole()
+	if enterprise.IsSystemAdmin() || !enterprise.CanAccessSystemManagement() || enterprise.Role != RoleEnterpriseAdmin {
+		t.Fatalf("enterprise console roles: effective=%q actual=%q system_access=%v", enterprise.Role, enterprise.actualRole(), enterprise.CanAccessSystemManagement())
+	}
+	if got := enterprise.ScopeEnterpriseID(); got != "enterprise-a" {
+		t.Fatalf("enterprise console scope = %q", got)
+	}
+	system := enterprise.asSystemConsole()
+	if !system.IsSystemAdmin() || !system.InSystemConsole() || system.Role != RoleSystemAdmin {
+		t.Fatalf("system console roles: effective=%q actual=%q area=%q", system.Role, system.actualRole(), system.ConsoleArea)
+	}
+	if got := system.ScopeEnterpriseID(); got != "" {
+		t.Fatalf("system console scope = %q", got)
+	}
+}
+
+func TestConsoleMiddlewareUsesEffectiveRole(t *testing.T) {
+	server := &Server{}
+	actual := sessionData{Role: RoleSystemAdmin, ActualRole: RoleSystemAdmin, EnterpriseID: "enterprise-a"}
+	request := httptest.NewRequest(http.MethodGet, "/servers?enterprise_id=enterprise-b", nil)
+	request = request.WithContext(context.WithValue(request.Context(), contextSession, actual))
+	response := httptest.NewRecorder()
+	server.requireEnterpriseConsole(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		session := sessionFrom(r)
+		if session.Role != RoleEnterpriseAdmin || session.ScopeEnterpriseID() != "enterprise-a" {
+			t.Fatalf("enterprise session = %#v", session)
+		}
+	})).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("enterprise console status = %d", response.Code)
+	}
+
+	rejected := httptest.NewRecorder()
+	enterpriseAdmin := sessionData{Role: RoleEnterpriseAdmin, ActualRole: RoleEnterpriseAdmin, EnterpriseID: "enterprise-a"}
+	request = request.WithContext(context.WithValue(request.Context(), contextSession, enterpriseAdmin))
+	server.requireSystemConsole(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("enterprise administrator reached system console")
+	})).ServeHTTP(rejected, request)
+	if rejected.Code != http.StatusForbidden {
+		t.Fatalf("system console rejection status = %d", rejected.Code)
+	}
+}
+
+func TestEnterpriseConsoleIgnoresRequestedEnterprise(t *testing.T) {
+	server := &Server{}
+	session := sessionData{Role: RoleSystemAdmin, ActualRole: RoleSystemAdmin, EnterpriseID: "enterprise-a"}.asEnterpriseConsole()
+	request := httptest.NewRequest(http.MethodGet, "/events?enterprise_id=enterprise-b", nil)
+	request = request.WithContext(context.WithValue(request.Context(), contextSession, session))
+	enterpriseID, ok := server.effectiveEnterpriseFilter(request, "enterprise-b")
+	if !ok || enterpriseID != "enterprise-a" {
+		t.Fatalf("effective enterprise = %q ok=%v", enterpriseID, ok)
+	}
+	if got := session.TenantScope().MutationEnterpriseID("enterprise-b"); got != "enterprise-a" {
+		t.Fatalf("mutation enterprise = %q", got)
+	}
+}
+
 func TestSessionCapabilities(t *testing.T) {
 	user := sessionData{Role: RoleEnterpriseUser, EnterpriseID: "enterprise-a"}
 	if !user.CanOperate() || user.CanManageUsers() {

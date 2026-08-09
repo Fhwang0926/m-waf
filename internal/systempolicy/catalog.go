@@ -50,6 +50,8 @@ type Defaults struct {
 	TargetExclusions       []TargetExclusion `json:"target_exclusions,omitempty"`
 	EngineBypasses         []EngineBypass    `json:"engine_bypasses,omitempty"`
 	ArtifactFormat         string            `json:"artifact_format,omitempty"`
+	HotRuleSetVersion      string            `json:"hot_rule_set_version,omitempty"`
+	HotRuleSetSHA256       string            `json:"hot_rule_set_sha256,omitempty"`
 }
 
 // PolicySourceRef pins a system policy to one CI-verified CRS source. The

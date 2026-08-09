@@ -170,5 +170,8 @@ export MWAF_DEV_LIVE_RELOAD=true
 echo "Starting local M-WAF Admin UI at https://localhost:$admin_port"
 echo "Agent requests use the same Manager URL at $MWAF_PUBLIC_URL"
 echo "Go, template, CSS, and JavaScript changes are applied automatically."
+if [ -z "${MWAF_CRS_GITHUB_TOKEN:-}" ]; then
+  echo "CRS synchronization uses GitHub anonymous API limits. Set MWAF_CRS_GITHUB_TOKEN in deploy/compose/.env for a higher limit."
+fi
 echo "Press Ctrl-C to stop Manager. Run 'make dev-down' to stop local MariaDB."
 exec sh "$script_dir/watch-manager.sh" "$repository_root" "$runtime_root/mwaf-manager-dev"

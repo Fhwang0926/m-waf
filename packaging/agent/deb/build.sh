@@ -11,8 +11,10 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT INT TERM
-mkdir -p "$OUTPUT_DIR" "$METADATA_DIR" "$root/DEBIAN" "$root/usr/bin" "$root/lib/systemd/system" "$root/usr/share/doc/mwaf-agent"
+mkdir -p "$OUTPUT_DIR" "$METADATA_DIR" "$root/DEBIAN" "$root/usr/bin" "$root/usr/sbin" "$root/usr/lib/mwaf" "$root/lib/systemd/system" "$root/usr/share/doc/mwaf-agent"
 install -m 0755 "$AGENT_BINARY" "$root/usr/bin/mwaf-agent"
+install -m 0755 packaging/agent/mwaf-uninstall "$root/usr/sbin/mwaf-uninstall"
+install -m 0755 packaging/module/external/configure.sh "$root/usr/lib/mwaf/configure-external"
 install -m 0644 packaging/agent/systemd/mwaf-agent.service "$root/lib/systemd/system/mwaf-agent.service"
 printf '%s\n' "source: https://github.com/Fhwang0926/m-waf" "commit: $COMMIT" > "$root/usr/share/doc/mwaf-agent/build-info"
 cat > "$root/DEBIAN/control" <<EOF
@@ -31,6 +33,15 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 exit 0
 EOF
 chmod 0755 "$root/DEBIAN/postinst"
+cat > "$root/DEBIAN/prerm" <<'EOF'
+#!/bin/sh
+set -e
+if [ "${1:-}" = remove ] && [ -x /usr/sbin/mwaf-uninstall ]; then
+  /usr/sbin/mwaf-uninstall --package-prerm
+fi
+exit 0
+EOF
+chmod 0755 "$root/DEBIAN/prerm"
 
 filename="mwaf-agent_${VERSION}_amd64.deb"
 dpkg-deb --build --root-owner-group "$root" "$OUTPUT_DIR/$filename"

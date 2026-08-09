@@ -64,7 +64,7 @@ func (s *Server) newSystemPolicyVersion(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) publishSystemPolicyVersion(w http.ResponseWriter, r *http.Request) {
-	s.renderAdminError(w, r, http.StatusGone, "직접 시스템 정책 게시는 종료되었습니다", "검증된 CRS 소스를 선택해 새 정책 버전을 만들고 검증한 뒤 게시하세요.")
+	s.renderAdminError(w, r, http.StatusGone, "직접 시스템 정책 게시는 종료되었습니다", "CRS 관리에서 검증된 소스를 선택하고 시스템 정책을 검증한 뒤 게시하세요.")
 }
 
 func (s *Server) withdrawSystemPolicyVersion(w http.ResponseWriter, r *http.Request) {
@@ -73,17 +73,19 @@ func (s *Server) withdrawSystemPolicyVersion(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if r.FormValue("confirm") != "withdraw" {
-		http.Redirect(w, r, "/system-policies?notice="+url.QueryEscape("회수 확인이 필요합니다."), http.StatusSeeOther)
+		http.Redirect(w, r, "/system-policies?error="+url.QueryEscape("회수 확인이 필요합니다."), http.StatusSeeOther)
 		return
 	}
 	id := truncate(strings.TrimSpace(r.PathValue("id")), 255)
 	if err := s.store.WithdrawSystemPolicyVersion(r.Context(), id); err != nil {
-		http.Redirect(w, r, "/system-policies?notice="+url.QueryEscape("기업 정책이 사용 중이거나 현재 게시본인 버전은 회수할 수 없습니다."), http.StatusSeeOther)
+		session := sessionFrom(r)
+		s.audit(r, session.Username, "system_policy.withdraw", id, "failed")
+		http.Redirect(w, r, "/system-policies?error="+url.QueryEscape("사용 중인 기업 정책 또는 진행 중인 단계 배포가 있어 회수할 수 없습니다."), http.StatusSeeOther)
 		return
 	}
 	session := sessionFrom(r)
 	s.audit(r, session.Username, "system_policy.withdraw", id, "success")
-	http.Redirect(w, r, "/system-policies?notice="+url.QueryEscape("시스템 정책 버전을 회수했습니다."), http.StatusSeeOther)
+	http.Redirect(w, r, "/system-policies?notice="+url.QueryEscape("선택한 CRS 기반 시스템 정책을 회수했습니다."), http.StatusSeeOther)
 }
 
 func nextSystemPolicyVersion(current string) string {
@@ -96,6 +98,20 @@ func nextSystemPolicyVersion(current string) string {
 		return "1.0.0"
 	}
 	return parts[0] + "." + parts[1] + "." + strconv.Itoa(patch+1)
+}
+
+func nextSystemPolicyVersionAfter(versions []string) string {
+	latest := ""
+	for _, version := range versions {
+		version = strings.TrimSpace(version)
+		if version != "" && (latest == "" || newerSystemPolicyVersion(version, latest)) {
+			latest = version
+		}
+	}
+	if latest == "" {
+		return "1.0.0"
+	}
+	return nextSystemPolicyVersion(latest)
 }
 
 func newerSystemPolicyVersion(candidate, current string) bool {

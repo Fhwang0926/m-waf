@@ -99,6 +99,51 @@ func TestNewConfigurationRejectsLegacyCustomRuleID(t *testing.T) {
 	}
 }
 
+func TestPolicyIPRulesCanonicalizeAndLimitTrustExpiry(t *testing.T) {
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	canonical, err := canonicalPolicyNetwork("192.0.2.91")
+	if err != nil || canonical != "192.0.2.91/32" {
+		t.Fatalf("single IPv4 must become a canonical host CIDR: %q %v", canonical, err)
+	}
+	canonical, err = canonicalPolicyNetwork("2001:db8::9")
+	if err != nil || canonical != "2001:db8::9/128" {
+		t.Fatalf("single IPv6 must become a canonical host CIDR: %q %v", canonical, err)
+	}
+
+	configuration := validStructuredConfiguration()
+	configuration.IPRules = []PolicyIPRule{{
+		SourceScope: PolicyScopeEnterprise, Action: PolicyIPActionTrust, Network: "192.0.2.91/32",
+		GeneratedRuleID: 5000, Reason: "temporary vendor access", ExpiresAt: timePointer(now.Add(24 * time.Hour)), Enabled: true,
+	}}
+	if err := configuration.ValidateAt(now); err != nil {
+		t.Fatalf("24 hour trust rule must be accepted: %v", err)
+	}
+	configuration.IPRules[0].ExpiresAt = timePointer(now.Add(7*24*time.Hour + time.Second))
+	if err := configuration.ValidateAt(now); err == nil {
+		t.Fatal("trust rules longer than seven days must be rejected")
+	}
+}
+
+func TestGuidedRulesRejectAdvancedFieldsAndOperators(t *testing.T) {
+	if _, err := mergeGuidedPolicyRules("", []guidedPolicyRule{{Field: "REMOTE_ADDR", Operator: "@streq", Value: "192.0.2.1", Action: "block"}}); err == nil {
+		t.Fatal("simple rules must not accept IP fields")
+	}
+	if _, err := mergeGuidedPolicyRules("", []guidedPolicyRule{{Field: "REQUEST_URI", Operator: "@rx", Value: "^/admin", Action: "block"}}); err == nil {
+		t.Fatal("simple rules must not accept regular expressions")
+	}
+	if _, err := mergeGuidedPolicyRules("", []guidedPolicyRule{{Field: "REQUEST_HEADERS:User-Agent", Operator: "@contains", Value: "scanner", Action: "detect"}}); err != nil {
+		t.Fatalf("supported simple rule must be accepted: %v", err)
+	}
+	rendered, err := mergeGuidedPolicyRules(`SecRule REQUEST_URI "@streq /legacy" "id:41000,phase:2,pass,nolog"`, []guidedPolicyRule{{Field: "ARGS", Argument: "search", Operator: "@contains", Value: "select", Action: "block"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced, guided := splitGuidedPolicyRules(rendered)
+	if advanced == "" || len(guided) != 1 || guided[0].Field != "ARGS" || guided[0].Argument != "search" || guided[0].Action != "block" {
+		t.Fatalf("simple rules must remain editable without changing advanced rules: %q %#v", advanced, guided)
+	}
+}
+
 func timePointer(value time.Time) *time.Time { return &value }
 
 func repeatPolicyHex(value string) string {

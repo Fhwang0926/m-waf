@@ -46,6 +46,8 @@ type PackageArtifact struct {
 	WebServerBuild   string   `json:"web_server_build_hash,omitempty"`
 	CRSVersion       string   `json:"crs_version,omitempty"`
 	IntegrationMode  string   `json:"integration_mode,omitempty"`
+	RuntimeABI       string   `json:"runtime_abi,omitempty"`
+	PolicyDelivery   string   `json:"policy_delivery,omitempty"`
 	Path             string   `json:"path"`
 	Size             int64    `json:"size"`
 	SHA256           string   `json:"sha256"`
@@ -62,6 +64,16 @@ type BundleManifest struct {
 	ManagerAPIMax string                 `json:"manager_api_max"`
 	Artifacts     []PackageArtifact      `json:"artifacts"`
 	PolicySources []PolicySourceArtifact `json:"policy_sources,omitempty"`
+	HotRuleSet    *HotRuleSetArtifact    `json:"hot_rule_set,omitempty"`
+}
+
+type HotRuleSetArtifact struct {
+	SchemaVersion int    `json:"schema_version"`
+	Version       string `json:"version"`
+	RuleIDMin     int    `json:"rule_id_min"`
+	RuleIDMax     int    `json:"rule_id_max"`
+	SHA256        string `json:"sha256"`
+	Rules         string `json:"rules"`
 }
 
 type PolicySourceArtifact struct {
@@ -164,18 +176,23 @@ type AgentCommand struct {
 }
 
 type SecurityEvent struct {
-	EventID        string    `json:"event_id"`
-	OccurredAt     time.Time `json:"occurred_at"`
-	TransactionID  string    `json:"transaction_id,omitempty"`
-	Service        string    `json:"service,omitempty"`
-	Method         string    `json:"method,omitempty"`
-	URI            string    `json:"uri,omitempty"`
-	StatusCode     int       `json:"status_code,omitempty"`
-	RuleID         string    `json:"rule_id,omitempty"`
-	Message        string    `json:"message,omitempty"`
-	Severity       string    `json:"severity,omitempty"`
-	Blocked        bool      `json:"blocked"`
-	PolicyRevision string    `json:"policy_revision,omitempty"`
+	EventID         string    `json:"event_id"`
+	RequestID       string    `json:"request_id,omitempty"`
+	OccurredAt      time.Time `json:"occurred_at"`
+	TransactionID   string    `json:"transaction_id,omitempty"`
+	Service         string    `json:"service,omitempty"`
+	Method          string    `json:"method,omitempty"`
+	URI             string    `json:"uri,omitempty"`
+	ClientIP        string    `json:"client_ip,omitempty"`
+	StatusCode      int       `json:"status_code,omitempty"`
+	RuleID          string    `json:"rule_id,omitempty"`
+	Message         string    `json:"message,omitempty"`
+	MatchedVariable string    `json:"matched_variable,omitempty"`
+	RuleTags        []string  `json:"rule_tags,omitempty"`
+	CountryCode     string    `json:"-"`
+	Severity        string    `json:"severity,omitempty"`
+	Blocked         bool      `json:"blocked"`
+	PolicyRevision  string    `json:"policy_revision,omitempty"`
 }
 
 type EventBatch struct {

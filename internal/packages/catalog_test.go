@@ -84,3 +84,36 @@ func TestLoadAndResolveCompatibleModule(t *testing.T) {
 		t.Fatalf("expected Agent-only resolution for a manual Connector, agent=%s err=%v", manualAgent.ID, err)
 	}
 }
+
+func TestResolveCRSAcceptsPolicyBundleModuleWithoutEmbeddedCRS(t *testing.T) {
+	inventory := model.Inventory{OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx"}
+	catalog := &Catalog{manifest: model.BundleManifest{Artifacts: []model.PackageArtifact{
+		{ID: "agent", Kind: "agent", Version: "2", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64"},
+		{ID: "filter", Kind: "module", Version: "2", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", RuntimeABI: "modsecurity-v3", PolicyDelivery: "bundle"},
+	}}}
+	agent, module, err := catalog.ResolveCRS(inventory, "v4.25.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.ID != "agent" || module.ID != "filter" {
+		t.Fatalf("unexpected policy-only resolution: %s %s", agent.ID, module.ID)
+	}
+}
+
+func TestValidateHotRuleSetRejectsDuplicateOrOutOfRangeIDs(t *testing.T) {
+	rules := "SecRule REQUEST_URI \"@beginsWith /admin\" \"id:10000,phase:1,deny\"\nSecAction \"id:10000,phase:1,pass\"\n"
+	digest := sha256.Sum256([]byte(rules))
+	item := &model.HotRuleSetArtifact{
+		SchemaVersion: 1, Version: "1.0.0", RuleIDMin: 10000, RuleIDMax: 39999,
+		SHA256: hex.EncodeToString(digest[:]), Rules: rules,
+	}
+	if err := ValidateHotRuleSet(item); err == nil {
+		t.Fatal("duplicate hot Rule IDs must be rejected")
+	}
+	item.Rules = "SecAction \"id:40000,phase:1,pass\"\n"
+	digest = sha256.Sum256([]byte(item.Rules))
+	item.SHA256 = hex.EncodeToString(digest[:])
+	if err := ValidateHotRuleSet(item); err == nil {
+		t.Fatal("out-of-range hot Rule IDs must be rejected")
+	}
+}

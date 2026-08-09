@@ -33,7 +33,6 @@ func (s *Server) renderEnrollment(w http.ResponseWriter, r *http.Request, extra 
 	data := map[string]any{
 		"AgentURL":             s.cfg.PublicURL,
 		"CABase64":             base64.StdEncoding.EncodeToString([]byte(s.ca.CertificatePEM())),
-		"FormExpiresDays":      strconv.Itoa(defaultInstallTokenDays),
 		"FormEnterpriseID":     selectedEnterpriseID,
 		"SelectedEnterpriseID": selectedEnterpriseID,
 	}
@@ -57,15 +56,43 @@ func (s *Server) renderEnrollment(w http.ResponseWriter, r *http.Request, extra 
 			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 설치 토큰을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 			return
 		}
+		if r.Method == http.MethodGet && activeEnterpriseInstallToken(items) == nil {
+			session := sessionFrom(r)
+			record, token, created, err := s.store.EnsurePersistentEnterpriseInstallToken(r.Context(), selectedEnterpriseID, "기업 설치 토큰", session.UserID)
+			if err != nil {
+				s.renderAdminError(w, r, http.StatusInternalServerError, "기업 설치 토큰을 준비할 수 없습니다", "잠시 후 화면을 새로고침해 다시 시도하세요.")
+				return
+			}
+			if created {
+				s.audit(r, session.Username, "enterprise_install_token.create", record.ID, "success")
+				data["InstallToken"] = token
+				data["InstallTokenRecord"] = record
+			}
+			items = append([]EnterpriseInstallTokenRecord{record}, items...)
+		}
 		data["InstallTokens"] = items
+		if active := activeEnterpriseInstallToken(items); active != nil {
+			data["ActiveInstallToken"] = active
+		}
 	}
 	data["SelectedEnterpriseName"] = selectedEnterpriseName
 	data["ScopeLabel"] = selectedEnterpriseName
 	if !selected {
 		data["Error"] = "설치 작업에 사용할 활성 기업 범위를 찾을 수 없습니다."
 	}
-	if r.URL.Query().Get("revoked") == "1" {
-		data["Notice"] = "기업 설치 토큰을 폐기했습니다. 이미 등록된 Agent의 mTLS 연결에는 영향을 주지 않습니다."
+	if _, created := data["InstallToken"]; created {
+		switch {
+		case r.URL.Query().Get("enterprise_created") == "1":
+			data["Notice"] = "기업과 설치 토큰을 생성했습니다. 토큰 원문을 안전하게 보관하세요."
+		case r.URL.Query().Get("revoked") == "1":
+			data["Notice"] = "기존 토큰의 신규 설치 권한을 폐기하고 새 설치 토큰을 생성했습니다. 기존 Agent의 탐지 로그 수신에는 영향을 주지 않습니다."
+		default:
+			data["Notice"] = "활성 설치 토큰이 없어 자동으로 생성했습니다."
+		}
+	} else if r.URL.Query().Get("enterprise_created") == "1" {
+		data["Notice"] = "기업이 등록되었으며 활성 설치 토큰을 확인했습니다."
+	} else if r.URL.Query().Get("revoked") == "1" {
+		data["Notice"] = "기업 설치 토큰의 신규 설치 권한을 폐기했습니다. 이미 등록된 Agent의 탐지 로그 수신에는 영향을 주지 않습니다."
 	}
 	status := http.StatusOK
 	for key, value := range extra {
@@ -104,6 +131,15 @@ func installTokenParameters(name, daysText, maxText string) (string, int, int, b
 	return name, days, maximum, name != "" && days >= 1 && days <= maxInstallTokenDays && maximum >= 0 && maximum <= maxInstallTokenUses
 }
 
+func activeEnterpriseInstallToken(items []EnterpriseInstallTokenRecord) *EnterpriseInstallTokenRecord {
+	for index := range items {
+		if items[index].Active() {
+			return &items[index]
+		}
+	}
+	return nil
+}
+
 func (s *Server) createInstallToken(w http.ResponseWriter, r *http.Request) {
 	if !s.validCSRF(r) {
 		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
@@ -113,20 +149,19 @@ func (s *Server) createInstallToken(w http.ResponseWriter, r *http.Request) {
 		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusBadRequest, "Error": "입력 내용을 읽을 수 없습니다. 다시 입력해 주세요."})
 		return
 	}
-	name, days, maximum, valid := installTokenParameters(r.FormValue("name"), r.FormValue("expires_in_days"), r.FormValue("max_enrollments"))
-	if !valid {
-		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusBadRequest, "Error": "토큰 이름, 1~90일의 유효 기간과 선택적인 최대 등록 수를 확인하세요.", "FormEnterpriseID": strings.TrimSpace(r.FormValue("enterprise_id")), "FormTokenName": name, "FormExpiresDays": strings.TrimSpace(r.FormValue("expires_in_days")), "FormMaxEnrollments": strings.TrimSpace(r.FormValue("max_enrollments"))})
-		return
-	}
 	enterpriseID, ok := s.requestEnterpriseID(r)
 	if !ok {
-		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusBadRequest, "Error": "유효한 기업을 선택하세요.", "FormEnterpriseID": strings.TrimSpace(r.FormValue("enterprise_id")), "FormTokenName": name, "FormExpiresDays": strconv.Itoa(days), "FormMaxEnrollments": strings.TrimSpace(r.FormValue("max_enrollments"))})
+		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusBadRequest, "Error": "유효한 기업을 선택하세요.", "FormEnterpriseID": strings.TrimSpace(r.FormValue("enterprise_id"))})
 		return
 	}
 	session := sessionFrom(r)
-	record, token, err := s.store.CreateEnterpriseInstallToken(r.Context(), enterpriseID, name, session.UserID, time.Now().UTC().Add(time.Duration(days)*24*time.Hour), maximum)
+	record, token, created, err := s.store.EnsurePersistentEnterpriseInstallToken(r.Context(), enterpriseID, "기업 설치 토큰", session.UserID)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 설치 토큰을 만들 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	if !created {
+		s.renderEnrollment(w, r, map[string]any{"Status": http.StatusConflict, "Error": "이 기업에는 이미 활성 설치 토큰이 있습니다. 저장한 토큰을 계속 사용하거나 기존 토큰을 폐기한 뒤 새로 생성하세요.", "FormEnterpriseID": enterpriseID})
 		return
 	}
 	s.audit(r, session.Username, "enterprise_install_token.create", record.ID, "success")
@@ -175,16 +210,9 @@ func (s *Server) apiCreateInstallToken(w http.ResponseWriter, r *http.Request) {
 		Name          string `json:"name"`
 		ExpiresInDays int    `json:"expires_in_days"`
 		MaxUses       int    `json:"max_enrollments"`
+		Persistent    bool   `json:"persistent"`
 	}
 	if err := decodeJSON(w, r, &request, 16<<10); err != nil {
-		return
-	}
-	if request.ExpiresInDays == 0 {
-		request.ExpiresInDays = defaultInstallTokenDays
-	}
-	name, days, maximum, valid := installTokenParameters(request.Name, strconv.Itoa(request.ExpiresInDays), strconv.Itoa(request.MaxUses))
-	if !valid {
-		writeProblem(w, http.StatusBadRequest, "name, expiry days (1..90) and optional maximum enrollments (0..10000) are required")
 		return
 	}
 	enterpriseID, ok := s.enterpriseIDForSession(r.Context(), sessionFrom(r), strings.TrimSpace(request.EnterpriseID))
@@ -192,8 +220,45 @@ func (s *Server) apiCreateInstallToken(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "valid enterprise is required")
 		return
 	}
+	name := truncate(strings.TrimSpace(request.Name), 255)
+	expiresAt := persistentInstallTokenExpiry
+	maximum := 0
+	persistent := request.Persistent
+	if persistent {
+		if request.ExpiresInDays != 0 || request.MaxUses != 0 {
+			writeProblem(w, http.StatusBadRequest, "persistent token cannot set expires_in_days or max_enrollments")
+			return
+		}
+		if name == "" {
+			writeProblem(w, http.StatusBadRequest, "name is required")
+			return
+		}
+	} else {
+		if request.ExpiresInDays == 0 {
+			request.ExpiresInDays = 30
+		}
+		var valid bool
+		name, request.ExpiresInDays, maximum, valid = installTokenParameters(request.Name, strconv.Itoa(request.ExpiresInDays), strconv.Itoa(request.MaxUses))
+		if !valid {
+			writeProblem(w, http.StatusBadRequest, "name, expiry days (1..90) and optional maximum enrollments (0..10000) are required")
+			return
+		}
+		expiresAt = time.Now().UTC().Add(time.Duration(request.ExpiresInDays) * 24 * time.Hour)
+	}
 	session := sessionFrom(r)
-	record, token, err := s.store.CreateEnterpriseInstallToken(r.Context(), enterpriseID, name, session.UserID, time.Now().UTC().Add(time.Duration(days)*24*time.Hour), maximum)
+	var record EnterpriseInstallTokenRecord
+	var token string
+	var err error
+	if persistent {
+		var created bool
+		record, token, created, err = s.store.EnsurePersistentEnterpriseInstallToken(r.Context(), enterpriseID, name, session.UserID)
+		if err == nil && !created {
+			writeProblem(w, http.StatusConflict, "enterprise already has an active install token")
+			return
+		}
+	} else {
+		record, token, err = s.store.CreateEnterpriseInstallToken(r.Context(), enterpriseID, name, session.UserID, expiresAt, maximum)
+	}
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "create enterprise install token")
 		return
@@ -202,6 +267,6 @@ func (s *Server) apiCreateInstallToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id": record.ID, "token": token, "token_prefix": record.TokenPrefix, "expires_at": record.ExpiresAt,
-		"max_enrollments": request.MaxUses, "agent_api": s.cfg.PublicURL,
+		"max_enrollments": maximum, "persistent": persistent, "agent_api": s.cfg.PublicURL,
 	})
 }

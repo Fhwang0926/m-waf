@@ -2,10 +2,13 @@ package crssource
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -64,5 +67,29 @@ func TestCandidateTagsKeepsLTSInsidePinnedLine(t *testing.T) {
 	}
 	if len(tags) != 2 || tags[0] != "v4.25.2" || tags[1] != "v4.25.1" {
 		t.Fatalf("unexpected LTS candidates: %#v", tags)
+	}
+}
+
+func TestGetJSONReturnsGitHubRateLimitReset(t *testing.T) {
+	resetAt := time.Date(2026, time.August, 9, 7, 13, 36, 0, time.UTC)
+	client := &Client{httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header: http.Header{
+				"X-Ratelimit-Limit":     []string{"60"},
+				"X-Ratelimit-Remaining": []string{"0"},
+				"X-Ratelimit-Reset":     []string{strconv.FormatInt(resetAt.Unix(), 10)},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"message":"API rate limit exceeded"}`)),
+		}, nil
+	})}}
+	var target any
+	err := client.getJSON(context.Background(), "https://api.github.com/repos/coreruleset/coreruleset/releases", &target)
+	var rateLimitErr *RateLimitError
+	if !errors.As(err, &rateLimitErr) {
+		t.Fatalf("getJSON error = %v, want RateLimitError", err)
+	}
+	if rateLimitErr.Limit != 60 || rateLimitErr.Remaining != 0 || !rateLimitErr.ResetAt.Equal(resetAt) {
+		t.Fatalf("unexpected rate limit error: %#v", rateLimitErr)
 	}
 }

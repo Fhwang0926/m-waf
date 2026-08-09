@@ -29,6 +29,7 @@ const (
 	PolicyArtifactPattern   = "GET /agent/v1/artifacts/{id}"
 	AgentPackagePattern     = "GET /agent/v1/packages/{id}"
 	EventBatchPattern       = "POST /agent/v1/events/batch"
+	UnregisterPattern       = "POST /agent/v1/unregister"
 	PolicyResultPattern     = "POST /agent/v1/policies/{id}/result"
 	PackageResultPattern    = "POST /agent/v1/package-deployments/{id}/result"
 	NextCommandPattern      = "GET /agent/v1/commands/next"
@@ -44,11 +45,14 @@ const (
 	DesiredStatePath       = "/agent/v1/desired-state"
 	PolicyKeyPath          = "/agent/v1/policy-key"
 	EventBatchPath         = "/agent/v1/events/batch"
+	UnregisterPath         = "/agent/v1/unregister"
 	NextCommandPath        = "/agent/v1/commands/next"
 
 	BootstrapPackagePrefix = "/bootstrap/v1/packages/"
 	PolicyArtifactPrefix   = "/agent/v1/artifacts/"
 	AgentPackagePrefix     = "/agent/v1/packages/"
+
+	EventVerificationHeader = "X-MWAF-Event-Token"
 )
 
 // AgentV1Contract is the machine-readable description of the stable Agent
@@ -93,7 +97,8 @@ var AgentV1 = AgentV1Contract{
 		{Method: "GET", Path: PolicyKeyPath, Auth: "mTLS", ResponseType: "PEM"},
 		{Method: "GET", Path: "/agent/v1/artifacts/{id}", Auth: "mTLS", ResponseType: "policy artifact"},
 		{Method: "GET", Path: "/agent/v1/packages/{id}", Auth: "mTLS", ResponseType: "package artifact"},
-		{Method: "POST", Path: EventBatchPath, Auth: "mTLS", RequestType: "EventBatch"},
+		{Method: "POST", Path: EventBatchPath, Auth: "mTLS+install-token", RequestType: "EventBatch"},
+		{Method: "POST", Path: UnregisterPath, Auth: "mTLS"},
 		{Method: "POST", Path: "/agent/v1/policies/{id}/result", Auth: "mTLS", RequestType: "DeploymentResult"},
 		{Method: "POST", Path: "/agent/v1/package-deployments/{id}/result", Auth: "mTLS", RequestType: "DeploymentResult"},
 		{Method: "GET", Path: NextCommandPath, Auth: "mTLS", ResponseType: "AgentCommand"},

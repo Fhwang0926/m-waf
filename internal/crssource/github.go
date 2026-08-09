@@ -34,6 +34,27 @@ type Client struct {
 	token      string
 }
 
+type RateLimitError struct {
+	StatusCode int
+	Limit      int
+	Remaining  int
+	ResetAt    time.Time
+}
+
+func (e *RateLimitError) Error() string {
+	if !e.ResetAt.IsZero() {
+		return fmt.Sprintf("GitHub API rate limit exceeded until %s", e.ResetAt.UTC().Format(time.RFC3339))
+	}
+	return fmt.Sprintf("GitHub API rate limit exceeded (HTTP %d)", e.StatusCode)
+}
+
+func (e *RateLimitError) RetryAfter(now time.Time) time.Duration {
+	if e.ResetAt.IsZero() || !e.ResetAt.After(now) {
+		return 0
+	}
+	return e.ResetAt.Sub(now)
+}
+
 type Fetched struct {
 	Source  model.PolicySourceArtifact
 	Index   crsindex.Index
@@ -248,9 +269,30 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, target any) error
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if rateLimitErr := githubRateLimitError(response); rateLimitErr != nil {
+			return rateLimitErr
+		}
 		return fmt.Errorf("GitHub API returned HTTP %d", response.StatusCode)
 	}
 	return json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(target)
+}
+
+func githubRateLimitError(response *http.Response) error {
+	remainingValue := strings.TrimSpace(response.Header.Get("X-RateLimit-Remaining"))
+	retryAfterValue := strings.TrimSpace(response.Header.Get("Retry-After"))
+	if response.StatusCode != http.StatusTooManyRequests && !(response.StatusCode == http.StatusForbidden && (remainingValue == "0" || retryAfterValue != "")) {
+		return nil
+	}
+	limit, _ := strconv.Atoi(strings.TrimSpace(response.Header.Get("X-RateLimit-Limit")))
+	remaining, _ := strconv.Atoi(remainingValue)
+	resetUnix, _ := strconv.ParseInt(strings.TrimSpace(response.Header.Get("X-RateLimit-Reset")), 10, 64)
+	resetAt := time.Time{}
+	if resetUnix > 0 {
+		resetAt = time.Unix(resetUnix, 0)
+	} else if retryAfter, err := strconv.Atoi(retryAfterValue); err == nil && retryAfter > 0 {
+		resetAt = time.Now().Add(time.Duration(retryAfter) * time.Second)
+	}
+	return &RateLimitError{StatusCode: response.StatusCode, Limit: limit, Remaining: remaining, ResetAt: resetAt}
 }
 
 func (c *Client) download(ctx context.Context, endpoint string) ([]byte, error) {

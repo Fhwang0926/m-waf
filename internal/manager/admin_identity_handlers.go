@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -137,6 +138,8 @@ func (s *Server) enterpriseDetail(w http.ResponseWriter, r *http.Request) {
 		"Groups":             groups,
 		"VisibleUserCount":   len(users),
 		"HasDeletedUserData": enterprise.UserCount > uint64(len(users)),
+		"Notice":             r.URL.Query().Get("notice"),
+		"Error":              r.URL.Query().Get("error"),
 	}
 	_ = s.templates.ExecuteTemplate(w, "enterprise-detail.html", s.viewData(r, "enterprises", data))
 }
@@ -192,24 +195,24 @@ func (s *Server) deleteEnterprise(w http.ResponseWriter, r *http.Request) {
 	enterpriseID := strings.TrimSpace(r.PathValue("id"))
 	confirmName := strings.TrimSpace(r.FormValue("confirm_name"))
 	if enterpriseID == "" || confirmName == "" {
-		s.renderEnterprises(w, r, http.StatusBadRequest, "기업 삭제 또는 운영 종료를 위해 기업명을 정확히 입력하세요.", "")
+		s.redirectEnterpriseDetailError(w, r, enterpriseID, "기업 삭제 또는 운영 종료를 위해 기업명을 정확히 입력하세요.")
 		return
 	}
 	session := sessionFrom(r)
 	result, err := s.store.DeleteOrTerminateEnterprise(r.Context(), enterpriseID, confirmName, session.UserID)
 	if err != nil {
+		message := "기업 삭제 또는 운영 종료를 처리할 수 없습니다."
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			s.renderEnterprises(w, r, http.StatusNotFound, "기업을 찾을 수 없습니다.", "")
+			message = "기업을 찾을 수 없습니다."
 		case errors.Is(err, ErrEnterpriseNotActive):
-			s.renderEnterprises(w, r, http.StatusConflict, "이미 운영 종료된 기업입니다.", "")
+			message = "이미 운영 종료된 기업입니다."
 		case errors.Is(err, ErrEnterpriseConfirmation):
-			s.renderEnterprises(w, r, http.StatusBadRequest, "입력한 기업명이 일치하지 않습니다.", "")
+			message = "입력한 기업명이 일치하지 않습니다."
 		case errors.Is(err, ErrSystemEnterpriseProtected):
-			s.renderEnterprises(w, r, http.StatusConflict, "시스템 관리자가 소속된 기업은 삭제하거나 운영 종료할 수 없습니다.", "")
-		default:
-			s.renderEnterprises(w, r, http.StatusInternalServerError, "기업 삭제 또는 운영 종료를 처리할 수 없습니다.", "")
+			message = "시스템 관리자가 소속된 기업은 삭제하거나 운영 종료할 수 없습니다."
 		}
+		s.redirectEnterpriseDetailError(w, r, enterpriseID, message)
 		return
 	}
 	if result == EnterpriseDeleted {
@@ -218,7 +221,15 @@ func (s *Server) deleteEnterprise(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "enterprise.terminate", enterpriseID, "success")
-	http.Redirect(w, r, "/enterprises?terminated=1", http.StatusSeeOther)
+	http.Redirect(w, r, "/enterprises/"+url.PathEscape(enterpriseID)+"?notice="+url.QueryEscape("기업 운영을 종료했습니다. 사용자·신규 등록·Agent 연결은 차단되고 기존 이력은 보존됩니다."), http.StatusSeeOther)
+}
+
+func (s *Server) redirectEnterpriseDetailError(w http.ResponseWriter, r *http.Request, enterpriseID, message string) {
+	if enterpriseID == "" {
+		s.renderAdminError(w, r, http.StatusBadRequest, "기업 작업을 처리할 수 없습니다", message)
+		return
+	}
+	http.Redirect(w, r, "/enterprises/"+url.PathEscape(enterpriseID)+"?error="+url.QueryEscape(message), http.StatusSeeOther)
 }
 
 func (s *Server) createEnterprise(w http.ResponseWriter, r *http.Request) {
@@ -239,7 +250,7 @@ func (s *Server) createEnterprise(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, session.Username, "enterprise.create", item.ID, "success")
 	s.TriggerPolicySync()
-	http.Redirect(w, r, "/enterprises?created=1", http.StatusSeeOther)
+	http.Redirect(w, r, "/enterprises/"+url.PathEscape(item.ID)+"/users?enterprise_created=1&create=1", http.StatusSeeOther)
 }
 
 func (s *Server) systemSettings(w http.ResponseWriter, r *http.Request) {
@@ -295,6 +306,10 @@ func (s *Server) renderUsers(w http.ResponseWriter, r *http.Request, pageError s
 }
 
 func (s *Server) renderUsersWithForm(w http.ResponseWriter, r *http.Request, status int, pageError string, form map[string]any) {
+	if enterpriseID := strings.TrimSpace(r.PathValue("enterprise_id")); enterpriseID != "" {
+		s.renderSystemEnterpriseUsers(w, r, status, pageError, form, enterpriseID)
+		return
+	}
 	session := sessionFrom(r)
 	items, err := s.store.ListUsers(r.Context(), session.ScopeEnterpriseID())
 	if err != nil {
@@ -371,25 +386,117 @@ func (s *Server) renderUsersWithForm(w http.ResponseWriter, r *http.Request, sta
 	_ = s.templates.ExecuteTemplate(w, "users.html", s.viewData(r, "users", data))
 }
 
+func (s *Server) renderSystemEnterpriseUsers(w http.ResponseWriter, r *http.Request, status int, pageError string, form map[string]any, enterpriseID string) {
+	enterprise, err := s.store.EnterpriseManagementByID(r.Context(), enterpriseID)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.renderAdminError(w, r, http.StatusNotFound, "기업을 찾을 수 없습니다", "삭제되었거나 존재하지 않는 기업입니다.")
+		return
+	}
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 사용자 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	items, err := s.store.ListUsers(r.Context(), enterpriseID)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 사용자 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	filterQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+	filterRole := strings.TrimSpace(r.URL.Query().Get("role"))
+	filterStatus := strings.TrimSpace(r.URL.Query().Get("status"))
+	query := strings.ToLower(filterQuery)
+	users := make([]UserRecord, 0, len(items))
+	userTotal := 0
+	for _, item := range items {
+		if item.Role == RoleSystemAdmin || item.EnterpriseID == "" {
+			continue
+		}
+		userTotal++
+		if query != "" && !strings.Contains(strings.ToLower(item.DisplayName), query) && !strings.Contains(strings.ToLower(item.Username), query) {
+			continue
+		}
+		if filterRole != "" && string(item.Role) != filterRole {
+			continue
+		}
+		if filterStatus == "active" && !item.Active {
+			continue
+		}
+		if filterStatus == "inactive" && item.Active {
+			continue
+		}
+		item.Manageable = enterprise.Active() && sessionCanManageUser(sessionFrom(r), item)
+		users = append(users, item)
+	}
+	baseURL := "/enterprises/" + url.PathEscape(enterpriseID) + "/users"
+	data := map[string]any{
+		"Enterprise": enterprise, "Users": users, "UserTotal": userTotal, "Error": pageError,
+		"FilterQuery": filterQuery, "FilterRole": filterRole, "FilterStatus": filterStatus,
+		"CreateOpen": r.URL.Query().Get("create") == "1" || pageError != "", "UserBaseURL": baseURL,
+	}
+	for key, value := range form {
+		data[key] = value
+	}
+	if r.URL.Query().Get("created") == "1" {
+		data["Notice"] = "기업 사용자가 추가되었습니다."
+	} else if r.URL.Query().Get("enterprise_created") == "1" {
+		data["Notice"] = "기업이 등록되었습니다. 첫 기업 관리자를 추가하세요."
+	} else if r.URL.Query().Get("updated") == "1" {
+		data["Notice"] = "기업 사용자 정보가 수정되었습니다."
+	} else if r.URL.Query().Get("deleted") == "1" {
+		data["Notice"] = "기업 사용자가 삭제 처리되었습니다."
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
+	}
+	_ = s.templates.ExecuteTemplate(w, "enterprise-users.html", s.viewData(r, "enterprises", data))
+}
+
+func userManagementEnterpriseID(r *http.Request, session sessionData) string {
+	if enterpriseID := strings.TrimSpace(r.PathValue("enterprise_id")); enterpriseID != "" {
+		return enterpriseID
+	}
+	return session.EnterpriseID
+}
+
+func userManagementUserID(r *http.Request) string {
+	if userID := strings.TrimSpace(r.PathValue("user_id")); userID != "" {
+		return userID
+	}
+	return strings.TrimSpace(r.PathValue("id"))
+}
+
+func userManagementBaseURL(r *http.Request, session sessionData) string {
+	if enterpriseID := strings.TrimSpace(r.PathValue("enterprise_id")); enterpriseID != "" {
+		return "/enterprises/" + url.PathEscape(enterpriseID) + "/users"
+	}
+	return "/users"
+}
+
 func (s *Server) editUser(w http.ResponseWriter, r *http.Request) {
 	s.renderUserEdit(w, r, http.StatusOK, "", nil)
 }
 
 func (s *Server) renderUserEdit(w http.ResponseWriter, r *http.Request, status int, pageError string, form map[string]any) {
 	session := sessionFrom(r)
-	user, err := s.store.UserByID(r.Context(), r.PathValue("id"))
-	if err != nil || !sessionCanManageUser(session, user) {
+	user, err := s.store.UserByID(r.Context(), userManagementUserID(r))
+	enterpriseID := userManagementEnterpriseID(r, session)
+	if err != nil || user.EnterpriseID != enterpriseID || !sessionCanManageUser(session, user) {
 		s.renderAdminError(w, r, http.StatusNotFound, "사용자를 찾을 수 없습니다", "삭제되었거나 관리 권한이 없는 사용자입니다.")
 		return
 	}
-	data := map[string]any{"User": user, "IsSelf": user.ID == session.UserID, "Error": pageError, "FormDisplayName": user.DisplayName, "FormRole": string(user.Role), "FormActive": user.Active, "ScopeLabel": user.EnterpriseName}
+	baseURL := userManagementBaseURL(r, session)
+	data := map[string]any{"User": user, "IsSelf": user.ID == session.UserID, "Error": pageError, "FormDisplayName": user.DisplayName, "FormRole": string(user.Role), "FormActive": user.Active, "ScopeLabel": user.EnterpriseName, "UserBaseURL": baseURL, "UserActionURL": baseURL + "/" + url.PathEscape(user.ID)}
 	for key, value := range form {
 		data[key] = value
 	}
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
-	_ = s.templates.ExecuteTemplate(w, "user-edit.html", s.viewData(r, "users", data))
+	active := "users"
+	if session.InSystemConsole() {
+		active = "enterprises"
+	}
+	_ = s.templates.ExecuteTemplate(w, "user-edit.html", s.viewData(r, active, data))
 }
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
@@ -398,8 +505,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := sessionFrom(r)
-	user, err := s.store.UserByID(r.Context(), r.PathValue("id"))
-	if err != nil || !sessionCanManageUser(session, user) {
+	user, err := s.store.UserByID(r.Context(), userManagementUserID(r))
+	enterpriseID := userManagementEnterpriseID(r, session)
+	if err != nil || user.EnterpriseID != enterpriseID || !sessionCanManageUser(session, user) {
 		s.renderAdminError(w, r, http.StatusNotFound, "사용자를 찾을 수 없습니다", "삭제되었거나 관리 권한이 없는 사용자입니다.")
 		return
 	}
@@ -436,7 +544,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "user.update", user.ID+":"+string(role), "success")
-	http.Redirect(w, r, "/users?updated=1", http.StatusSeeOther)
+	http.Redirect(w, r, userManagementBaseURL(r, session)+"?updated=1", http.StatusSeeOther)
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
@@ -449,8 +557,9 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := sessionFrom(r)
-	user, err := s.store.UserByID(r.Context(), r.PathValue("id"))
-	if err != nil || !sessionCanManageUser(session, user) {
+	user, err := s.store.UserByID(r.Context(), userManagementUserID(r))
+	enterpriseID := userManagementEnterpriseID(r, session)
+	if err != nil || user.EnterpriseID != enterpriseID || !sessionCanManageUser(session, user) {
 		s.renderAdminError(w, r, http.StatusNotFound, "사용자를 찾을 수 없습니다", "삭제되었거나 관리 권한이 없는 사용자입니다.")
 		return
 	}
@@ -467,7 +576,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "user.delete", user.ID, "success")
-	http.Redirect(w, r, "/users?deleted=1", http.StatusSeeOther)
+	http.Redirect(w, r, userManagementBaseURL(r, session)+"?deleted=1", http.StatusSeeOther)
 }
 
 func sessionCanManageUser(session sessionData, user UserRecord) bool {
@@ -490,10 +599,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	displayName := truncate(strings.TrimSpace(r.FormValue("display_name")), 255)
 	password := r.FormValue("password")
 	role := Role(strings.TrimSpace(r.FormValue("role")))
-	enterpriseID := strings.TrimSpace(r.FormValue("enterprise_id"))
-	if !session.IsSystemAdmin() {
-		enterpriseID = session.EnterpriseID
-	}
+	enterpriseID := userManagementEnterpriseID(r, session)
 	if !validUsername(username) || displayName == "" || len([]rune(password)) < 12 || len([]rune(password)) > 256 || password != r.FormValue("password_confirm") || !validEnterpriseRole(role) {
 		s.renderUsersWithForm(w, r, http.StatusBadRequest, "사용자명, 표시 이름, 역할과 12자 이상의 동일한 비밀번호를 확인하세요.", map[string]any{"FormEnterpriseID": enterpriseID, "FormRole": string(role), "FormUsername": username, "FormDisplayName": displayName})
 		return
@@ -513,7 +619,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "user.create", user.ID+":"+string(user.Role), "success")
-	http.Redirect(w, r, "/users?created=1", http.StatusSeeOther)
+	http.Redirect(w, r, userManagementBaseURL(r, session)+"?created=1", http.StatusSeeOther)
 }
 
 func (s *Server) viewData(r *http.Request, active string, values map[string]any) map[string]any {
@@ -525,10 +631,18 @@ func (s *Server) viewData(r *http.Request, active string, values map[string]any)
 	values["Session"] = session
 	values["CSRF"] = session.CSRF
 	values["IsSystemAdmin"] = session.IsSystemAdmin()
+	values["CanAccessSystemManagement"] = session.CanAccessSystemManagement()
+	values["InSystemConsole"] = session.InSystemConsole()
 	values["CanOperate"] = session.CanOperate()
 	values["CanManageUsers"] = session.CanManageUsers()
+	values["AccountURL"] = "/account"
+	values["AccountPasswordURL"] = "/account/password"
+	if session.InSystemConsole() {
+		values["AccountURL"] = "/account?area=system"
+		values["AccountPasswordURL"] = "/account/password?area=system"
+	}
 	if _, exists := values["ScopeLabel"]; !exists {
-		if session.IsSystemAdmin() {
+		if session.InSystemConsole() {
 			values["ScopeLabel"] = "전체 기업"
 			filterEnterprise, _ := values["FilterEnterprise"].(string)
 			if filterEnterprise == "" {

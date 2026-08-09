@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +37,9 @@ const (
 
 	PolicyExclusionBefore = "BEFORE_CRS"
 	PolicyExclusionAfter  = "AFTER_CRS"
+
+	PolicyIPActionBlock = "BLOCK"
+	PolicyIPActionTrust = "TRUST"
 )
 
 const (
@@ -143,6 +147,19 @@ type PolicyCustomRule struct {
 	Order            int    `json:"order"`
 }
 
+type PolicyIPRule struct {
+	ID              string     `json:"id,omitempty"`
+	SourceScope     string     `json:"source_scope"`
+	Action          string     `json:"action"`
+	Network         string     `json:"network"`
+	GeneratedRuleID int        `json:"generated_rule_id"`
+	Reason          string     `json:"reason"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+	CreatedBy       string     `json:"created_by,omitempty"`
+	Enabled         bool       `json:"enabled"`
+	Order           int        `json:"order"`
+}
+
 // PolicyConfiguration is the authoritative, immutable policy authoring model.
 // Exactly one owner is set. Policy revision configurations contain the fully
 // resolved system and enterprise settings used to reproduce the signed bundle.
@@ -165,6 +182,7 @@ type PolicyConfiguration struct {
 	Setup                    []CRSSetupValue    `json:"setup,omitempty"`
 	Exclusions               []PolicyExclusion  `json:"exclusions,omitempty"`
 	CustomRules              []PolicyCustomRule `json:"custom_rules,omitempty"`
+	IPRules                  []PolicyIPRule     `json:"ip_rules,omitempty"`
 }
 
 func (c *PolicyConfiguration) Normalize() {
@@ -207,9 +225,16 @@ func (c *PolicyConfiguration) Normalize() {
 		digest := sha256.Sum256([]byte(item.CanonicalSecRule))
 		item.ContentSHA256 = hex.EncodeToString(digest[:])
 	}
+	for index := range c.IPRules {
+		item := &c.IPRules[index]
+		item.Network, _ = canonicalPolicyNetwork(item.Network)
+		item.Reason = strings.TrimSpace(item.Reason)
+		item.CreatedBy = strings.TrimSpace(item.CreatedBy)
+	}
 	sort.SliceStable(c.Setup, func(i, j int) bool { return c.Setup[i].Key < c.Setup[j].Key })
 	sort.SliceStable(c.Exclusions, func(i, j int) bool { return c.Exclusions[i].Order < c.Exclusions[j].Order })
 	sort.SliceStable(c.CustomRules, func(i, j int) bool { return c.CustomRules[i].Order < c.CustomRules[j].Order })
+	sort.SliceStable(c.IPRules, func(i, j int) bool { return c.IPRules[i].Order < c.IPRules[j].Order })
 }
 
 func (c PolicyConfiguration) ValidateAt(now time.Time) error {
@@ -249,6 +274,35 @@ func (c PolicyConfiguration) ValidateAt(now time.Time) error {
 			}
 			usedIDs[item.GeneratedRuleID] = true
 		}
+	}
+	seenIPRules := make(map[string]bool)
+	for _, item := range c.IPRules {
+		if !validPolicyScope(item.SourceScope) || (item.Action != PolicyIPActionBlock && item.Action != PolicyIPActionTrust) {
+			return errors.New("IP Rule requires a valid scope and action")
+		}
+		canonical, err := canonicalPolicyNetwork(item.Network)
+		if err != nil || canonical != item.Network {
+			return fmt.Errorf("IP Rule network %q is not canonical", item.Network)
+		}
+		key := item.Action + "\x00" + item.Network
+		if seenIPRules[key] {
+			return fmt.Errorf("duplicate IP Rule %s %s", item.Action, item.Network)
+		}
+		seenIPRules[key] = true
+		if item.Reason == "" {
+			return errors.New("IP Rule requires a reason")
+		}
+		if item.Action == PolicyIPActionTrust {
+			if item.ExpiresAt == nil || !item.ExpiresAt.After(now) || item.ExpiresAt.After(now.Add(7*24*time.Hour)) {
+				return errors.New("trusted IP expiry must be within seven days")
+			}
+		} else if item.ExpiresAt != nil && !item.ExpiresAt.After(now) {
+			return errors.New("IP block expiry must be in the future")
+		}
+		if item.GeneratedRuleID < mwafGeneratedRuleIDMin || item.GeneratedRuleID > mwafGeneratedRuleIDMax || usedIDs[item.GeneratedRuleID] {
+			return fmt.Errorf("generated IP Rule ID %d is outside the M-WAF namespace or duplicated", item.GeneratedRuleID)
+		}
+		usedIDs[item.GeneratedRuleID] = true
 	}
 	for _, item := range c.CustomRules {
 		if !validPolicyScope(item.SourceScope) || item.RuleID == 0 || item.CanonicalSecRule == "" {
@@ -366,6 +420,22 @@ func validIPMatchValue(value string) bool {
 	return true
 }
 
+func canonicalPolicyNetwork(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if address, err := netip.ParseAddr(value); err == nil {
+		bits := 128
+		if address.Is4() {
+			bits = 32
+		}
+		return netip.PrefixFrom(address.Unmap(), bits).Masked().String(), nil
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil {
+		return "", errors.New("valid IP address or CIDR is required")
+	}
+	return prefix.Masked().String(), nil
+}
+
 func validPolicyScope(value string) bool {
 	return value == PolicyScopeSystem || value == PolicyScopeEnterprise
 }
@@ -395,6 +465,9 @@ func (c *PolicyConfiguration) UpdateDigest() error {
 	}
 	for index := range copyValue.CustomRules {
 		copyValue.CustomRules[index].ID = ""
+	}
+	for index := range copyValue.IPRules {
+		copyValue.IPRules[index].ID = ""
 	}
 	raw, err := json.Marshal(copyValue)
 	if err != nil {
@@ -477,6 +550,11 @@ func (c PolicyConfiguration) ScopeCounts(scope string) (setup, exclusions, custo
 		}
 	}
 	for _, item := range c.CustomRules {
+		if item.SourceScope == scope && item.Enabled {
+			customRules++
+		}
+	}
+	for _, item := range c.IPRules {
 		if item.SourceScope == scope && item.Enabled {
 			customRules++
 		}
@@ -807,6 +885,11 @@ func validateConfigurationRuleIDs(configuration PolicyConfiguration, index crsin
 		}
 		if upstreamRules[item.RuleID].ID != 0 {
 			return migrationRequiredf("custom Rule ID %d conflicts with the selected CRS release", item.RuleID)
+		}
+	}
+	for _, item := range configuration.IPRules {
+		if upstreamRules[item.GeneratedRuleID].ID != 0 {
+			return migrationRequiredf("generated IP Rule ID %d conflicts with the selected CRS release", item.GeneratedRuleID)
 		}
 	}
 	return nil

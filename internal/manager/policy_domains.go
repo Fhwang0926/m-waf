@@ -18,22 +18,25 @@ const (
 )
 
 type SystemPolicyVersionRecord struct {
-	ID              string
-	Key             string
-	Version         string
-	SchemaVersion   int
-	Name            string
-	Description     string
-	CRSTrack        string
-	CRSVersion      string
-	Status          string
-	TemplateSHA256  string
-	SourceCommit    string
-	Defaults        systempolicy.Defaults
-	MigrationNotes  []string
-	EnterpriseCount int
-	ServerCount     int
-	CreatedAt       time.Time
+	ID                 string
+	Key                string
+	Version            string
+	SchemaVersion      int
+	Name               string
+	Description        string
+	CRSTrack           string
+	CRSVersion         string
+	Status             string
+	TemplateSHA256     string
+	SourceCommit       string
+	HotRuleSetVersion  string
+	HotRuleSetSHA256   string
+	Defaults           systempolicy.Defaults
+	MigrationNotes     []string
+	EnterpriseCount    int
+	ServerCount        int
+	ActiveRolloutCount int
+	CreatedAt          time.Time
 }
 
 func (p SystemPolicyVersionRecord) DefaultModeLabel() string {
@@ -57,7 +60,22 @@ func (p SystemPolicyVersionRecord) StatusLabel() string {
 }
 
 func (p SystemPolicyVersionRecord) CanWithdraw() bool {
-	return p.Status == systempolicy.StatusDeprecated && p.EnterpriseCount == 0
+	return (p.Status == systempolicy.StatusPublished || p.Status == systempolicy.StatusDeprecated) && p.EnterpriseCount == 0 && p.ActiveRolloutCount == 0
+}
+
+func (p SystemPolicyVersionRecord) WithdrawBlockReason() string {
+	switch {
+	case p.Status == systempolicy.StatusWithdrawn:
+		return "이미 회수된 시스템 정책입니다."
+	case p.EnterpriseCount != 0:
+		return "사용 중인 기업 정책이 있어 회수할 수 없습니다."
+	case p.ActiveRolloutCount != 0:
+		return "진행 중인 단계 배포가 있어 회수할 수 없습니다."
+	case p.Status != systempolicy.StatusPublished && p.Status != systempolicy.StatusDeprecated:
+		return "현재 상태에서는 회수할 수 없습니다."
+	default:
+		return ""
+	}
 }
 
 type EnterprisePolicyRecord struct {
@@ -114,6 +132,8 @@ func (p EnterprisePolicyRecord) TargetLabel() string {
 		return "기존 대상"
 	}
 	switch kind {
+	case "enterprise":
+		return "기업 기본"
 	case "server":
 		return "개별 서버"
 	case "group":

@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,10 +17,13 @@ import (
 
 type guidedPolicyRule struct {
 	Field    string `json:"field"`
+	Argument string `json:"argument,omitempty"`
 	Operator string `json:"operator"`
 	Value    string `json:"value"`
 	Action   string `json:"action"`
 }
+
+var guidedPolicyRuleLine = regexp.MustCompile(`^SecRule ([A-Za-z0-9:_-]+) "(@streq|@beginsWith|@contains) ([^"\\\r\n]+)" "id:([0-9]+),phase:1,(pass,log|deny,status:403,log),msg:M-WAF guided rule [0-9]+"$`)
 
 type policyValidationRequest struct {
 	ConfigSchemaVersion    int                `json:"config_schema_version,omitempty"`
@@ -108,7 +111,7 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 		var found bool
 		policyTemplate, found = s.systemPolicyTemplate(r.Context(), loaded.CurrentSystemPolicyID)
 		if !found {
-			fieldErrors["template_key"] = "현재 시스템 정책 버전을 확인할 수 없습니다."
+			fieldErrors["template_key"] = "현재 CRS 기반 시스템 정책을 확인할 수 없습니다."
 		}
 	} else {
 		if request.Target == "" {
@@ -226,35 +229,26 @@ func mergeGuidedPolicyRules(advanced string, rules []guidedPolicyRule) (string, 
 	for index, rule := range rules {
 		field := strings.TrimSpace(rule.Field)
 		switch field {
-		case "REQUEST_URI", "REMOTE_ADDR", "REQUEST_METHOD", "REQUEST_HEADERS:Host", "REQUEST_HEADERS:User-Agent", "ARGS":
+		case "REQUEST_URI", "REQUEST_METHOD", "REQUEST_HEADERS:Host", "REQUEST_HEADERS:User-Agent", "ARGS":
 		default:
 			return "", fmt.Errorf("안내형 규칙 %d의 요청 필드가 올바르지 않습니다.", index+1)
 		}
+		if field == "ARGS" {
+			argument := strings.TrimSpace(rule.Argument)
+			if !validGuidedArgumentName(argument) {
+				return "", fmt.Errorf("안내형 규칙 %d의 요청 인자 이름이 올바르지 않습니다.", index+1)
+			}
+			field += ":" + argument
+		}
 		operator := strings.TrimSpace(rule.Operator)
 		switch operator {
-		case "@contains", "@beginsWith", "@streq", "@rx", "@ipMatch":
+		case "@contains", "@beginsWith", "@streq":
 		default:
 			return "", fmt.Errorf("안내형 규칙 %d의 연산자가 올바르지 않습니다.", index+1)
 		}
 		value := strings.TrimSpace(rule.Value)
 		if value == "" || len(value) > 512 || strings.ContainsAny(value, "\"\\\r\n") {
 			return "", fmt.Errorf("안내형 규칙 %d의 값에 따옴표, 역슬래시 또는 줄바꿈을 사용할 수 없습니다.", index+1)
-		}
-		if field == "REMOTE_ADDR" {
-			if operator != "@ipMatch" {
-				return "", fmt.Errorf("안내형 규칙 %d의 출발지 IP는 IP/CIDR 일치 연산자를 사용해야 합니다.", index+1)
-			}
-			for _, candidate := range strings.Split(value, ",") {
-				candidate = strings.TrimSpace(candidate)
-				if net.ParseIP(candidate) != nil {
-					continue
-				}
-				if _, _, err := net.ParseCIDR(candidate); err != nil {
-					return "", fmt.Errorf("안내형 규칙 %d의 IP 또는 CIDR 값이 올바르지 않습니다.", index+1)
-				}
-			}
-		} else if operator == "@ipMatch" {
-			return "", fmt.Errorf("안내형 규칙 %d의 IP/CIDR 연산자는 출발지 IP에만 사용할 수 있습니다.", index+1)
 		}
 		actions := "pass,log"
 		switch strings.TrimSpace(rule.Action) {
@@ -281,6 +275,49 @@ func mergeGuidedPolicyRules(advanced string, rules []guidedPolicyRule) (string, 
 		lines = append(lines, advanced)
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+func splitGuidedPolicyRules(customRules string) (string, []guidedPolicyRule) {
+	advanced := make([]string, 0)
+	guided := make([]guidedPolicyRule, 0)
+	for _, line := range strings.Split(strings.ReplaceAll(customRules, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		match := guidedPolicyRuleLine.FindStringSubmatch(trimmed)
+		if len(match) != 6 {
+			if trimmed != "" {
+				advanced = append(advanced, trimmed)
+			}
+			continue
+		}
+		field, argument := match[1], ""
+		if strings.HasPrefix(field, "ARGS:") {
+			field, argument = "ARGS", strings.TrimPrefix(field, "ARGS:")
+		}
+		action := "detect"
+		if match[5] == "deny,status:403,log" {
+			action = "block"
+		}
+		rule := guidedPolicyRule{Field: field, Argument: argument, Operator: match[2], Value: match[3], Action: action}
+		if _, err := mergeGuidedPolicyRules("", []guidedPolicyRule{rule}); err != nil {
+			advanced = append(advanced, trimmed)
+			continue
+		}
+		guided = append(guided, rule)
+	}
+	return strings.Join(advanced, "\n"), guided
+}
+
+func validGuidedArgumentName(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func guidedRulesFromForm(r *http.Request) ([]guidedPolicyRule, error) {
@@ -407,6 +444,8 @@ func (s *Server) editEnterprisePolicy(w http.ResponseWriter, r *http.Request) {
 			existingEngineBypasses++
 		}
 	}
+	advancedRules, guidedRules := splitGuidedPolicyRules(settings.CustomRules)
+	guidedRulesJSON, _ := json.Marshal(guidedRules)
 	paths := append([]string(nil), settings.ExcludedPaths...)
 	if exceptionURI := strings.TrimSpace(r.URL.Query().Get("exception_uri")); exceptionURI != "" && strings.HasPrefix(exceptionURI, "/") {
 		found := false
@@ -420,15 +459,16 @@ func (s *Server) editEnterprisePolicy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	form := map[string]any{
-		"IsEdit": true, "EditPolicy": policy, "FormExpectedRevision": policy.CurrentRevisionID,
+		"IsEdit": true, "EditPolicy": policy, "FormEnterpriseID": policy.EnterpriseID, "FormExpectedRevision": policy.CurrentRevisionID,
 		"FormTemplateKey": settings.TemplateKey, "FormName": policy.Name, "FormDescription": policy.Description, "FormTarget": policy.Target,
 		"FormStrategy": policy.UpdateStrategy, "FormMode": policy.CurrentMode, "FormParanoia": strconv.Itoa(settings.ParanoiaLevel),
 		"FormExecutingParanoia": strconv.Itoa(settings.ExecutingParanoiaLevel), "FormScore": strconv.Itoa(settings.InboundScore),
 		"FormOutboundScore": strconv.Itoa(settings.OutboundScore), "FormRequestBody": settings.RequestBody, "FormResponseBody": settings.ResponseBody,
 		"FormEarlyBlocking": settings.EarlyBlocking, "FormSamplingPercentage": strconv.Itoa(settings.SamplingPercentage),
-		"FormExcludedPaths": strings.Join(paths, "\n"), "FormExcludedIPs": strings.Join(settings.ExcludedIPs, "\n"), "FormCustomRules": settings.CustomRules,
+		"FormExcludedPaths": strings.Join(paths, "\n"), "FormExcludedIPs": strings.Join(settings.ExcludedIPs, "\n"), "FormCustomRules": advancedRules, "FormGuidedRules": string(guidedRulesJSON),
 		"FormRuleExclusions": ruleExclusions, "FormTagExclusions": tagExclusions, "FormTargetExclusions": targetExclusions, "FormConditionalExclusions": conditionalExclusions,
 		"ExistingEngineBypasses": existingEngineBypasses,
+		"HasAdvancedSettings":    settings.ParanoiaLevel != 1 || settings.ExecutingParanoiaLevel != 1 || settings.InboundScore != 5 || settings.OutboundScore != 4 || !settings.RequestBody || settings.ResponseBody || settings.EarlyBlocking || settings.SamplingPercentage != 100 || len(settings.Exclusions) != 0 || strings.TrimSpace(advancedRules) != "" || len(settings.ExcludedPaths) != 0 || len(settings.ExcludedIPs) != 0,
 	}
 	s.renderPolicyForm(w, r, http.StatusOK, "", form)
 }
@@ -445,7 +485,7 @@ func (s *Server) createEnterprisePolicyRevision(w http.ResponseWriter, r *http.R
 	}
 	expectedRevisionID := strings.TrimSpace(r.FormValue("expected_revision_id"))
 	form := policyFormState(r)
-	form["IsEdit"], form["EditPolicy"], form["FormExpectedRevision"] = true, policy, expectedRevisionID
+	form["IsEdit"], form["EditPolicy"], form["FormEnterpriseID"], form["FormExpectedRevision"] = true, policy, policy.EnterpriseID, expectedRevisionID
 	if r.FormValue("publish_confirm") != "confirmed" {
 		s.renderPolicyForm(w, r, http.StatusBadRequest, "변경 내용과 단계 배포 영향을 확인해야 합니다.", form)
 		return
@@ -456,7 +496,7 @@ func (s *Server) createEnterprisePolicyRevision(w http.ResponseWriter, r *http.R
 	}
 	policyTemplate, ok := s.systemPolicyTemplate(r.Context(), policy.CurrentSystemPolicyID)
 	if !ok || policyTemplate.Status == systempolicy.StatusWithdrawn {
-		s.renderPolicyForm(w, r, http.StatusConflict, "현재 시스템 정책 버전으로 새 개정본을 만들 수 없습니다.", form)
+		s.renderPolicyForm(w, r, http.StatusConflict, "현재 CRS 기반 시스템 정책으로 새 기업 정책 개정본을 만들 수 없습니다.", form)
 		return
 	}
 	name := truncate(strings.TrimSpace(r.FormValue("name")), 255)

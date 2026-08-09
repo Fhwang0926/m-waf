@@ -91,6 +91,10 @@ func assemble(metadataDir, packagesDir, sourceMetadataDir, sourceInputDir, outpu
 	if len(policySources) == 0 {
 		return errors.New("bundle requires a verified OWASP CRS policy source index")
 	}
+	hotRuleSet, err := loadHotRuleSet("rules/hot")
+	if err != nil {
+		return err
+	}
 	if previousBundle != "" {
 		policySources, err = attachPreviousPolicySources(policySources, artifacts, previousBundle, previousPublicKey, outputDir)
 		if err != nil {
@@ -101,7 +105,7 @@ func assemble(metadataDir, packagesDir, sourceMetadataDir, sourceInputDir, outpu
 	sort.Slice(policySources, func(i, j int) bool { return policySources[i].ID < policySources[j].ID })
 	manifest := model.BundleManifest{
 		SchemaVersion: 2, BundleVersion: version, SourceCommit: commit, CreatedAt: time.Now().UTC(),
-		ManagerAPIMin: "v1", ManagerAPIMax: "v1", Artifacts: artifacts, PolicySources: policySources,
+		ManagerAPIMin: "v1", ManagerAPIMax: "v1", Artifacts: artifacts, PolicySources: policySources, HotRuleSet: hotRuleSet,
 	}
 	raw, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -128,6 +132,28 @@ func assemble(metadataDir, packagesDir, sourceMetadataDir, sourceInputDir, outpu
 	}
 	publicPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})
 	return os.WriteFile(publicKeyPath, publicPEM, 0o644)
+}
+
+func loadHotRuleSet(directory string) (*model.HotRuleSetArtifact, error) {
+	raw, err := os.ReadFile(filepath.Join(directory, "manifest.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read hot-rule manifest: %w", err)
+	}
+	var item model.HotRuleSetArtifact
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&item); err != nil {
+		return nil, fmt.Errorf("decode hot-rule manifest: %w", err)
+	}
+	rules, err := os.ReadFile(filepath.Join(directory, "rules.conf"))
+	if err != nil {
+		return nil, fmt.Errorf("read hot rules: %w", err)
+	}
+	item.Rules = string(rules)
+	if err := packages.ValidateHotRuleSet(&item); err != nil {
+		return nil, err
+	}
+	return &item, nil
 }
 
 func stagePolicySources(metadataDir, inputDir, outputDir string, artifacts []model.PackageArtifact) ([]model.PolicySourceArtifact, error) {
@@ -159,7 +185,9 @@ func stagePolicySources(metadataDir, inputDir, outputDir string, artifacts []mod
 			return nil, fmt.Errorf("stage policy source %s: %w", item.ID, err)
 		}
 		for _, artifact := range artifacts {
-			if item.ArtifactFormat == "policy-bundle-v3" && artifact.Kind == "module" || artifact.Kind == "module" && strings.TrimPrefix(artifact.CRSVersion, "v") == strings.TrimPrefix(item.Version, "v") {
+			compatibleModule := artifact.Kind == "module" && (artifact.PolicyDelivery == "bundle" && item.ArtifactFormat == "policy-bundle-v3" ||
+				strings.TrimPrefix(artifact.CRSVersion, "v") == strings.TrimPrefix(item.Version, "v"))
+			if compatibleModule {
 				item.CompatiblePackageIDs = append(item.CompatiblePackageIDs, artifact.ID)
 				for _, candidate := range artifacts {
 					if candidate.Kind == "agent" && candidate.Version == artifact.Version && (item.ArtifactFormat != "policy-bundle-v3" || contains(candidate.PolicyFormats, "policy-bundle-v3")) {

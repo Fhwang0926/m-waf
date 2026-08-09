@@ -14,6 +14,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Fhwang0926/m-waf/internal/crsindex"
@@ -59,6 +61,9 @@ func Load(root, publicKeyPath string, expectedCommit string, allowUnsigned bool)
 	if manifest.BundleVersion == "" || manifest.SourceCommit == "" {
 		return nil, errors.New("bundle version and source commit are required")
 	}
+	if err := ValidateHotRuleSet(manifest.HotRuleSet); err != nil {
+		return nil, err
+	}
 	if expectedCommit != "" && expectedCommit != "unknown" && manifest.SourceCommit != expectedCommit {
 		return nil, fmt.Errorf("bundle commit %q does not match manager commit %q", manifest.SourceCommit, expectedCommit)
 	}
@@ -91,6 +96,14 @@ func Load(root, publicKeyPath string, expectedCommit string, allowUnsigned bool)
 }
 
 func (c *Catalog) Manifest() model.BundleManifest { return c.manifest }
+
+func (c *Catalog) HotRuleSet() *model.HotRuleSetArtifact {
+	if c.manifest.HotRuleSet == nil {
+		return nil
+	}
+	copy := *c.manifest.HotRuleSet
+	return &copy
+}
 
 func (c *Catalog) PolicySources() []model.PolicySourceArtifact {
 	return append([]model.PolicySourceArtifact(nil), c.manifest.PolicySources...)
@@ -216,7 +229,10 @@ func (c *Catalog) ResolveCRS(inventory model.Inventory, crsVersion string) (mode
 		if artifact.Kind != "module" || !matchesBase(artifact, inventory) || artifact.WebServer != inventory.WebServer {
 			continue
 		}
-		if model.NormalizeIntegrationMode(artifact.IntegrationMode) != model.NormalizeIntegrationMode(inventory.IntegrationMode) || strings.TrimPrefix(artifact.CRSVersion, "v") != strings.TrimPrefix(crsVersion, "v") {
+		if model.NormalizeIntegrationMode(artifact.IntegrationMode) != model.NormalizeIntegrationMode(inventory.IntegrationMode) {
+			continue
+		}
+		if artifact.PolicyDelivery != "bundle" && strings.TrimPrefix(artifact.CRSVersion, "v") != strings.TrimPrefix(crsVersion, "v") {
 			continue
 		}
 		if artifact.WebServerVersion != "" && artifact.WebServerVersion != inventory.WebServerVersion {
@@ -299,6 +315,12 @@ func (c *Catalog) validateArtifact(artifact model.PackageArtifact) error {
 		mode := model.NormalizeIntegrationMode(artifact.IntegrationMode)
 		if mode != model.IntegrationModeDistro && mode != model.IntegrationModeExternal {
 			return fmt.Errorf("package artifact %q has invalid integration mode %q", artifact.ID, artifact.IntegrationMode)
+		}
+		if artifact.PolicyDelivery != "" && artifact.PolicyDelivery != "embedded" && artifact.PolicyDelivery != "bundle" {
+			return fmt.Errorf("package artifact %q has invalid policy delivery %q", artifact.ID, artifact.PolicyDelivery)
+		}
+		if artifact.PolicyDelivery == "bundle" && artifact.RuntimeABI == "" {
+			return fmt.Errorf("package artifact %q requires runtime_abi for bundle policy delivery", artifact.ID)
 		}
 	}
 	clean := filepath.Clean(filepath.FromSlash(artifact.Path))
@@ -399,6 +421,44 @@ func matchesBase(artifact model.PackageArtifact, inventory model.Inventory) bool
 	return artifact.OSID == inventory.OSID &&
 		artifact.OSVersion == inventory.OSVersion &&
 		artifact.Architecture == inventory.Architecture
+}
+
+var hotRuleIDPattern = regexp.MustCompile(`(?:^|[, \t"])(?:id):([0-9]+)(?:[,"]|$)`)
+
+func ValidateHotRuleSet(item *model.HotRuleSetArtifact) error {
+	if item == nil {
+		return nil
+	}
+	if item.SchemaVersion != 1 || item.Version == "" || item.RuleIDMin != 10000 || item.RuleIDMax != 39999 || len(item.SHA256) != 64 {
+		return errors.New("signed hot-rule set metadata is invalid")
+	}
+	digest := sha256.Sum256([]byte(item.Rules))
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), item.SHA256) {
+		return errors.New("signed hot-rule set digest mismatch")
+	}
+	if strings.ContainsAny(item.Rules, "\x00\r") {
+		return errors.New("signed hot-rule set must use normalized LF text")
+	}
+	seen := make(map[int]bool)
+	for lineNumber, rawLine := range strings.Split(item.Rules, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if len(line) > 16<<10 || !strings.HasPrefix(line, "SecRule ") && !strings.HasPrefix(line, "SecAction ") {
+			return fmt.Errorf("signed hot-rule line %d is not a normalized SecRule or SecAction", lineNumber+1)
+		}
+		allMatches := hotRuleIDPattern.FindAllStringSubmatch(line, -1)
+		if len(allMatches) != 1 || len(allMatches[0]) != 2 {
+			return fmt.Errorf("signed hot-rule line %d requires one Rule ID", lineNumber+1)
+		}
+		id, err := strconv.Atoi(allMatches[0][1])
+		if err != nil || id < item.RuleIDMin || id > item.RuleIDMax || seen[id] {
+			return fmt.Errorf("signed hot-rule line %d has an invalid or duplicate Rule ID", lineNumber+1)
+		}
+		seen[id] = true
+	}
+	return nil
 }
 
 func verifyManifest(raw []byte, signaturePath, publicKeyPath string, allowUnsigned bool) error {

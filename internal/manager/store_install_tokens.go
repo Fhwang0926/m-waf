@@ -6,10 +6,17 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"time"
 )
 
 var ErrInvalidInstallToken = errors.New("invalid, expired or revoked enterprise install token")
+var ErrInvalidEventVerificationToken = errors.New("invalid event verification token")
+
+// persistentInstallTokenExpiry is a storage marker for enterprise tokens that
+// remain usable until an operator revokes them. The existing TIMESTAMP column
+// stays unchanged so previously issued expiring tokens keep their old meaning.
+var persistentInstallTokenExpiry = time.Date(2037, 12, 31, 23, 59, 59, 0, time.UTC)
 
 type EnterpriseInstallTokenRecord struct {
 	ID              string
@@ -29,7 +36,7 @@ func (r EnterpriseInstallTokenRecord) StatusLabel() string {
 	if r.RevokedAt.Valid {
 		return "폐기됨"
 	}
-	if !r.ExpiresAt.After(time.Now().UTC()) {
+	if !r.Persistent() && !r.ExpiresAt.After(time.Now().UTC()) {
 		return "만료"
 	}
 	if r.MaxEnrollments.Valid && r.EnrollmentCount >= uint64(r.MaxEnrollments.Int64) {
@@ -39,6 +46,17 @@ func (r EnterpriseInstallTokenRecord) StatusLabel() string {
 }
 
 func (r EnterpriseInstallTokenRecord) Active() bool { return r.StatusLabel() == "활성" }
+
+func (r EnterpriseInstallTokenRecord) Persistent() bool {
+	return r.ExpiresAt.UTC().Equal(persistentInstallTokenExpiry)
+}
+
+func installTokenUsable(expiresAt time.Time, revokedAt sql.NullTime, maximum sql.NullInt64, enrollmentCount uint64) bool {
+	if revokedAt.Valid || (!expiresAt.UTC().Equal(persistentInstallTokenExpiry) && !expiresAt.After(time.Now().UTC())) {
+		return false
+	}
+	return !maximum.Valid || enrollmentCount < uint64(maximum.Int64)
+}
 
 func newInstallToken() (string, error) {
 	raw := make([]byte, 32)
@@ -85,6 +103,70 @@ SELECT ?,e.id,?,?,?,?,?,? FROM enterprises e WHERE e.id=? AND e.status='ACTIVE'`
 		return EnterpriseInstallTokenRecord{}, "", ErrEnterpriseNotActive
 	}
 	return EnterpriseInstallTokenRecord{ID: id, EnterpriseID: enterpriseID, Name: name, TokenPrefix: installTokenPrefix(token), ExpiresAt: expiresAt, MaxEnrollments: maximumValue, CreatedAt: createdAt}, token, nil
+}
+
+// EnsurePersistentEnterpriseInstallToken creates the enterprise's reusable
+// install token only when no usable token exists. Locking the enterprise row
+// keeps simultaneous page loads from issuing multiple active tokens.
+func (s *Store) EnsurePersistentEnterpriseInstallToken(ctx context.Context, enterpriseID, name, createdBy string) (EnterpriseInstallTokenRecord, string, bool, error) {
+	if enterpriseID == "" || name == "" {
+		return EnterpriseInstallTokenRecord{}, "", false, errors.New("enterprise and name are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return EnterpriseInstallTokenRecord{}, "", false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var enterpriseName string
+	if err := tx.QueryRowContext(ctx, `SELECT name FROM enterprises WHERE id=? AND status='ACTIVE' FOR UPDATE`, enterpriseID).Scan(&enterpriseName); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return EnterpriseInstallTokenRecord{}, "", false, ErrEnterpriseNotActive
+		}
+		return EnterpriseInstallTokenRecord{}, "", false, err
+	}
+
+	var existing EnterpriseInstallTokenRecord
+	err = tx.QueryRowContext(ctx, `SELECT id,enterprise_id,name,token_prefix,expires_at,max_enrollments,enrollment_count,last_used_at,revoked_at,created_at
+FROM enterprise_install_tokens
+WHERE enterprise_id=? AND revoked_at IS NULL AND expires_at>UTC_TIMESTAMP(6)
+  AND (max_enrollments IS NULL OR enrollment_count<max_enrollments)
+ORDER BY created_at DESC LIMIT 1 FOR UPDATE`, enterpriseID).Scan(
+		&existing.ID, &existing.EnterpriseID, &existing.Name, &existing.TokenPrefix, &existing.ExpiresAt,
+		&existing.MaxEnrollments, &existing.EnrollmentCount, &existing.LastUsedAt, &existing.RevokedAt, &existing.CreatedAt,
+	)
+	if err == nil {
+		existing.EnterpriseName = enterpriseName
+		if err := tx.Commit(); err != nil {
+			return EnterpriseInstallTokenRecord{}, "", false, err
+		}
+		return existing, "", false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return EnterpriseInstallTokenRecord{}, "", false, err
+	}
+
+	token, err := newInstallToken()
+	if err != nil {
+		return EnterpriseInstallTokenRecord{}, "", false, err
+	}
+	record := EnterpriseInstallTokenRecord{
+		ID:             randomID(),
+		EnterpriseID:   enterpriseID,
+		EnterpriseName: enterpriseName,
+		Name:           name,
+		TokenPrefix:    installTokenPrefix(token),
+		ExpiresAt:      persistentInstallTokenExpiry,
+		CreatedAt:      time.Now().UTC(),
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO enterprise_install_tokens(id,enterprise_id,name,token_prefix,token_hash,expires_at,created_by)
+VALUES (?,?,?,?,?,?,?)`, record.ID, enterpriseID, name, record.TokenPrefix, tokenHash(token), record.ExpiresAt, createdBy); err != nil {
+		return EnterpriseInstallTokenRecord{}, "", false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return EnterpriseInstallTokenRecord{}, "", false, err
+	}
+	return record, token, true, nil
 }
 
 func (s *Store) ListEnterpriseInstallTokens(ctx context.Context, enterpriseScope string, limit int) ([]EnterpriseInstallTokenRecord, error) {
@@ -137,6 +219,32 @@ func (s *Store) RevokeEnterpriseInstallToken(ctx context.Context, id, enterprise
 	return nil
 }
 
+// AuthorizeEventIngestToken binds the additional event verification secret to
+// the same enterprise as the authenticated Agent. Historical install tokens
+// remain valid for this scope because operator revocation only blocks new
+// installations; mTLS still identifies and authorizes the enrolled server.
+func (s *Store) AuthorizeEventIngestToken(ctx context.Context, serverID, token string) error {
+	if serverID == "" || strings.TrimSpace(token) == "" {
+		return ErrInvalidEventVerificationToken
+	}
+	hash := tokenHash(strings.TrimSpace(token))
+	var authorized bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
+  SELECT 1 FROM servers s
+  WHERE s.id=? AND (
+    EXISTS(SELECT 1 FROM enterprise_install_tokens it WHERE it.enterprise_id=s.enterprise_id AND it.token_hash=?)
+    OR EXISTS(SELECT 1 FROM enrollment_tokens et WHERE et.enterprise_id=s.enterprise_id AND et.token_hash=? AND et.used_at IS NOT NULL)
+  )
+)`, serverID, hash, hash).Scan(&authorized)
+	if err != nil {
+		return err
+	}
+	if !authorized {
+		return ErrInvalidEventVerificationToken
+	}
+	return nil
+}
+
 func (s *Store) ExchangeEnterpriseInstallToken(ctx context.Context, installToken, label string, ttl time.Duration) (string, time.Time, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -156,7 +264,7 @@ WHERE t.token_hash=? AND e.status='ACTIVE' FOR UPDATE`, tokenHash(installToken))
 		}
 		return "", time.Time{}, err
 	}
-	if revokedAt.Valid || !expiresAt.After(time.Now().UTC()) || (maximum.Valid && enrollmentCount >= uint64(maximum.Int64)) {
+	if !installTokenUsable(expiresAt, revokedAt, maximum, enrollmentCount) {
 		return "", time.Time{}, ErrInvalidInstallToken
 	}
 	raw := make([]byte, 32)
@@ -165,7 +273,7 @@ WHERE t.token_hash=? AND e.status='ACTIVE' FOR UPDATE`, tokenHash(installToken))
 	}
 	enrollmentToken := base64.RawURLEncoding.EncodeToString(raw)
 	sessionExpires := time.Now().UTC().Add(ttl)
-	if sessionExpires.After(expiresAt) {
+	if !expiresAt.UTC().Equal(persistentInstallTokenExpiry) && sessionExpires.After(expiresAt) {
 		sessionExpires = expiresAt
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO enrollment_tokens(id,enterprise_id,install_token_id,token_hash,label,expires_at)

@@ -126,6 +126,11 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 	if err := a.client.Heartbeat(ctx, heartbeat); err != nil {
 		return err
 	}
+	if state.RevisionID != "" {
+		if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-heartbeat-policy"), []byte(state.RevisionID+"\n"), 0o640); err != nil {
+			return err
+		}
+	}
 	desired, err := a.client.DesiredState(ctx)
 	if err != nil {
 		return err

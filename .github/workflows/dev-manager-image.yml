@@ -13,6 +13,7 @@ on:
       - "internal/**"
       - "migrations/**"
       - "packaging/**"
+      - "rules/**"
       - "web/**"
   push:
     branches: [dev]
@@ -142,6 +143,7 @@ jobs:
             *) package_version="0.1.0~ci.${RUN_NUMBER}" ;;
           esac
           mkdir -p dist/packages dist/metadata dist/policy-sources dist/policy-source-metadata dist/empty
+          test "$(sha256sum rules/hot/rules.conf | awk '{print $1}')" = "$(jq -r .sha256 rules/hot/manifest.json)"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X github.com/Fhwang0926/m-waf/internal/version.Version=${package_version} -X github.com/Fhwang0926/m-waf/internal/version.Commit=${COMMIT}" -o dist/mwaf-agent ./cmd/mwaf-agent
           VERSION="$package_version" COMMIT="$COMMIT" AGENT_BINARY=dist/mwaf-agent OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/agent/deb/build.sh
           if [ -f dist/coreruleset.tar.gz ] && ! echo "$CRS_SHA256  dist/coreruleset.tar.gz" | sha256sum --check >/dev/null 2>&1; then
@@ -172,10 +174,10 @@ jobs:
             -output "dist/policy-sources/owasp-crs-lts-${CRS_LTS_VERSION}.json" \
             -metadata-output "dist/policy-source-metadata/owasp-crs-lts-${CRS_LTS_VERSION}.json" \
             -channel lts -version "$CRS_LTS_VERSION" -tag "$CRS_LTS_TAG" -commit "$CRS_LTS_COMMIT" -tag-object-sha "$CRS_LTS_TAG_OBJECT" -tag-signature-verified -archive-sha256 "$CRS_LTS_SHA256"
-          WEBSERVER=apache CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
-          WEBSERVER=nginx CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
-          WEBSERVER=apache INTEGRATION_MODE=external CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
-          WEBSERVER=nginx INTEGRATION_MODE=external CRS_VERSION="$CRS_VERSION" VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata CRS_ARCHIVE=dist/coreruleset.tar.gz packaging/module/deb/build.sh
+          WEBSERVER=apache VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/module/deb/build.sh
+          WEBSERVER=nginx VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/module/deb/build.sh
+          WEBSERVER=apache INTEGRATION_MODE=external VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/module/deb/build.sh
+          WEBSERVER=nginx INTEGRATION_MODE=external VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/module/deb/build.sh
           test "$(find dist/packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 5
           for package in dist/packages/*.deb; do
             dpkg-deb --info "$package"
@@ -196,9 +198,10 @@ jobs:
               /usr/bin/mwaf-agent -version
               apachectl configtest
               apachectl -M 2>&1 | grep -q security2_module
-              grep -qx "$EXPECTED_CRS_VERSION" /etc/mwaf/crs.version
               grep -q "copytruncate" /etc/logrotate.d/mwaf-modsecurity
-              test "$(find /usr/share/mwaf/crs/rules -type f -name "*.conf" | wc -l)" -ge 20
+              test ! -e /usr/share/mwaf/crs
+              test ! -e /etc/apache2/conf-enabled/mwaf.conf
+              test -f /etc/mwaf/active/main.conf
               test "$(stat -c "%a:%U:%G" /var/log/modsecurity/audit.jsonl)" = "660:root:www-data"
             '
 
@@ -216,10 +219,11 @@ jobs:
               dpkg-query -W mwaf-agent mwaf-modsecurity-nginx
               /usr/bin/mwaf-agent -version
               nginx -t
-              nginx -T 2>&1 | grep -q "modsecurity on;"
-              grep -qx "$EXPECTED_CRS_VERSION" /etc/mwaf/crs.version
+              ! nginx -T 2>&1 | grep -q "/etc/nginx/conf.d/mwaf.conf"
               grep -q "copytruncate" /etc/logrotate.d/mwaf-modsecurity
-              test "$(find /usr/share/mwaf/crs/rules -type f -name "*.conf" | wc -l)" -ge 20
+              test ! -e /usr/share/mwaf/crs
+              test -f /usr/share/mwaf/integration/nginx.conf
+              test -f /etc/mwaf/active/main.conf
               test "$(stat -c "%a:%U:%G" /var/log/modsecurity/audit.jsonl)" = "660:root:www-data"
             '
 
@@ -302,6 +306,7 @@ jobs:
           test "$(find dist/bundle/packages -type f | wc -l)" -eq 5
           test "$(find dist/bundle/policy-sources -type f -name '*.json' | wc -l)" -eq 2
           test "$(find dist/bundle/policy-sources -type f -name '*.tar.gz' | wc -l)" -eq 2
+          test "$(jq -r .hot_rule_set.version dist/bundle/bundle-manifest.json)" = "$(jq -r .version rules/hot/manifest.json)"
 
       - name: Upload verified package inputs
         if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v'))

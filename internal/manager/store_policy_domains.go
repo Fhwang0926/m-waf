@@ -13,12 +13,12 @@ import (
 )
 
 func (s *Store) ListSystemPolicyVersions(ctx context.Context) ([]SystemPolicyVersionRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT sp.id,sp.policy_key,sp.version,sp.schema_version,sp.name,sp.description,sp.crs_track,sp.crs_version,sp.status,sp.template_sha256,sp.source_commit,sp.defaults_json,sp.migration_notes_json,
-COUNT(DISTINCT ep.enterprise_id),COUNT(DISTINCT ds.server_id),sp.created_at
+	rows, err := s.db.QueryContext(ctx, `SELECT sp.id,sp.policy_key,sp.version,sp.schema_version,sp.name,sp.description,sp.crs_track,sp.crs_version,sp.status,sp.template_sha256,sp.source_commit,sp.hot_rule_set_version,sp.hot_rule_set_sha256,sp.defaults_json,sp.migration_notes_json,
+COUNT(DISTINCT ep.enterprise_id),COUNT(DISTINCT ds.server_id),(SELECT COUNT(*) FROM policy_rollouts pr WHERE pr.target_system_policy_version_id=sp.id AND pr.status IN ('AWAITING_APPROVAL','QUEUED','CANARY','EXPANDING','PAUSED')),sp.created_at
 FROM system_policy_versions sp
 LEFT JOIN enterprise_policies ep ON ep.current_system_policy_version_id=sp.id
 LEFT JOIN desired_states ds ON ds.policy_revision_id=ep.current_revision_id
-GROUP BY sp.id,sp.policy_key,sp.version,sp.schema_version,sp.name,sp.description,sp.crs_track,sp.crs_version,sp.status,sp.template_sha256,sp.source_commit,sp.defaults_json,sp.migration_notes_json,sp.created_at
+GROUP BY sp.id,sp.policy_key,sp.version,sp.schema_version,sp.name,sp.description,sp.crs_track,sp.crs_version,sp.status,sp.template_sha256,sp.source_commit,sp.hot_rule_set_version,sp.hot_rule_set_sha256,sp.defaults_json,sp.migration_notes_json,sp.created_at
 ORDER BY sp.policy_key,sp.created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -29,7 +29,7 @@ ORDER BY sp.policy_key,sp.created_at DESC`)
 		var item SystemPolicyVersionRecord
 		var defaults []byte
 		var notes []byte
-		if err := rows.Scan(&item.ID, &item.Key, &item.Version, &item.SchemaVersion, &item.Name, &item.Description, &item.CRSTrack, &item.CRSVersion, &item.Status, &item.TemplateSHA256, &item.SourceCommit, &defaults, &notes, &item.EnterpriseCount, &item.ServerCount, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Key, &item.Version, &item.SchemaVersion, &item.Name, &item.Description, &item.CRSTrack, &item.CRSVersion, &item.Status, &item.TemplateSHA256, &item.SourceCommit, &item.HotRuleSetVersion, &item.HotRuleSetSHA256, &defaults, &notes, &item.EnterpriseCount, &item.ServerCount, &item.ActiveRolloutCount, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(defaults, &item.Defaults)
@@ -117,6 +117,26 @@ func (s *Store) ListPublishedSystemPolicyTemplates(ctx context.Context) ([]syste
 	return items, nil
 }
 
+func (s *Store) NextSystemPolicyVersion(ctx context.Context) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT version FROM system_policy_versions WHERE policy_key=?`, systempolicy.DefaultTemplateKey)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	versions := make([]string, 0)
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			return "", err
+		}
+		versions = append(versions, version)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return nextSystemPolicyVersionAfter(versions), nil
+}
+
 func (s *Store) PublishSystemPolicyVersion(ctx context.Context, item systempolicy.Template, sourceCommit, expectedCurrentID string) error {
 	defaultsJSON, err := json.Marshal(item.Defaults)
 	if err != nil {
@@ -170,16 +190,31 @@ ORDER BY CASE policy_key WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END,created_at DESC 
 	if current.id != expectedCurrentID {
 		return errors.New("current system policy changed; validate the latest state again")
 	}
-	if current.id == "" {
-		if item.Version != "1.0.0" {
-			return errors.New("the first canonical system policy must be version 1.0.0")
+	versionRows, err := tx.QueryContext(ctx, `SELECT version FROM system_policy_versions WHERE policy_key=? FOR UPDATE`, systempolicy.DefaultTemplateKey)
+	if err != nil {
+		return err
+	}
+	versions := make([]string, 0)
+	for versionRows.Next() {
+		var version string
+		if err := versionRows.Scan(&version); err != nil {
+			versionRows.Close()
+			return err
 		}
-	} else if current.key == systempolicy.DefaultTemplateKey {
-		if item.SchemaVersion < current.schema || nextSystemPolicyVersion(current.version) != item.Version {
-			return errors.New("a canonical system policy must use the next patch version without reducing its schema")
-		}
-	} else if item.Version != "1.0.0" {
-		return errors.New("migration from a legacy baseline must create canonical version 1.0.0")
+		versions = append(versions, version)
+	}
+	if err := versionRows.Err(); err != nil {
+		versionRows.Close()
+		return err
+	}
+	if err := versionRows.Close(); err != nil {
+		return err
+	}
+	if item.Version != nextSystemPolicyVersionAfter(versions) {
+		return errors.New("a canonical system policy must use the next unused patch version")
+	}
+	if current.id != "" && current.key == systempolicy.DefaultTemplateKey && item.SchemaVersion < current.schema {
+		return errors.New("a canonical system policy cannot reduce its schema version")
 	}
 	if item.Defaults.CRSSource == nil || item.Defaults.CRSSource.Commit != sourceCommit {
 		return errors.New("system policy source commit is not pinned")
@@ -194,8 +229,8 @@ ORDER BY CASE policy_key WHEN ? THEN 0 WHEN ? THEN 1 ELSE 2 END,created_at DESC 
 	if _, err := tx.ExecContext(ctx, `UPDATE system_policy_versions SET status='DEPRECATED' WHERE policy_key IN (?,?,?) AND status='PUBLISHED'`, systempolicy.DefaultTemplateKey, systempolicy.DefaultOperatingTemplateKey, systempolicy.DefaultStableTemplateKey); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO system_policy_versions(id,policy_key,version,schema_version,name,description,crs_track,crs_version,status,template_sha256,source_commit,defaults_json,migration_notes_json)
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.Reference(), item.Key, item.Version, item.SchemaVersion, item.Name, item.Description, item.CRSTrack, item.CRSVersion, systempolicy.StatusPublished, item.Digest, sourceCommit, defaultsJSON, notesJSON)
+	_, err = tx.ExecContext(ctx, `INSERT INTO system_policy_versions(id,policy_key,version,schema_version,name,description,crs_track,crs_version,status,template_sha256,source_commit,hot_rule_set_version,hot_rule_set_sha256,defaults_json,migration_notes_json)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.Reference(), item.Key, item.Version, item.SchemaVersion, item.Name, item.Description, item.CRSTrack, item.CRSVersion, systempolicy.StatusPublished, item.Digest, sourceCommit, item.Defaults.HotRuleSetVersion, item.Defaults.HotRuleSetSHA256, defaultsJSON, notesJSON)
 	if err != nil {
 		return err
 	}
@@ -229,7 +264,7 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.Reference(), item.Key, item.Version, i
 
 func (s *Store) WithdrawSystemPolicyVersion(ctx context.Context, id string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE system_policy_versions SET status='WITHDRAWN'
-WHERE id=? AND status='DEPRECATED'
+WHERE id=? AND status IN ('PUBLISHED','DEPRECATED')
 AND NOT EXISTS (SELECT 1 FROM enterprise_policies WHERE current_system_policy_version_id=system_policy_versions.id)
 AND NOT EXISTS (SELECT 1 FROM policy_rollouts WHERE target_system_policy_version_id=system_policy_versions.id AND status IN ('AWAITING_APPROVAL','QUEUED','CANARY','EXPANDING','PAUSED'))`, id)
 	if err != nil {

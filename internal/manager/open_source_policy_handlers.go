@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,8 +17,16 @@ import (
 )
 
 const (
-	openSourceRulePageSize = 50
-	openSourceListPageSize = 20
+	openSourceRulePageSize        = 50
+	openSourceListPageSize        = 20
+	openSourceTabOverview         = "overview"
+	openSourceTabRules            = "rules"
+	openSourceTabSetup            = "setup"
+	openSourceTabFiles            = "files"
+	openSourceTabDiff             = "diff"
+	openSourceTabReadiness        = "readiness"
+	openSourceFilesViewFiles      = "files"
+	openSourceFilesViewDirectives = "directives"
 )
 
 type openSourcePolicyView struct {
@@ -43,15 +52,15 @@ type openSourcePolicyView struct {
 func (v openSourcePolicyView) StatusLabel() string {
 	switch v.LinkStatus {
 	case "CURRENT":
-		return "현재 연동"
+		return "현재 시스템 정책"
 	case "LEGACY_UNPINNED":
-		return "연동 정보 보완 필요"
+		return "원본 연결 보완 필요"
 	case "PREVIOUS":
-		return "이전 사용"
+		return "이전 정책 사용"
 	case "BLOCKED":
-		return "반영 차단"
+		return "정책 반영 차단"
 	default:
-		return "전환 가능"
+		return "정책 반영 가능"
 	}
 }
 
@@ -80,7 +89,6 @@ type openSourcePolicyLifecycle struct {
 	HasSources             bool
 	HasCurrent             bool
 	HasNewSource           bool
-	CurrentPolicyVersion   string
 	CurrentPolicyReference string
 	CurrentCRSVersion      string
 	CurrentCRSChannel      string
@@ -90,7 +98,18 @@ type openSourcePolicyLifecycle struct {
 	LatestSourceID         string
 	LatestSourceVersion    string
 	LatestSourceTag        string
+	LatestLTSVersion       string
+	LatestStableVersion    string
 	LatestPackagesReady    bool
+}
+
+type crsSyncPageError struct {
+	Status    int
+	Title     string
+	Detail    string
+	Technical string
+	RetryAt   string
+	RetryIn   time.Duration
 }
 
 type openSourcePolicyList struct {
@@ -135,28 +154,46 @@ func (l openSourcePolicyList) NextURL() string {
 
 type openSourceRuleView struct {
 	crsindex.Rule
+	GitHubURL         string `json:"github_url"`
+	KoreanDescription string `json:"korean_description"`
+}
+
+type openSourceFileView struct {
+	crsindex.SourceFile
+	RawURL    string `json:"raw_url"`
+	GitHubURL string `json:"github_url"`
+}
+
+type openSourceDirectiveView struct {
+	crsindex.SourceDirective
 	GitHubURL string `json:"github_url"`
 }
 
 type openSourcePolicyDetail struct {
-	Policy         openSourcePolicyView  `json:"policy"`
-	Setup          []crsindex.SetupField `json:"setup"`
-	Rules          []openSourceRuleView  `json:"rules"`
-	Page           int                   `json:"page"`
-	PageSize       int                   `json:"page_size"`
-	Total          int                   `json:"total"`
-	HasNext        bool                  `json:"has_next"`
-	FilterQ        string                `json:"-"`
-	FilterID       string                `json:"-"`
-	FilterFile     string                `json:"-"`
-	FilterTag      string                `json:"-"`
-	FilterPL       string                `json:"-"`
-	FilterPhase    string                `json:"-"`
-	FilterSeverity string                `json:"-"`
+	Policy         openSourcePolicyView       `json:"policy"`
+	Tab            string                     `json:"-"`
+	FilesView      string                     `json:"-"`
+	Setup          []crsindex.SetupField      `json:"setup"`
+	SourceSetup    []crsindex.SourceSetupItem `json:"source_setup"`
+	Files          []openSourceFileView       `json:"files"`
+	Directives     []openSourceDirectiveView  `json:"directives"`
+	Rules          []openSourceRuleView       `json:"rules"`
+	Page           int                        `json:"page"`
+	PageSize       int                        `json:"page_size"`
+	Total          int                        `json:"total"`
+	HasNext        bool                       `json:"has_next"`
+	FilterQ        string                     `json:"-"`
+	FilterID       string                     `json:"-"`
+	FilterFile     string                     `json:"-"`
+	FilterTag      string                     `json:"-"`
+	FilterPL       string                     `json:"-"`
+	FilterPhase    string                     `json:"-"`
+	FilterSeverity string                     `json:"-"`
 }
 
 func (d openSourcePolicyDetail) pageURL(page int) string {
 	values := url.Values{}
+	values.Set("tab", openSourceTabRules)
 	values.Set("page", strconv.Itoa(page))
 	for key, value := range map[string]string{"q": d.FilterQ, "rule_id": d.FilterID, "file": d.FilterFile, "tag": d.FilterTag, "severity": d.FilterSeverity, "phase": d.FilterPhase, "paranoia_level": d.FilterPL} {
 		if value != "" {
@@ -193,23 +230,49 @@ type sourceSetupDiff struct {
 	Next     string `json:"next,omitempty"`
 }
 
+type sourceFileDiff struct {
+	Path           string `json:"path"`
+	Kind           string `json:"kind"`
+	Change         string `json:"change"`
+	PreviousSHA256 string `json:"previous_sha256,omitempty"`
+	NextSHA256     string `json:"next_sha256,omitempty"`
+}
+
+type sourceDirectiveDiff struct {
+	Name           string `json:"name"`
+	File           string `json:"file"`
+	Change         string `json:"change"`
+	PreviousSHA256 string `json:"previous_sha256,omitempty"`
+	NextSHA256     string `json:"next_sha256,omitempty"`
+}
+
 type openSourcePolicyDiff struct {
-	SourceID           string            `json:"source_id"`
-	BaseSystemPolicyID string            `json:"base_system_policy_id"`
-	Rules              sourceRuleDiff    `json:"rules"`
-	Setup              []sourceSetupDiff `json:"setup"`
+	SourceID           string                `json:"source_id"`
+	BaseSystemPolicyID string                `json:"base_system_policy_id"`
+	Rules              sourceRuleDiff        `json:"rules"`
+	Setup              []sourceSetupDiff     `json:"setup"`
+	SourceSetup        []sourceSetupDiff     `json:"source_setup"`
+	Files              []sourceFileDiff      `json:"files"`
+	Directives         []sourceDirectiveDiff `json:"directives"`
 }
 
 func (s *Server) openSourcePolicies(w http.ResponseWriter, r *http.Request) {
+	s.renderOpenSourcePolicies(w, r, http.StatusOK, nil)
+}
+
+func (s *Server) renderOpenSourcePolicies(w http.ResponseWriter, r *http.Request, status int, syncError *crsSyncPageError) {
 	list, err := s.openSourcePolicyList(r)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "오픈소스 CRS 카탈로그를 불러올 수 없습니다", err.Error())
 		return
 	}
 	lifecycle := s.openSourceLifecycle(r, list.Items)
-	data := map[string]any{"Policies": list.Items, "List": list, "Lifecycle": lifecycle, "CatalogError": s.catalogErr, "CRSSyncInterval": s.cfg.CRSSyncInterval}
+	data := map[string]any{
+		"Policies": list.Items, "List": list, "Lifecycle": lifecycle, "CatalogError": s.catalogErr,
+		"CRSSyncInterval": s.cfg.CRSSyncInterval, "CRSGitHubAuthenticated": s.cfg.CRSGitHubToken != "", "SyncError": syncError,
+	}
 	if r.URL.Query().Get("setup") == "1" {
-		data["Notice"] = "시스템 관리자 설정이 완료되었습니다. 공식 OWASP CRS를 연동한 뒤 최초 시스템 정책을 검토·게시하세요."
+		data["Notice"] = "시스템 관리자 설정이 완료되었습니다. 공식 OWASP CRS를 동기화한 뒤 최초 시스템 정책을 검토·게시하세요."
 	} else if r.URL.Query().Get("synced") == "1" {
 		channel := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("channel")))
 		if channel == "" || channel == "ALL" {
@@ -218,6 +281,9 @@ func (s *Server) openSourcePolicies(w http.ResponseWriter, r *http.Request) {
 		data["Notice"] = "공식 OWASP CRS " + channel + " v4 소스를 확인하고 검증된 원본을 Manager에 저장했습니다."
 	} else if r.URL.Query().Get("current") == "1" {
 		data["Notice"] = "현재 Manager가 최신 검증 CRS 소스를 보유하고 있습니다."
+	}
+	if status != http.StatusOK {
+		w.WriteHeader(status)
 	}
 	_ = s.templates.ExecuteTemplate(w, "open-source-policies.html", s.viewData(r, "open-source-policies", data))
 }
@@ -238,7 +304,14 @@ func (s *Server) openSourcePolicyDetail(w http.ResponseWriter, r *http.Request) 
 	if base.Key != "" {
 		baseID = base.Reference()
 	}
-	diff, _, _ := s.openSourceDiff(r, detail.Policy.Source.ID, baseID)
+	diff := openSourcePolicyDiff{}
+	if detail.Tab == openSourceTabDiff {
+		diff, _, err = s.openSourceDiff(r, detail.Policy.Source.ID, baseID)
+		if err != nil {
+			s.renderAdminError(w, r, http.StatusBadRequest, "CRS 변경 비교를 불러올 수 없습니다", err.Error())
+			return
+		}
+	}
 	_ = s.templates.ExecuteTemplate(w, "open-source-policy.html", s.viewData(r, "open-source-policies", map[string]any{"Detail": detail, "Base": base, "HasBase": base.Key != "", "Diff": diff}))
 }
 
@@ -268,7 +341,35 @@ func (s *Server) apiOpenSourcePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view = classifyOpenSourcePolicyView(view, s.defaultSystemPolicyTemplate(r.Context()))
-	writeJSON(w, http.StatusOK, map[string]any{"policy": view, "setup": index.Setup})
+	writeJSON(w, http.StatusOK, map[string]any{"policy": view, "setup": index.Setup, "source_setup": index.SourceSetup, "files": index.Files, "directives": index.Directives})
+}
+
+func (s *Server) apiOpenSourcePolicyFile(w http.ResponseWriter, r *http.Request) {
+	sourceID := strings.TrimSpace(r.PathValue("source_id"))
+	if _, _, ok := s.policySource(sourceID); !ok {
+		writeProblem(w, http.StatusNotFound, "verified policy source not found")
+		return
+	}
+	requested := path.Clean(strings.TrimSpace(strings.TrimPrefix(r.URL.Query().Get("path"), "/")))
+	if requested == "." || requested == "" || strings.HasPrefix(requested, "../") || path.IsAbs(requested) {
+		writeProblem(w, http.StatusBadRequest, "valid CRS file path is required")
+		return
+	}
+	files, err := s.policySourceFiles(sourceID)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw, ok := files["crs/"+requested]
+	if !ok {
+		writeProblem(w, http.StatusNotFound, "verified CRS file not found")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Disposition", "inline")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
 
 func (s *Server) apiOpenSourcePolicyRules(w http.ResponseWriter, r *http.Request) {
@@ -428,7 +529,6 @@ func (s *Server) openSourceLifecycle(r *http.Request, items []openSourcePolicyVi
 	current := s.defaultSystemPolicyTemplate(r.Context())
 	if current.Key != "" {
 		view.HasCurrent = true
-		view.CurrentPolicyVersion = current.Version
 		view.CurrentPolicyReference = current.Reference()
 		view.CurrentCRSVersion = current.CRSVersion
 		view.CurrentCRSChannel = current.CRSTrack
@@ -449,9 +549,22 @@ func (s *Server) openSourceLifecycle(r *http.Request, items []openSourcePolicyVi
 			continue
 		}
 		item = classifyOpenSourcePolicyView(item, current)
+		if item.VerifiedAt.After(view.LastCheckedAt) {
+			view.LastCheckedAt = item.VerifiedAt.Local()
+		}
 		if view.LatestSourceID == "" {
 			view.LatestSourceID, view.LatestSourceVersion, view.LatestSourceTag = source.ID, source.Version, source.Tag
 			view.LatestPackagesReady = item.PackagesReady()
+		}
+		switch strings.ToLower(source.Channel) {
+		case "lts":
+			if view.LatestLTSVersion == "" {
+				view.LatestLTSVersion = source.Version
+			}
+		case "stable":
+			if view.LatestStableVersion == "" {
+				view.LatestStableVersion = source.Version
+			}
 		}
 		if item.LinkStatus == "CURRENT" || item.LinkStatus == "LEGACY_UNPINNED" {
 			view.CurrentLinkStatus = item.LinkStatus
@@ -460,7 +573,9 @@ func (s *Server) openSourceLifecycle(r *http.Request, items []openSourcePolicyVi
 			view.HasNewSource = true
 		}
 	}
-	view.LastCheckedAt = s.lastCRSSourceSyncAt().Local()
+	if checkedAt := s.lastCRSSourceSyncAt().Local(); checkedAt.After(view.LastCheckedAt) {
+		view.LastCheckedAt = checkedAt
+	}
 	return view
 }
 
@@ -549,13 +664,33 @@ func (s *Server) policySource(sourceID string) (model.PolicySourceArtifact, crsi
 }
 
 func (s *Server) indexedPolicySource(ctx context.Context, sourceID string) (model.PolicySourceArtifact, crsindex.Index, bool, error) {
-	source, _, ok := s.policySource(sourceID)
+	source, sourceIndex, ok := s.policySource(sourceID)
 	if !ok {
 		return model.PolicySourceArtifact{}, crsindex.Index{}, false, nil
 	}
 	index, err := s.store.CRSReleaseIndex(ctx, source.ID)
 	if err != nil {
 		return model.PolicySourceArtifact{}, crsindex.Index{}, true, err
+	}
+	if len(sourceIndex.Files) == 0 {
+		files, fileErr := s.policySourceFiles(source.ID)
+		if fileErr == nil {
+			sourceIndex = crsindex.EnrichFromPolicyFiles(sourceIndex, files)
+		} else if source.ArtifactFormat == "policy-bundle-v3" {
+			return model.PolicySourceArtifact{}, crsindex.Index{}, true, fmt.Errorf("load verified CRS source inventory: %w", fileErr)
+		}
+	}
+	if len(sourceIndex.Files) != 0 {
+		index.Source = sourceIndex.Source
+		index.GeneratedBy = sourceIndex.GeneratedBy
+		index.SourceSetup = sourceIndex.SourceSetup
+		index.Files = sourceIndex.Files
+		index.Directives = sourceIndex.Directives
+		index.Statistics.FileCount = sourceIndex.Statistics.FileCount
+		index.Statistics.TotalFileCount = sourceIndex.Statistics.TotalFileCount
+		index.Statistics.DataFileCount = sourceIndex.Statistics.DataFileCount
+		index.Statistics.DirectiveCount = sourceIndex.Statistics.DirectiveCount
+		index.Statistics.SetupKeyCount = sourceIndex.Statistics.SetupKeyCount
 	}
 	return source, index, true, nil
 }
@@ -573,6 +708,8 @@ func (s *Server) openSourcePolicyDetailData(r *http.Request) (openSourcePolicyDe
 		return openSourcePolicyDetail{}, true, err
 	}
 	query := r.URL.Query()
+	tab := normalizeOpenSourcePolicyTab(query.Get("tab"))
+	includeRules := tab == openSourceTabRules || strings.HasSuffix(r.URL.Path, "/rules")
 	page, _ := strconv.Atoi(query.Get("page"))
 	if page < 1 {
 		page = 1
@@ -584,11 +721,13 @@ func (s *Server) openSourcePolicyDetailData(r *http.Request) (openSourcePolicyDe
 		"paranoia_level": strings.TrimSpace(query.Get("paranoia_level")),
 	}
 	matched := make([]openSourceRuleView, 0)
-	for _, rule := range index.Rules {
-		if !matchesSourceRule(rule, filters) {
-			continue
+	if includeRules {
+		for _, rule := range index.Rules {
+			if !matchesSourceRule(rule, filters) {
+				continue
+			}
+			matched = append(matched, openSourceRuleView{Rule: rule, GitHubURL: fixedGitHubRuleURL(source.Repository, source.Commit, rule.File, rule.Line), KoreanDescription: describeCRSRule(rule)})
 		}
-		matched = append(matched, openSourceRuleView{Rule: rule, GitHubURL: fixedGitHubRuleURL(source.Repository, source.Commit, rule.File, rule.Line)})
 	}
 	start := (page - 1) * openSourceRulePageSize
 	if start > len(matched) {
@@ -599,12 +738,57 @@ func (s *Server) openSourcePolicyDetailData(r *http.Request) (openSourcePolicyDe
 		end = len(matched)
 	}
 	detail := openSourcePolicyDetail{
-		Policy: view, Setup: index.Setup, Rules: matched[start:end], Page: page, PageSize: openSourceRulePageSize,
+		Policy: view, Tab: tab, FilesView: normalizeOpenSourcePolicyFilesView(query.Get("view")), Rules: matched[start:end], Page: page, PageSize: openSourceRulePageSize,
 		Total: len(matched), HasNext: end < len(matched), FilterQ: query.Get("q"), FilterID: query.Get("rule_id"),
 		FilterFile: query.Get("file"), FilterTag: query.Get("tag"), FilterSeverity: query.Get("severity"),
 		FilterPhase: query.Get("phase"), FilterPL: query.Get("paranoia_level"),
 	}
+	if tab == openSourceTabSetup {
+		detail.Setup = index.Setup
+		detail.SourceSetup = index.SourceSetup
+	}
+	if tab == openSourceTabFiles {
+		for _, file := range index.Files {
+			values := url.Values{"path": []string{file.Path}}
+			upstreamPath := file.Path
+			if upstreamPath == "crs-setup.conf" {
+				upstreamPath = "crs-setup.conf.example"
+			}
+			detail.Files = append(detail.Files, openSourceFileView{
+				SourceFile: file,
+				RawURL:     "/api/v1/open-source-policies/" + url.PathEscape(source.ID) + "/file?" + values.Encode(),
+				GitHubURL:  fixedGitHubRuleURL(source.Repository, source.Commit, upstreamPath, 1),
+			})
+		}
+		for _, directive := range index.Directives {
+			detail.Directives = append(detail.Directives, openSourceDirectiveView{SourceDirective: directive, GitHubURL: fixedGitHubRuleURL(source.Repository, source.Commit, directive.File, directive.Line)})
+		}
+	}
 	return detail, true, nil
+}
+
+func normalizeOpenSourcePolicyTab(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case openSourceTabRules:
+		return openSourceTabRules
+	case openSourceTabSetup:
+		return openSourceTabSetup
+	case openSourceTabFiles:
+		return openSourceTabFiles
+	case openSourceTabDiff:
+		return openSourceTabDiff
+	case openSourceTabReadiness:
+		return openSourceTabReadiness
+	default:
+		return openSourceTabOverview
+	}
+}
+
+func normalizeOpenSourcePolicyFilesView(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), openSourceFilesViewDirectives) {
+		return openSourceFilesViewDirectives
+	}
+	return openSourceFilesViewFiles
 }
 
 func matchesSourceRule(rule crsindex.Rule, filters map[string]string) bool {
@@ -656,6 +840,9 @@ func (s *Server) openSourceDiff(r *http.Request, sourceID, baseID string) (openS
 		diff := openSourcePolicyDiff{SourceID: sourceID}
 		diff.Rules.Added = append(diff.Rules.Added, candidate.Rules...)
 		diff.Setup = compareSourceSetup(nil, candidate.Setup)
+		diff.SourceSetup = compareSourceSetupItems(nil, candidate.SourceSetup)
+		diff.Files = compareSourceFiles(nil, candidate.Files)
+		diff.Directives = compareSourceDirectives(nil, candidate.Directives)
 		return diff, true, nil
 	}
 	base, ok := s.systemPolicyTemplate(r.Context(), baseID)
@@ -698,7 +885,107 @@ func (s *Server) openSourceDiff(r *http.Request, sourceID, baseID string) (openS
 	}
 	sort.Slice(diff.Rules.Removed, func(i, j int) bool { return diff.Rules.Removed[i].ID < diff.Rules.Removed[j].ID })
 	diff.Setup = compareSourceSetup(previous.Setup, candidate.Setup)
+	diff.SourceSetup = compareSourceSetupItems(previous.SourceSetup, candidate.SourceSetup)
+	diff.Files = compareSourceFiles(previous.Files, candidate.Files)
+	diff.Directives = compareSourceDirectives(previous.Directives, candidate.Directives)
 	return diff, true, nil
+}
+
+func compareSourceSetupItems(previous, next []crsindex.SourceSetupItem) []sourceSetupDiff {
+	old := make(map[string]crsindex.SourceSetupItem, len(previous))
+	for _, item := range previous {
+		old[item.Key] = item
+	}
+	changes := make([]sourceSetupDiff, 0)
+	for _, item := range next {
+		prior, exists := old[item.Key]
+		switch {
+		case !exists:
+			changes = append(changes, sourceSetupDiff{Key: item.Key, Change: "ADDED", Next: sourceSetupItemSummary(item)})
+		case prior.Value != item.Value || prior.Active != item.Active || prior.Managed != item.Managed:
+			changes = append(changes, sourceSetupDiff{Key: item.Key, Change: "CHANGED", Previous: sourceSetupItemSummary(prior), Next: sourceSetupItemSummary(item)})
+		}
+		delete(old, item.Key)
+	}
+	for key, item := range old {
+		changes = append(changes, sourceSetupDiff{Key: key, Change: "REMOVED", Previous: sourceSetupItemSummary(item)})
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Key < changes[j].Key })
+	return changes
+}
+
+func sourceSetupItemSummary(item crsindex.SourceSetupItem) string {
+	state := "example"
+	if item.Active {
+		state = "active"
+	}
+	if item.Managed {
+		state += ",managed"
+	}
+	return item.Value + " (" + state + ")"
+}
+
+func compareSourceFiles(previous, next []crsindex.SourceFile) []sourceFileDiff {
+	old := make(map[string]crsindex.SourceFile, len(previous))
+	for _, file := range previous {
+		old[file.Path] = file
+	}
+	changes := make([]sourceFileDiff, 0)
+	for _, file := range next {
+		prior, exists := old[file.Path]
+		switch {
+		case !exists:
+			changes = append(changes, sourceFileDiff{Path: file.Path, Kind: file.Kind, Change: "ADDED", NextSHA256: file.SHA256})
+		case prior.SHA256 != file.SHA256 || prior.Kind != file.Kind:
+			changes = append(changes, sourceFileDiff{Path: file.Path, Kind: file.Kind, Change: "CHANGED", PreviousSHA256: prior.SHA256, NextSHA256: file.SHA256})
+		}
+		delete(old, file.Path)
+	}
+	for _, file := range old {
+		changes = append(changes, sourceFileDiff{Path: file.Path, Kind: file.Kind, Change: "REMOVED", PreviousSHA256: file.SHA256})
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	return changes
+}
+
+func compareSourceDirectives(previous, next []crsindex.SourceDirective) []sourceDirectiveDiff {
+	old := make(map[string]crsindex.SourceDirective, len(previous))
+	for _, directive := range previous {
+		old[sourceDirectiveKey(directive)] = directive
+	}
+	changes := make([]sourceDirectiveDiff, 0)
+	for _, directive := range next {
+		key := sourceDirectiveKey(directive)
+		prior, exists := old[key]
+		switch {
+		case !exists:
+			changes = append(changes, sourceDirectiveDiff{Name: directive.Name, File: directive.File, Change: "ADDED", NextSHA256: directive.ContentHash})
+		case prior.ContentHash != directive.ContentHash:
+			changes = append(changes, sourceDirectiveDiff{Name: directive.Name, File: directive.File, Change: "CHANGED", PreviousSHA256: prior.ContentHash, NextSHA256: directive.ContentHash})
+		}
+		delete(old, key)
+	}
+	for _, directive := range old {
+		changes = append(changes, sourceDirectiveDiff{Name: directive.Name, File: directive.File, Change: "REMOVED", PreviousSHA256: directive.ContentHash})
+	}
+	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].File == changes[j].File {
+			return changes[i].Name < changes[j].Name
+		}
+		return changes[i].File < changes[j].File
+	})
+	return changes
+}
+
+func sourceDirectiveKey(directive crsindex.SourceDirective) string {
+	identity := strings.Join(directive.RuleReferences, ",")
+	if identity == "" {
+		fields := strings.Fields(directive.Directive)
+		if len(fields) > 1 {
+			identity = strings.Trim(fields[1], "'\"")
+		}
+	}
+	return directive.File + "|" + directive.Name + "|" + identity
 }
 
 func compareSourceSetup(previous, next []crsindex.SetupField) []sourceSetupDiff {

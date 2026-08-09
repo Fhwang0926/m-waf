@@ -71,6 +71,8 @@ func TestStructuredExclusionsRenderBeforeAndAfterCRS(t *testing.T) {
 		CRSSetup: map[string]string{"blocking_paranoia_level": "1", "detection_paranoia_level": "2"},
 		Exclusions: []Exclusion{
 			{Type: "RULE", LoadStage: "BEFORE_CRS", RuleID: 942100, GeneratedRuleID: 5000, Enabled: true, Conditions: []Condition{{Field: "REQUEST_URI", Operator: "@beginsWith", Value: "/health"}}},
+			{Type: "TARGET", LoadStage: "BEFORE_CRS", RuleID: 942100, Target: "ARGS:password", GeneratedRuleID: 5001, Enabled: true, Conditions: []Condition{{Field: "REQUEST_URI", Operator: "@streq", Value: "/login"}}},
+			{Type: "RULE", LoadStage: "AFTER_CRS", RuleID: 932100, Enabled: true},
 			{Type: "TAG", LoadStage: "AFTER_CRS", RuleTag: "attack-sqli", Enabled: true},
 		},
 		CustomRules: []CustomRule{{RuleID: 40000, Scope: "ENTERPRISE", Canonical: `SecRule REQUEST_URI "@streq /private" "id:40000,phase:2,deny"`, Enabled: true}},
@@ -85,9 +87,36 @@ func TestStructuredExclusionsRenderBeforeAndAfterCRS(t *testing.T) {
 	}
 	if !bytes.Contains(files["00-engine.conf"], []byte("SecResponseBodyAccess On")) ||
 		!bytes.Contains(files["30-before-crs-exclusions.conf"], []byte("ctl:ruleRemoveById=942100")) ||
+		!bytes.Contains(files["30-before-crs-exclusions.conf"], []byte("ctl:ruleRemoveTargetById=942100;ARGS:password")) ||
+		!bytes.Contains(files["50-after-crs-exclusions.conf"], []byte("SecRuleRemoveById 932100")) ||
 		!bytes.Contains(files["50-after-crs-exclusions.conf"], []byte("SecRuleRemoveByTag attack-sqli")) ||
 		!bytes.Contains(files["60-service-rules.conf"], []byte("id:40000")) {
 		t.Fatalf("structured policy files were rendered in the wrong stage: %#v", files)
+	}
+}
+
+func TestIPRulesRenderBeforeCRS(t *testing.T) {
+	source := systempolicy.PolicySourceRef{ID: "owasp-crs-lts", Commit: "0123456789abcdef", IndexSHA256: repeatHex("b")}
+	raw, _, err := Build(source, Input{
+		Mode: "On", RequestBody: true,
+		IPRules: []IPRule{
+			{Action: "BLOCK", Network: "192.0.2.10/32", GeneratedRuleID: 5000, Enabled: true},
+			{Action: "TRUST", Network: "2001:db8::/48", GeneratedRuleID: 5001, Enabled: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, files, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := files["30-before-crs-exclusions.conf"]
+	if !bytes.Contains(before, []byte(`@ipMatch 192.0.2.10/32`)) || !bytes.Contains(before, []byte(`deny,status:403`)) {
+		t.Fatalf("BLOCK Rule was not rendered before CRS: %s", before)
+	}
+	if !bytes.Contains(before, []byte(`@ipMatch 2001:db8::/48`)) || !bytes.Contains(before, []byte(`ctl:ruleEngine=Off`)) {
+		t.Fatalf("TRUST Rule was not rendered before CRS: %s", before)
 	}
 }
 

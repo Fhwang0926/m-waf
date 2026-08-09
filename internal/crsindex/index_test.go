@@ -53,6 +53,40 @@ func TestPolicyFilesFromArchivePreservesRulesAndData(t *testing.T) {
 	}
 }
 
+func TestBuildFromArchiveIndexesCompleteSourceInventory(t *testing.T) {
+	archive := testArchive(t, map[string]string{
+		"coreruleset-4.28.0/crs-setup.conf.example": strings.Join([]string{
+			setupExampleForSupportedFields(),
+			"# setvar:tx.reporting_level=4\"",
+		}, "\n"),
+		"coreruleset-4.28.0/rules/a.conf": strings.Join([]string{
+			`SecRule ARGS "@pmFromFile keywords.data" "id:900001,phase:1,pass"`,
+			`SecRuleUpdateTargetById 900001 "!ARGS:ignored"`,
+			`SecMarker "END-A"`,
+		}, "\n"),
+		"coreruleset-4.28.0/rules/keywords.data": "one\ntwo\n",
+	})
+	index, err := BuildFromArchive(bytes.NewReader(archive), testSource())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if index.Statistics.TotalFileCount != 3 || index.Statistics.DataFileCount != 1 || index.Statistics.DirectiveCount != 2 {
+		t.Fatalf("unexpected inventory statistics: %#v", index.Statistics)
+	}
+	if len(index.SourceSetup) != len(SupportedSetup())+1 || index.Statistics.SetupKeyCount != len(index.SourceSetup) {
+		t.Fatalf("complete setup inventory was not indexed: %#v", index.SourceSetup)
+	}
+	var data SourceFile
+	for _, file := range index.Files {
+		if file.Path == "rules/keywords.data" {
+			data = file
+		}
+	}
+	if data.SHA256 == "" || len(data.ReferencedBy) != 1 || data.ReferencedBy[0] != 900001 {
+		t.Fatalf("data file reference was not indexed: %#v", data)
+	}
+}
+
 func TestSupportedSetupFromExampleDoesNotPromoteCommentedExamplesToDefaults(t *testing.T) {
 	var setup strings.Builder
 	for _, field := range SupportedSetup() {
@@ -84,6 +118,18 @@ func TestSupportedSetupFromExampleDoesNotPromoteCommentedExamplesToDefaults(t *t
 
 func testSource() Source {
 	return Source{Provider: "github", Repository: "https://github.com/coreruleset/coreruleset", Channel: "stable", Version: "4.28.0", Tag: "v4.28.0", Commit: "0123456789abcdef", ArchiveSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+}
+
+func setupExampleForSupportedFields() string {
+	var setup strings.Builder
+	for _, field := range SupportedSetup() {
+		setup.WriteString("# setvar:tx.")
+		setup.WriteString(field.Key)
+		setup.WriteString("=")
+		setup.WriteString(field.Default)
+		setup.WriteString("\"\n")
+	}
+	return setup.String()
 }
 
 func testArchive(t *testing.T, files map[string]string) []byte {

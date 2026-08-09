@@ -19,21 +19,30 @@ const (
 	setupCSRFCookieName = "mwaf_setup_csrf"
 )
 
+type ConsoleArea string
+
+const (
+	ConsoleAreaEnterprise ConsoleArea = "enterprise"
+	ConsoleAreaSystem     ConsoleArea = "system"
+)
+
 type sessionData struct {
-	UserID         string `json:"user_id"`
-	Username       string `json:"username"`
-	DisplayName    string `json:"display_name"`
-	Role           Role   `json:"role"`
-	EnterpriseID   string `json:"enterprise_id,omitempty"`
-	EnterpriseName string `json:"enterprise_name,omitempty"`
-	CredentialTag  string `json:"credential_tag"`
-	ExpiresAt      int64  `json:"expires_at"`
-	CSRF           string `json:"csrf"`
+	UserID         string      `json:"user_id"`
+	Username       string      `json:"username"`
+	DisplayName    string      `json:"display_name"`
+	Role           Role        `json:"role"`
+	EnterpriseID   string      `json:"enterprise_id,omitempty"`
+	EnterpriseName string      `json:"enterprise_name,omitempty"`
+	CredentialTag  string      `json:"credential_tag"`
+	ExpiresAt      int64       `json:"expires_at"`
+	CSRF           string      `json:"csrf"`
+	ActualRole     Role        `json:"-"`
+	ConsoleArea    ConsoleArea `json:"-"`
 }
 
-// TenantScope separates a user's home hosting tenant from permission to read
-// across tenants. A system administrator still belongs to one enterprise, but
-// may select all enterprises for system-wide monitoring and administration.
+// TenantScope follows the effective role for the current console area. System
+// administrators have global scope only in the system console and use their
+// home enterprise scope in the enterprise console.
 type TenantScope struct {
 	HomeEnterpriseID string
 	GlobalAccess     bool
@@ -58,10 +67,35 @@ func (s TenantScope) MutationEnterpriseID(requested string) string {
 	return requested
 }
 
-func (s sessionData) RoleLabel() string    { return s.Role.Label() }
-func (s sessionData) IsSystemAdmin() bool  { return s.Role == RoleSystemAdmin }
-func (s sessionData) CanOperate() bool     { return roleAtLeast(s.Role, RoleEnterpriseUser) }
-func (s sessionData) CanManageUsers() bool { return roleAtLeast(s.Role, RoleEnterpriseAdmin) }
+func (s sessionData) actualRole() Role {
+	if s.ActualRole != "" {
+		return s.ActualRole
+	}
+	return s.Role
+}
+
+func (s sessionData) asEnterpriseConsole() sessionData {
+	s.ActualRole = s.actualRole()
+	s.ConsoleArea = ConsoleAreaEnterprise
+	if s.ActualRole == RoleSystemAdmin {
+		s.Role = RoleEnterpriseAdmin
+	}
+	return s
+}
+
+func (s sessionData) asSystemConsole() sessionData {
+	s.ActualRole = s.actualRole()
+	s.ConsoleArea = ConsoleAreaSystem
+	s.Role = s.ActualRole
+	return s
+}
+
+func (s sessionData) RoleLabel() string               { return s.Role.Label() }
+func (s sessionData) IsSystemAdmin() bool             { return s.Role == RoleSystemAdmin }
+func (s sessionData) CanAccessSystemManagement() bool { return s.actualRole() == RoleSystemAdmin }
+func (s sessionData) InSystemConsole() bool           { return s.ConsoleArea == ConsoleAreaSystem }
+func (s sessionData) CanOperate() bool                { return roleAtLeast(s.Role, RoleEnterpriseUser) }
+func (s sessionData) CanManageUsers() bool            { return roleAtLeast(s.Role, RoleEnterpriseAdmin) }
 func (s sessionData) ScopeEnterpriseID() string {
 	scope := s.TenantScope()
 	if scope.GlobalAccess {

@@ -49,23 +49,29 @@ type ServerRecord struct {
 }
 
 type EventRecord struct {
-	ID             uint64    `json:"id"`
-	AgentID        string    `json:"server_id"`
-	ServerName     string    `json:"server_name"`
-	EnterpriseID   string    `json:"enterprise_id,omitempty"`
-	EnterpriseName string    `json:"enterprise_name"`
-	OccurredAt     time.Time `json:"occurred_at"`
-	TransactionID  string    `json:"transaction_id,omitempty"`
-	Service        string    `json:"service,omitempty"`
-	Method         string    `json:"method"`
-	URI            string    `json:"uri"`
-	StatusCode     uint16    `json:"status_code"`
-	RuleID         string    `json:"rule_id"`
-	Message        string    `json:"message"`
-	Severity       string    `json:"severity"`
-	Blocked        bool      `json:"blocked"`
-	PolicyRevision string    `json:"policy_revision,omitempty"`
-	PolicyID       string    `json:"policy_id,omitempty"`
+	ID              uint64    `json:"id"`
+	IncidentID      uint64    `json:"incident_id,omitempty"`
+	RequestID       string    `json:"request_id,omitempty"`
+	AgentID         string    `json:"server_id"`
+	ServerName      string    `json:"server_name"`
+	EnterpriseID    string    `json:"enterprise_id,omitempty"`
+	EnterpriseName  string    `json:"enterprise_name"`
+	OccurredAt      time.Time `json:"occurred_at"`
+	TransactionID   string    `json:"transaction_id,omitempty"`
+	Service         string    `json:"service,omitempty"`
+	Method          string    `json:"method"`
+	URI             string    `json:"uri"`
+	ClientIP        string    `json:"client_ip,omitempty"`
+	CountryCode     string    `json:"country_code,omitempty"`
+	StatusCode      uint16    `json:"status_code"`
+	RuleID          string    `json:"rule_id"`
+	Message         string    `json:"message"`
+	MatchedVariable string    `json:"matched_variable,omitempty"`
+	RuleTags        []string  `json:"rule_tags,omitempty"`
+	Severity        string    `json:"severity"`
+	Blocked         bool      `json:"blocked"`
+	PolicyRevision  string    `json:"policy_revision,omitempty"`
+	PolicyID        string    `json:"policy_id,omitempty"`
 }
 
 func (e EventRecord) SeverityLabel() string {
@@ -132,10 +138,10 @@ func (s *Store) ValidateEnrollmentToken(ctx context.Context, token string) error
 	var expires time.Time
 	var parentValid bool
 	err := s.db.QueryRowContext(ctx, `SELECT et.enterprise_id,et.expires_at,et.used_at,
-(et.install_token_id IS NULL OR (it.id IS NOT NULL AND it.revoked_at IS NULL AND it.expires_at > UTC_TIMESTAMP(6)))
+(et.install_token_id IS NULL OR (it.id IS NOT NULL AND it.revoked_at IS NULL AND (it.expires_at=? OR it.expires_at > UTC_TIMESTAMP(6))))
 FROM enrollment_tokens et JOIN enterprises e ON e.id=et.enterprise_id
 LEFT JOIN enterprise_install_tokens it ON it.id=et.install_token_id
-WHERE et.token_hash=? AND e.status='ACTIVE'`, tokenHash(token)).Scan(&enterpriseID, &expires, &used, &parentValid)
+WHERE et.token_hash=? AND e.status='ACTIVE'`, persistentInstallTokenExpiry, tokenHash(token)).Scan(&enterpriseID, &expires, &used, &parentValid)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrInvalidEnrollmentToken
@@ -157,10 +163,10 @@ func (s *Store) AllowEnrollmentPackages(ctx context.Context, token string, packa
 WHERE token_hash=? AND used_at IS NULL AND expires_at > UTC_TIMESTAMP(6)
 AND (install_token_id IS NULL OR EXISTS (
   SELECT 1 FROM enterprise_install_tokens it
-  WHERE it.id=enrollment_tokens.install_token_id AND it.revoked_at IS NULL AND it.expires_at > UTC_TIMESTAMP(6)
+  WHERE it.id=enrollment_tokens.install_token_id AND it.revoked_at IS NULL AND (it.expires_at=? OR it.expires_at > UTC_TIMESTAMP(6))
 )) AND EXISTS (
   SELECT 1 FROM enterprises e WHERE e.id=enrollment_tokens.enterprise_id AND e.status='ACTIVE'
-)`, raw, tokenHash(token))
+)`, raw, tokenHash(token), persistentInstallTokenExpiry)
 	if err != nil {
 		return err
 	}
@@ -180,7 +186,7 @@ func (s *Store) EnrollmentPackageAllowed(ctx context.Context, token, packageID s
 FROM enrollment_tokens et JOIN enterprises e ON e.id=et.enterprise_id
 LEFT JOIN enterprise_install_tokens it ON it.id=et.install_token_id
 WHERE et.token_hash=? AND et.used_at IS NULL AND et.expires_at > UTC_TIMESTAMP(6)
-AND e.status='ACTIVE' AND (et.install_token_id IS NULL OR (it.revoked_at IS NULL AND it.expires_at > UTC_TIMESTAMP(6)))`, tokenHash(token)).Scan(&raw)
+AND e.status='ACTIVE' AND (et.install_token_id IS NULL OR (it.revoked_at IS NULL AND (it.expires_at=? OR it.expires_at > UTC_TIMESTAMP(6))))`, tokenHash(token), persistentInstallTokenExpiry).Scan(&raw)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, ErrInvalidEnrollmentToken
@@ -238,7 +244,7 @@ FROM enterprise_install_tokens WHERE id=? FOR UPDATE`, installTokenID.String).Sc
 			}
 			return err
 		}
-		if revoked.Valid || !installExpires.After(time.Now().UTC()) || (maximum.Valid && enrollmentCount >= uint64(maximum.Int64)) {
+		if !installTokenUsable(installExpires, revoked, maximum, enrollmentCount) {
 			return ErrInvalidEnrollmentToken
 		}
 	}
@@ -370,17 +376,48 @@ func (s *Store) InsertEventBatch(ctx context.Context, serverID string, batch mod
 	if n == 0 {
 		return true, nil
 	}
+	var enterpriseID string
+	if err := tx.QueryRowContext(ctx, `SELECT enterprise_id FROM servers WHERE id=? AND revoked_at IS NULL`, serverID).Scan(&enterpriseID); err != nil {
+		return false, err
+	}
+	incidentIDs := make(map[string]uint64)
+	grouped := make(map[string][]model.SecurityEvent)
+	groupOrder := make([]string, 0)
+	for _, event := range batch.Events {
+		key := incidentKey(event)
+		if _, exists := grouped[key]; !exists {
+			groupOrder = append(groupOrder, key)
+		}
+		grouped[key] = append(grouped[key], event)
+	}
+	for _, key := range groupOrder {
+		id, err := insertIncidentTx(ctx, tx, enterpriseID, serverID, key, grouped[key])
+		if err != nil {
+			return false, err
+		}
+		incidentIDs[key] = id
+	}
 	if len(batch.Events) != 0 {
-		const columns = 14
+		const columns = 20
 		placeholders := make([]string, 0, len(batch.Events))
 		args := make([]any, 0, len(batch.Events)*columns)
 		for _, event := range batch.Events {
-			placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-			args = append(args, serverID, batch.BatchID, event.EventID, event.OccurredAt.UTC(), event.TransactionID, event.Service, event.Method, event.URI, event.StatusCode, event.RuleID, event.Message, event.Severity, event.Blocked, event.PolicyRevision)
+			_, ip := canonicalEventIP(event.ClientIP)
+			tags, err := json.Marshal(event.RuleTags)
+			if err != nil {
+				return false, err
+			}
+			placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+			args = append(args, incidentIDs[incidentKey(event)], serverID, batch.BatchID, event.EventID, event.RequestID, ip, event.OccurredAt.UTC(), event.TransactionID, event.Service, event.Method, event.URI, event.StatusCode, event.RuleID, event.Message, event.MatchedVariable, tags, event.Severity, event.Blocked, event.PolicyRevision, time.Now().UTC())
 		}
-		query := `INSERT INTO security_events(agent_id,batch_id,event_id,occurred_at,transaction_id,service,method,uri,status_code,rule_id,message,severity,blocked,policy_revision) VALUES ` + strings.Join(placeholders, ",")
+		query := `INSERT INTO security_events(incident_id,agent_id,batch_id,event_id,request_id,client_ip,occurred_at,transaction_id,service,method,uri,status_code,rule_id,message,matched_variable,rule_tags_json,severity,blocked,policy_revision,created_at) VALUES ` + strings.Join(placeholders, ",")
 		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			return false, err
+		}
+		for _, id := range incidentIDs {
+			if _, err := tx.ExecContext(ctx, `UPDATE security_incidents SET primary_event_id=(SELECT se.id FROM security_events se WHERE se.incident_id=? ORDER BY CASE WHEN se.rule_id LIKE '949%' OR se.rule_id LIKE '959%' OR se.rule_id LIKE '980%' THEN 1 ELSE 0 END,se.id LIMIT 1) WHERE id=?`, id, id); err != nil {
+				return false, err
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

@@ -60,6 +60,7 @@ type Input struct {
 	EnterpriseRules string
 	Exclusions      []Exclusion
 	CustomRules     []CustomRule
+	IPRules         []IPRule
 }
 
 type Condition struct {
@@ -84,6 +85,13 @@ type CustomRule struct {
 	Scope     string
 	Canonical string
 	Enabled   bool
+}
+
+type IPRule struct {
+	Action          string
+	Network         string
+	GeneratedRuleID int
+	Enabled         bool
 }
 
 func Build(source systempolicy.PolicySourceRef, input Input) ([]byte, Manifest, error) {
@@ -318,7 +326,18 @@ func renderSetupV3(values map[string]string) string {
 
 func renderBefore(input Input) string {
 	var output strings.Builder
-	output.WriteString("# Conditional exclusions evaluated before CRS.\n")
+	output.WriteString("# IP controls and conditional exclusions evaluated before CRS.\n")
+	for _, rule := range input.IPRules {
+		if !rule.Enabled {
+			continue
+		}
+		switch rule.Action {
+		case "BLOCK":
+			fmt.Fprintf(&output, "SecRule REMOTE_ADDR \"@ipMatch %s\" \"id:%d,phase:1,deny,status:403,log,msg:'M-WAF IP block'\"\n", rule.Network, rule.GeneratedRuleID)
+		case "TRUST":
+			fmt.Fprintf(&output, "SecRule REMOTE_ADDR \"@ipMatch %s\" \"id:%d,phase:1,pass,nolog,ctl:ruleEngine=Off\"\n", rule.Network, rule.GeneratedRuleID)
+		}
+	}
 	if len(input.Exclusions) != 0 {
 		for _, exclusion := range input.Exclusions {
 			if !exclusion.Enabled || exclusion.LoadStage != "BEFORE_CRS" || len(exclusion.Conditions) == 0 {

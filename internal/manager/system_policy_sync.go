@@ -225,11 +225,11 @@ func (s *Server) changedEnterpriseRuleImpact(ctx context.Context, currentSystemP
 func (s *Server) processPolicyRollout(ctx context.Context, rollout PolicyRolloutRecord) error {
 	targetTemplate, ok := s.systemPolicyTemplate(ctx, rollout.TargetSystemPolicyVersionID)
 	if !ok {
-		_ = s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "FAILED", "시스템 정책 버전을 찾을 수 없습니다.")
+		_ = s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "FAILED", "CRS 기반 시스템 정책을 찾을 수 없습니다.")
 		return errors.New("target system policy version is unavailable")
 	}
 	if targetTemplate.Status == systempolicy.StatusWithdrawn {
-		_ = s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "FAILED", "회수된 시스템 정책 버전은 적용하거나 롤백할 수 없습니다.")
+		_ = s.store.UpdatePolicyRolloutStatus(ctx, rollout.ID, "FAILED", "회수된 CRS 기반 시스템 정책은 적용하거나 롤백할 수 없습니다.")
 		return errors.New("target system policy version is withdrawn")
 	}
 	targets, err := s.store.ListPolicyRolloutTargets(ctx, rollout.ID)
@@ -680,6 +680,9 @@ func policyBundleInputFromConfiguration(configuration PolicyConfiguration) polic
 	}
 	for _, item := range configuration.CustomRules {
 		input.CustomRules = append(input.CustomRules, policybundle.CustomRule{RuleID: item.RuleID, Scope: item.SourceScope, Canonical: item.CanonicalSecRule, Enabled: item.Enabled})
+	}
+	for _, item := range configuration.IPRules {
+		input.IPRules = append(input.IPRules, policybundle.IPRule{Action: item.Action, Network: item.Network, GeneratedRuleID: item.GeneratedRuleID, Enabled: item.Enabled})
 	}
 	return input
 }

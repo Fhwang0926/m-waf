@@ -43,6 +43,10 @@ func TestEnterpriseInstallTokenStatus(t *testing.T) {
 	if revoked.StatusLabel() != "폐기됨" {
 		t.Fatalf("revoked token status = %q", revoked.StatusLabel())
 	}
+	persistent := EnterpriseInstallTokenRecord{ExpiresAt: persistentInstallTokenExpiry}
+	if !persistent.Persistent() || !persistent.Active() {
+		t.Fatalf("persistent token status = %q", persistent.StatusLabel())
+	}
 }
 
 func TestInstallTokenParameters(t *testing.T) {

@@ -33,10 +33,11 @@ Route constants must be changed in that package first. Client and Manager code m
 |---|---|---|
 | Bootstrap | Enterprise install token over server-authenticated TLS | Short-lived, one-use enrollment session |
 | Enrollment | Enrollment token plus Agent-generated CSR | Per-Agent certificate and CA chain |
-| Normal operation | mTLS certificate whose identity maps to one active server | Enterprise-scoped heartbeat, policy, package, event, and command access |
+| Normal operation | mTLS certificate whose identity maps to one active server | Enterprise-scoped heartbeat, policy, package, and command access |
+| Detection log receive | Agent mTLS certificate plus `X-MWAF-Event-Token` | Event batch accepted only when both values resolve to the same enterprise |
 | Certificate renewal | Current valid Agent mTLS certificate plus a new CSR | Rotated Agent certificate |
 
-The shared TLS listener accepts a client certificate when supplied. Every authenticated `/agent/v1/*` route independently requires and validates the Agent identity; administrator browser routes do not require a client certificate.
+The shared TLS listener accepts a client certificate when supplied. Every authenticated `/agent/v1/*` route independently requires and validates the Agent identity; administrator browser routes do not require a client certificate. Only `/agent/v1/events/batch` additionally accepts `X-MWAF-Event-Token`, and no other Agent endpoint uses that token.
 
 ## Stable Agent endpoints
 
@@ -55,8 +56,8 @@ The shared TLS listener accepts a client certificate when supplied. Every authen
 | GET | `/agent/v1/commands/next` | none | one allowlisted `AgentCommand` or no-content |
 | POST | `/agent/v1/commands/{id}/result` | `DeploymentResult` | empty success |
 
-Bootstrap installer, package resolution, and package-key paths are in the same protocol package. Policy artifacts are limited to 64 MiB, package artifacts to 1 GiB, and one event batch to 500 events.
+Bootstrap installer, package resolution, and package-key paths are in the same protocol package. Policy artifacts are limited to 64 MiB, package artifacts to 1 GiB, and one event batch to 500 events. The event verification header is an authentication hardening change and requires a coordinated Manager and Agent configuration rollout; deploying the Manager first will reject event batches from Agents that do not yet have the protected token file.
 
 ## Compatibility rule
 
-The current path family remains `v1`. Adding optional JSON fields is permitted when older peers ignore them. Removing or changing a field, authentication rule, method, or path requires a new protocol version and a compatibility period; it must not silently change the v1 contract.
+The current path family remains `v1`. Adding optional JSON fields is permitted when older peers ignore them. Removing or changing a field, authentication rule, method, or path requires a new protocol version and a compatibility period. The mandatory event verification header is explicitly tracked as a coordinated pre-stable MVP rollout and must not be deployed as a Manager-only change.

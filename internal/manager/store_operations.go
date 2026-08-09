@@ -90,6 +90,21 @@ func (s *Store) RevokeServer(ctx context.Context, enterpriseID, serverID, userID
 	return nil
 }
 
+func (s *Store) UnregisterAgent(ctx context.Context, serverID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE servers SET revoked_at=UTC_TIMESTAMP(6),revoked_by=NULL,status='REVOKED' WHERE id=? AND revoked_at IS NULL`, serverID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) QueueCommand(ctx context.Context, enterpriseID, serverID, command, userID string) (string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -243,6 +258,34 @@ func (s *Store) ResolvePolicyTarget(ctx context.Context, scopeEnterpriseID, targ
 		return "", nil, errors.New("invalid policy target")
 	}
 	switch kind {
+	case "enterprise":
+		if id != scopeEnterpriseID && scopeEnterpriseID != "" {
+			return "", nil, sql.ErrNoRows
+		}
+		exists, err := s.EnterpriseExists(ctx, id)
+		if err != nil || !exists {
+			return "", nil, sql.ErrNoRows
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT id FROM servers WHERE enterprise_id=? AND revoked_at IS NULL ORDER BY name`, id)
+		if err != nil {
+			return "", nil, err
+		}
+		defer rows.Close()
+		ids := make([]string, 0)
+		for rows.Next() {
+			var serverID string
+			if err := rows.Scan(&serverID); err != nil {
+				return "", nil, err
+			}
+			ids = append(ids, serverID)
+		}
+		if err := rows.Err(); err != nil {
+			return "", nil, err
+		}
+		if len(ids) == 0 {
+			return "", nil, errors.New("enterprise has no active servers")
+		}
+		return id, ids, nil
 	case "server":
 		server, err := s.ServerByID(ctx, scopeEnterpriseID, id)
 		if err != nil || server.Revoked {

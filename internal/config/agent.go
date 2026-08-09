@@ -20,6 +20,8 @@ type Agent struct {
 	InstallationMode           string        `json:"installation_mode,omitempty"`
 	EnrollmentToken            string        `json:"enrollment_token,omitempty"`
 	EnrollmentFile             string        `json:"enrollment_token_file,omitempty"`
+	EventVerificationToken     string        `json:"-"`
+	EventVerificationTokenFile string        `json:"event_verification_token_file,omitempty"`
 	CACertificate              string        `json:"ca_certificate"`
 	Certificate                string        `json:"certificate"`
 	PrivateKey                 string        `json:"private_key"`
@@ -116,6 +118,19 @@ func LoadAgent(path string) (Agent, error) {
 			}
 		} else {
 			cfg.EnrollmentToken = strings.TrimSpace(string(token))
+		}
+	}
+	if cfg.EventVerificationTokenFile != "" {
+		if !filepath.IsAbs(cfg.EventVerificationTokenFile) {
+			return Agent{}, errors.New("event_verification_token_file must be an absolute path")
+		}
+		token, err := os.ReadFile(cfg.EventVerificationTokenFile)
+		if err != nil {
+			return Agent{}, fmt.Errorf("read event verification token: %w", err)
+		}
+		cfg.EventVerificationToken = strings.TrimSpace(string(token))
+		if cfg.EventVerificationToken == "" {
+			return Agent{}, errors.New("event verification token is empty")
 		}
 	}
 	return cfg, nil

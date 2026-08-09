@@ -2,6 +2,7 @@
 {{define "nav-icon-events"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>{{end}}
 {{define "nav-icon-policy"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg>{{end}}
 {{define "nav-icon-group"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="6" r="2.5"/><circle cx="6" cy="17" r="2.5"/><circle cx="18" cy="17" r="2.5"/><path d="m10.5 8-3 6m6-6 3 6M8.5 17h7"/></svg>{{end}}
+{{define "nav-icon-ip"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6l-7-3Z"/><path d="M8 12h8M12 8v8"/></svg>{{end}}
 {{define "nav-icon-server"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="6" rx="1"/><rect x="4" y="14" width="16" height="6" rx="1"/><path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/></svg>{{end}}
 {{define "nav-icon-install"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m-4-4 4 4 4-4M5 18v2h14v-2"/></svg>{{end}}
 {{define "nav-icon-users"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2"/><path d="M3 20c0-4 2.4-6 6-6s6 2 6 6m0-5c3 0 5 1.6 5 5"/></svg>{{end}}
@@ -13,7 +14,7 @@
 {{define "navigation"}}
 <header class="app-shell" data-live-reload="{{if .DevLiveReload}}true{{else}}false{{end}}" data-live-reload-instance="{{.DevInstanceID}}">
   <aside class="sidebar" id="app-sidebar" aria-label="관리자 메뉴">
-    <div class="sidebar-brand"><a class="brand" href="/">M-WAF</a><span>{{if .IsSystemAdmin}}시스템 관리 콘솔{{else if .Session.EnterpriseName}}{{.Session.EnterpriseName}} 관리 콘솔{{else}}관리 콘솔{{end}}</span><button class="icon-button sidebar-close" type="button" data-sidebar-close aria-label="메뉴 닫기">닫기</button></div>
+    <div class="sidebar-brand"><a class="brand" href="/">M-WAF</a><span>{{if .InSystemConsole}}시스템 관리 콘솔{{else if .Session.EnterpriseName}}{{.Session.EnterpriseName}} 관리 콘솔{{else}}관리 콘솔{{end}}</span><button class="icon-button sidebar-close" type="button" data-sidebar-close aria-label="메뉴 닫기">닫기</button></div>
     <button class="sidebar-rail-toggle" type="button" data-sidebar-toggle aria-controls="app-sidebar" aria-expanded="true" aria-label="메뉴 접기" title="메뉴 접기"><span data-sidebar-toggle-icon aria-hidden="true">‹</span></button>
     <nav class="side-nav" aria-label="주요 메뉴">
       <div class="nav-area nav-area-user" role="group" aria-label="기업 운영 영역">
@@ -24,30 +25,33 @@
           <a class="side-link {{if eq .Active "events"}}active{{end}}" href="/events" title="보안 이벤트" {{if eq .Active "events"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-events"}}</span><span>보안 이벤트</span></a>
         </section>
         {{if .CanOperate}}<section class="nav-group">
-          <h2>보호 정책</h2>
-          <a class="side-link {{if eq .Active "policies"}}active{{end}}" href="/policies" title="기업 정책" {{if eq .Active "policies"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-policy"}}</span><span>기업 정책</span></a>
-          <a class="side-link {{if eq .Active "groups"}}active{{end}}" href="/groups" title="그룹 정책 대상" {{if eq .Active "groups"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-group"}}</span><span>그룹 정책 대상</span></a>
+          <h2>정책</h2>
+          <a class="side-link {{if eq .Active "policies"}}active{{end}}" href="/policies" title="보호 정책" {{if eq .Active "policies"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-policy"}}</span><span>보호 정책</span></a>
+          <a class="side-link {{if eq .Active "ip-rules"}}active{{end}}" href="/ip-rules" title="IP 정책" {{if eq .Active "ip-rules"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-ip"}}</span><span>IP 정책</span></a>
         </section>{{end}}
         <section class="nav-group">
-          <h2>인프라</h2>
+          <h2>서버</h2>
           <a class="side-link {{if eq .Active "servers"}}active{{end}}" href="/servers" title="보호 서버" {{if eq .Active "servers"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-server"}}</span><span>보호 서버</span></a>
-          {{if .CanOperate}}<a class="side-link {{if eq .Active "enrollments"}}active{{end}}" href="/enrollments/new" title="설치 및 등록" {{if eq .Active "enrollments"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-install"}}</span><span>설치 및 등록</span></a>{{end}}
+          <a class="side-link {{if eq .Active "enrollments"}}active{{end}}" href="/enrollments/new" title="서버 설치" {{if eq .Active "enrollments"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-install"}}</span><span>서버 설치</span></a>
         </section>
         {{if .CanManageUsers}}<section class="nav-group">
           <h2>조직 관리</h2>
           <a class="side-link {{if eq .Active "users"}}active{{end}}" href="/users" title="사용자 관리" {{if eq .Active "users"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-users"}}</span><span>사용자 관리</span></a>
         </section>{{end}}
       </div>
-      {{if .IsSystemAdmin}}<div class="nav-area nav-area-system" role="group" aria-label="시스템 관리 영역">
+      {{if .CanAccessSystemManagement}}<div class="nav-area nav-area-system" role="group" aria-label="시스템 관리 영역">
         <div class="nav-area-heading"><strong>시스템 관리</strong><span>시스템 관리자</span></div>
         <section class="nav-group">
-          <h2>시스템 정책</h2>
-          <a class="side-link {{if eq .Active "open-source-policies"}}active{{end}}" href="/open-source-policies" title="CRS 소스" {{if eq .Active "open-source-policies"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-audit"}}</span><span>CRS 소스</span></a>
-          <a class="side-link {{if eq .Active "system-policies"}}active{{end}}" href="/system-policies" title="정책 버전" {{if eq .Active "system-policies"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-policy"}}</span><span>정책 버전</span></a>
+          <h2>플랫폼</h2>
+          <a class="side-link {{if eq .Active "enterprises"}}active{{end}}" href="/enterprises" title="기업 관리" {{if eq .Active "enterprises"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-enterprise"}}</span><span>기업 관리</span></a>
         </section>
         <section class="nav-group">
-          <h2>플랫폼 운영</h2>
-          <a class="side-link {{if eq .Active "enterprises"}}active{{end}}" href="/enterprises" title="기업 관리" {{if eq .Active "enterprises"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-enterprise"}}</span><span>기업 관리</span></a>
+          <h2>정책 공급망</h2>
+          <a class="side-link {{if eq .Active "open-source-policies"}}active{{end}}" href="/open-source-policies" title="CRS 관리" {{if eq .Active "open-source-policies"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-install"}}</span><span>CRS 관리</span></a>
+          <a class="side-link {{if eq .Active "system-policies"}}active{{end}}" href="/system-policies" title="시스템 정책" {{if eq .Active "system-policies"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-policy"}}</span><span>시스템 정책</span></a>
+        </section>
+        <section class="nav-group">
+          <h2>운영 관리</h2>
           <a class="side-link {{if eq .Active "audit-logs"}}active{{end}}" href="/audit-logs" title="감사 로그" {{if eq .Active "audit-logs"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-audit"}}</span><span>감사 로그</span></a>
           <a class="side-link {{if eq .Active "settings"}}active{{end}}" href="/settings" title="시스템 설정" {{if eq .Active "settings"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-settings"}}</span><span>시스템 설정</span></a>
         </section>
@@ -63,9 +67,10 @@
       <div class="refresh-status" data-refresh-status><span class="status-dot ok" aria-hidden="true"></span><span>마지막 갱신 <time data-last-refreshed>방금</time></span></div>
       <button class="button secondary compact" type="button" data-refresh-page>새로고침</button>
       <details class="account-menu {{if eq .Active "account"}}is-active{{end}}" data-account-menu>
-        <summary aria-label="계정 메뉴"><span class="identity"><strong>{{.Session.DisplayName}}</strong><small>{{if .Session.EnterpriseName}}{{.Session.EnterpriseName}} · {{end}}{{.Session.RoleLabel}}</small></span><span class="account-menu-compact">계정</span><svg class="account-chevron" viewBox="0 0 12 8" aria-hidden="true"><path d="m1 1 5 5 5-5"/></svg></summary>
+        <summary aria-label="계정 메뉴"><span class="identity"><strong>{{.Session.DisplayName}}</strong></span><span class="account-menu-compact">계정</span><svg class="account-chevron" viewBox="0 0 12 8" aria-hidden="true"><path d="m1 1 5 5 5-5"/></svg></summary>
         <div class="account-dropdown">
-          <a class="account-menu-item {{if eq .Active "account"}}active{{end}}" href="/account" {{if eq .Active "account"}}aria-current="page"{{end}}>{{template "nav-icon-account"}}<span><strong>내 계정</strong><small>계정 정보와 비밀번호 변경</small></span></a>
+          <div class="account-role-summary"><span>현재 권한</span><strong>{{.Session.RoleLabel}}</strong>{{if .Session.EnterpriseName}}<small>{{.Session.EnterpriseName}} 소속</small>{{else}}<small>전체 기업과 시스템 설정 관리</small>{{end}}</div>
+          <a class="account-menu-item {{if eq .Active "account"}}active{{end}}" href="{{.AccountURL}}" {{if eq .Active "account"}}aria-current="page"{{end}}>{{template "nav-icon-account"}}<span><strong>내 계정</strong><small>계정 정보와 비밀번호 변경</small></span></a>
           <form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="account-menu-item account-menu-logout" type="submit">{{template "nav-icon-logout"}}<span><strong>로그아웃</strong><small>현재 관리자 세션 종료</small></span></button></form>
         </div>
       </details>

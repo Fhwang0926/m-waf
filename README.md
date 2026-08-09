@@ -177,7 +177,7 @@ The generated TLS certificate is signed by the local M-WAF CA. Its DNS/IP identi
 ## Install a customer web server
 
 1. Sign in to Manager.
-2. Choose **설치 및 등록** and create an enterprise install token.
+2. Choose **서버 설치** and use the enterprise install token prepared automatically for the selected enterprise.
 3. Copy the generated installation block to each customer web server and review the downloaded script.
 4. Run it and paste the separately displayed token at the protected prompt.
 
@@ -193,7 +193,7 @@ sudo sh /tmp/mwaf-install.sh \
   --install-token-stdin
 ```
 
-The same enterprise token can bootstrap multiple servers until it expires, is revoked, or reaches its optional registration limit. Manager exchanges it for a short-lived one-use enrollment session for each installation. The reusable token is never written to Agent configuration; after enrollment, each Agent authenticates with its own mTLS certificate. For unattended deployment, store the token in a mode `0600` secret file and use `--install-token-file /secure/path/token`. The legacy `--token` argument remains available under the advanced one-server enrollment section.
+Manager issues one reusable install token per enterprise. The token can bootstrap multiple servers until an operator revokes its installation scope, while each installation still receives its own short-lived one-use enrollment session. The installer stores the verification value in `/etc/mwaf-agent/event-verification.token` with mode `0600`; the Agent sends it only with detection-event batches, which Manager accepts only when the mTLS server identity belongs to the same enterprise. Heartbeat, policy, package, command, and certificate APIs remain mTLS-only. For unattended deployment, store the token in a mode `0600` secret file and use `--install-token-file /secure/path/token`.
 
 If both Apache and Nginx are installed, add `--webserver apache` or `--webserver nginx`. The installer:
 
@@ -219,7 +219,7 @@ dpkg-query -W -f='${binary:Package}\t${db:Status-Abbrev}\t${Version}\n' \
   mwaf-modsecurity-nginx mwaf-modsecurity-nginx-external 2>/dev/null || true
 ```
 
-Resolve the reported lock, disk-space, repository, dependency, or interrupted-DPKG problem first, then rerun the same reviewed installer command. A fresh short-lived enrollment session is created from the enterprise install token on each retry. If the enterprise token expired, was revoked, or reached its limit, create a new one in Manager. Do not purge Apache/Nginx, delete `/etc/mwaf`, or force-install an incompatible package as a recovery shortcut.
+Resolve the reported lock, disk-space, repository, dependency, or interrupted-DPKG problem first, then rerun the same reviewed installer command. A fresh short-lived enrollment session is created from the enterprise install token on each retry. If the enterprise token was revoked or its original value was lost, revoke the old record and create a replacement in Manager. Do not purge Apache/Nginx, delete `/etc/mwaf`, or force-install an incompatible package as a recovery shortcut.
 
 The current MVP has no supported Agent `tar.gz`, manual-copy, or RPM installation path, and a failed Agent APT transaction is not rolled back automatically. The ModSecurity Connector may be operator-installed in `external/manual` mode, but the Agent still requires the signed Ubuntu 24.04 amd64 DEB. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation — DEB installation failure](docs/custom-webserver-installation.md#deb-설치가-실패한-경우).
 
@@ -256,7 +256,7 @@ The current MVP has no supported Agent `tar.gz`, manual-copy, or RPM installatio
 - Existing `conf-v1` and `policy-bundle-v2` revisions remain supported. New Manager-imported system-policy revisions use signed self-contained `policy-bundle-v3` artifacts with `00-engine.conf`, CRS Setup, before/after exclusions, unchanged upstream CRS files, and service Rules in a fixed order.
 - Agent verifies the Ed25519 signature, whole-artifact SHA-256, tar entry allowlist, and every manifest file hash; stages a revision directory, atomically switches `/etc/mwaf/active`, runs `apachectl configtest` or `nginx -t`, and performs a graceful reload.
 - If validation or reload fails, Agent atomically restores the previous revision and revalidates the web server.
-- Each Agent uses a Manager-issued client certificate so the mTLS API can bind heartbeat, policy, package, command, and event traffic to one enrolled server without storing a reusable API password.
+- Each Agent uses a Manager-issued client certificate so the mTLS API can bind all Agent traffic to one enrolled server. Detection-event batches additionally include the enterprise installation verification token; that token is not sent to heartbeat, policy, package, command, or certificate APIs.
 - Agent renews its 90-day mTLS certificate with the existing private key beginning 30 days before expiration. A renewed certificate replaces the stored serial on its first authenticated request; the prior serial is then rejected.
 - ModSecurity writes JSON lines to `/var/log/modsecurity/audit.jsonl`; distro `logrotate` bounds the file and Agent tracks device, inode, and offset across truncation or replacement.
 - Agent drains up to 20 idempotent batches of 500 events every 2 seconds, applies exponential retry backoff up to one minute, and limits its on-disk event spool to 512 MiB by default.
@@ -347,7 +347,7 @@ The two customer fixtures run systemd because the production installer and Agent
 
 `packaging/sources.lock.yaml` pins the two CRS sources carried by a release package for offline installation and rollback. Manager independently checks the configured official LTS line and newest signed Stable v4 release, resolves each annotated tag to an exact commit, verifies the archive SHA-256, builds the Rule/Setup index, and stores the immutable source in its artifact store and DB catalog. Neither the release bundle nor runtime synchronization publishes a system policy automatically.
 
-The signed CI bundle imports verified CRS source and compatible package artifacts only. It never creates a system-policy version. Manager checks both channels at startup and every `MWAF_CRS_SYNC_INTERVAL` (default `24h`); the LTS channel remains inside `MWAF_CRS_LTS_LINE`, while Stable chooses the highest signed non-prerelease v4 tag. `MWAF_CRS_GITHUB_TOKEN` is optional for authenticated GitHub API limits. A system administrator selects one verified source to create `crs-baseline@1.0.0`; later migrations create the next patch of the same canonical family. Existing `crs-lts-baseline` and `crs-stable-baseline` versions remain read-only history and are deprecated when the canonical policy is first published.
+The signed CI bundle imports verified CRS source and compatible package artifacts only. It never creates a system-policy version. Manager checks both channels at startup and every `MWAF_CRS_SYNC_INTERVAL` (default `24h`); development live reload skips the startup check so source rebuilds do not exhaust GitHub API limits, while periodic and manual synchronization remain available. The LTS channel remains inside `MWAF_CRS_LTS_LINE`, while Stable chooses the highest signed non-prerelease v4 tag. `MWAF_CRS_GITHUB_TOKEN` is optional for authenticated GitHub API limits and can be set in `deploy/compose/.env` for both Compose and `make dev`. A system administrator selects one verified source to create `crs-baseline@1.0.0`; later migrations create the next patch of the same canonical family. Existing `crs-lts-baseline` and `crs-stable-baseline` versions remain read-only history and are deprecated when the canonical policy is first published.
 
 Runtime synchronization only adds a verified immutable CRS release and its DB search index; it never publishes or deploys a system policy. A system administrator reviews Rule/Setup changes and overlays before explicit publication. Same-channel migrations allow only higher CRS versions; LTS/Stable channel changes require a separate confirmation and may use a numerically lower version. Safe `AUTOMATIC` enterprise policies enter the canary queue, `MANUAL` policies wait for approval, and `PINNED` policies only show availability. Existing v2 artifacts and legacy JSON remain readable for rollback and compatibility, while new structured snapshots are authoritative for new revisions.
 

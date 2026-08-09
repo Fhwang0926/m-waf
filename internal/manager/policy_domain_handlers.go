@@ -20,7 +20,8 @@ type policyRolloutView struct {
 
 type systemPolicyVersionView struct {
 	SystemPolicyVersionRecord
-	IsCurrent bool
+	IsCurrent  bool
+	IsBaseline bool
 }
 
 type systemPolicyOperationsSummary struct {
@@ -37,7 +38,6 @@ type systemPolicyLifecycleView struct {
 	HasNewSource           bool
 	CurrentID              string
 	CurrentName            string
-	CurrentVersion         string
 	CurrentCRSVersion      string
 	CurrentEnterpriseCount int
 	CurrentServerCount     int
@@ -70,7 +70,16 @@ func (s *Server) systemPolicies(w http.ResponseWriter, r *http.Request) {
 	if statusFilter != "PUBLISHED" && statusFilter != "DEPRECATED" && statusFilter != "WITHDRAWN" {
 		statusFilter = ""
 	}
-	versions := make([]systemPolicyVersionView, 0, len(items))
+	tab := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("tab")))
+	if tab != "history" {
+		tab = "policies"
+	}
+	if query != "" || statusFilter != "" {
+		tab = "history"
+	}
+	defaultTemplate := s.defaultSystemPolicyTemplate(r.Context())
+	defaultReference := defaultTemplate.Reference()
+	allVersions := make([]systemPolicyVersionView, 0, len(items))
 	summary := systemPolicyOperationsSummary{}
 	for _, item := range items {
 		latest, exists := s.latestSystemPolicyTemplate(r.Context(), item.Key)
@@ -78,16 +87,35 @@ func (s *Server) systemPolicies(w http.ResponseWriter, r *http.Request) {
 		if current && item.Status == systempolicy.StatusPublished {
 			summary.PublishedVersionCount++
 		}
+		allVersions = append(allVersions, systemPolicyVersionView{SystemPolicyVersionRecord: item, IsCurrent: current, IsBaseline: item.ID == defaultReference})
+	}
+	currentPolicy := systemPolicyVersionView{}
+	hasCurrentPolicy := false
+	for _, item := range allVersions {
+		if !item.IsBaseline {
+			continue
+		}
+		currentPolicy = item
+		hasCurrentPolicy = true
+		break
+	}
+	versions := make([]systemPolicyVersionView, 0, len(allVersions))
+	historyTotal := 0
+	for _, item := range allVersions {
+		if item.IsBaseline {
+			continue
+		}
+		historyTotal++
 		if statusFilter != "" && item.Status != statusFilter {
 			continue
 		}
-		haystack := strings.ToLower(item.Name + " " + item.Description + " " + item.Key + " " + item.Version + " " + item.CRSVersion)
+		haystack := strings.ToLower(item.Name + " " + item.Description + " " + item.Key + " " + item.CRSTrack + " " + item.CRSVersion)
 		if query != "" && !strings.Contains(haystack, query) {
 			continue
 		}
-		versions = append(versions, systemPolicyVersionView{SystemPolicyVersionRecord: item, IsCurrent: current})
+		versions = append(versions, item)
 	}
-	actionPolicies := make([]EnterprisePolicyRecord, 0)
+	actionPolicyCount := 0
 	strategyImpact := migrationStrategyImpact{}
 	for _, policy := range enterprisePolicies {
 		if policy.CurrentSystemPolicyID != "" {
@@ -102,8 +130,8 @@ func (s *Server) systemPolicies(w http.ResponseWriter, r *http.Request) {
 		if policy.LatestRolloutStatus == "FAILED" {
 			summary.FailedRolloutCount++
 		}
-		if (policy.HasUpdate() || policy.HasActiveRollout || policy.LatestRolloutStatus == "FAILED") && len(actionPolicies) < 100 {
-			actionPolicies = append(actionPolicies, policy)
+		if policy.HasUpdate() || policy.HasActiveRollout || policy.LatestRolloutStatus == "FAILED" {
+			actionPolicyCount++
 		}
 		switch policy.UpdateStrategy {
 		case PolicyStrategyAutomatic:
@@ -114,7 +142,7 @@ func (s *Server) systemPolicies(w http.ResponseWriter, r *http.Request) {
 			strategyImpact.Pinned++
 		}
 	}
-	lifecycle := buildSystemPolicyLifecycle(items, s.allPolicySources(), s.defaultSystemPolicyTemplate(r.Context()))
+	lifecycle := buildSystemPolicyLifecycle(items, s.allPolicySources(), defaultTemplate)
 	publishedResult := systemPolicyPublishedResult{Impact: strategyImpact}
 	publishedReference := truncate(strings.TrimSpace(r.URL.Query().Get("published")), 255)
 	for _, item := range items {
@@ -125,22 +153,57 @@ func (s *Server) systemPolicies(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data := map[string]any{
-		"Versions": versions, "Summary": summary, "ActionPolicies": actionPolicies,
+		"Versions": versions, "HistoryTotal": historyTotal, "ShowHistorySearch": historyTotal > 5 || query != "" || statusFilter != "",
+		"CurrentPolicy": currentPolicy, "HasCurrentPolicy": hasCurrentPolicy, "Summary": summary, "ActionPolicyCount": actionPolicyCount,
 		"Lifecycle": lifecycle, "PublishedResult": publishedResult,
-		"FilterQuery": r.URL.Query().Get("q"), "FilterStatus": statusFilter, "Notice": r.URL.Query().Get("notice"),
+		"Tab": tab, "FilterQuery": r.URL.Query().Get("q"), "FilterStatus": statusFilter, "Notice": r.URL.Query().Get("notice"), "ErrorNotice": r.URL.Query().Get("error"),
 	}
 	_ = s.templates.ExecuteTemplate(w, "system-policies.html", s.viewData(r, "system-policies", data))
 }
 
+func (s *Server) systemPolicyAdoptions(w http.ResponseWriter, r *http.Request) {
+	policyID := truncate(strings.TrimSpace(r.PathValue("id")), 255)
+	versions, err := s.store.ListSystemPolicyVersions(r.Context())
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "시스템 정책 적용 현황을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	var selected SystemPolicyVersionRecord
+	found := false
+	for _, version := range versions {
+		if version.ID == policyID {
+			selected = version
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.renderAdminError(w, r, http.StatusNotFound, "시스템 정책을 찾을 수 없습니다", "삭제되었거나 존재하지 않는 시스템 정책입니다.")
+		return
+	}
+	items, err := s.store.ListEnterprisePolicies(r.Context(), "", systemPolicyServerLimit)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 정책 적용 현황을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	policies := make([]EnterprisePolicyRecord, 0, len(items))
+	for _, item := range items {
+		if item.CurrentSystemPolicyID == policyID {
+			policies = append(policies, item)
+		}
+	}
+	data := map[string]any{"Policy": selected, "Policies": policies}
+	_ = s.templates.ExecuteTemplate(w, "system-policy-adoptions.html", s.viewData(r, "system-policies", data))
+}
+
 func buildSystemPolicyLifecycle(items []SystemPolicyVersionRecord, sources []model.PolicySourceArtifact, current systempolicy.Template) systemPolicyLifecycleView {
-	view := systemPolicyLifecycleView{HasSources: len(sources) != 0, CreateLabel: "CRS 소스 확인", CreateURL: "/open-source-policies"}
+	view := systemPolicyLifecycleView{HasSources: len(sources) != 0, CreateLabel: "CRS 관리", CreateURL: "/open-source-policies"}
 	if current.Key == "" {
 		return view
 	}
 	view.HasCurrent = true
 	view.CurrentID = current.Reference()
 	view.CurrentName = current.Name
-	view.CurrentVersion = current.Version
 	view.CurrentCRSVersion = current.CRSVersion
 	for _, item := range items {
 		if item.ID == view.CurrentID {
@@ -167,10 +230,13 @@ func buildSystemPolicyLifecycle(items []SystemPolicyVersionRecord, sources []mod
 		}
 	}
 	if view.HasNewSource {
-		view.CreateLabel = "새 CRS로 정책 버전 만들기"
+		view.CreateLabel = "시스템 정책 검토"
 		view.CreateURL = "/system-policies/migrations/new?base=" + url.QueryEscape(view.CurrentID) + "&source_id=" + url.QueryEscape(view.CandidateSourceID)
+	} else if current.Defaults.CRSSource != nil && current.Defaults.CRSSource.ID != "" {
+		view.CreateLabel = "시스템 정책 수정"
+		view.CreateURL = "/system-policies/migrations/new?base=" + url.QueryEscape(view.CurrentID) + "&source_id=" + url.QueryEscape(current.Defaults.CRSSource.ID)
 	} else {
-		view.CreateLabel = "CRS 버전 관리"
+		view.CreateLabel = "CRS 관리"
 		view.CreateURL = "/open-source-policies"
 	}
 	return view
@@ -397,7 +463,7 @@ func (s *Server) rollbackEnterprisePolicy(w http.ResponseWriter, r *http.Request
 	}
 	targetTemplate, ok := s.systemPolicyTemplate(r.Context(), previous.SystemPolicyVersionID)
 	if !ok || targetTemplate.Status == systempolicy.StatusWithdrawn {
-		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "회수되었거나 알 수 없는 시스템 정책 버전으로는 롤백할 수 없습니다.")
+		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "회수되었거나 알 수 없는 CRS 기준으로는 롤백할 수 없습니다.")
 		return
 	}
 	servers, err := s.store.ListServers(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)

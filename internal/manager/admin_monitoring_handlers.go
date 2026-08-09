@@ -30,6 +30,12 @@ type eventPageResult struct {
 	HasNext     bool
 }
 
+type incidentPageResult struct {
+	Items       []IncidentRecord
+	HasPrevious bool
+	HasNext     bool
+}
+
 type filterChip struct {
 	Label     string
 	RemoveURL string
@@ -184,9 +190,35 @@ func paginateEventRecords(items []EventRecord, pageSize, page int, direction str
 func eventPageURL(r *http.Request, page int, cursor string) string {
 	query := r.URL.Query()
 	query.Del("event")
+	query.Del("incident")
 	query.Set("page", strconv.Itoa(page))
 	query.Set("cursor", cursor)
 	return "/events?" + query.Encode()
+}
+
+func paginateIncidentRecords(items []IncidentRecord, pageSize, page int, direction string) incidentPageResult {
+	result := incidentPageResult{Items: items}
+	if direction == eventCursorAfter {
+		result.HasPrevious = len(result.Items) > pageSize
+		if result.HasPrevious {
+			result.Items = result.Items[:pageSize]
+		}
+		for left, right := 0, len(result.Items)-1; left < right; left, right = left+1, right-1 {
+			result.Items[left], result.Items[right] = result.Items[right], result.Items[left]
+		}
+		result.HasNext = len(result.Items) != 0
+		return result
+	}
+	result.HasNext = len(result.Items) > pageSize
+	if result.HasNext {
+		result.Items = result.Items[:pageSize]
+	}
+	result.HasPrevious = direction == eventCursorBefore || page > 1
+	return result
+}
+
+func encodeIncidentCursor(incident IncidentRecord, direction string) string {
+	return encodeEventCursor(EventRecord{ID: incident.ID, OccurredAt: incident.OccurredAt}, direction)
 }
 
 func eventFilterChips(r *http.Request, session sessionData) []filterChip {
@@ -196,7 +228,7 @@ func eventFilterChips(r *http.Request, session sessionData) []filterChip {
 	}{
 		{"range", "기간"},
 		{"enterprise_id", "기업"}, {"group_id", "그룹"}, {"server", "서버"}, {"server_id", "서버"},
-		{"result", "처리"}, {"severity", "위험도"}, {"rule_id", "Rule"}, {"q", "검색"},
+		{"result", "처리"}, {"category", "공격 유형"}, {"severity", "위험도"}, {"rule_id", "Rule"}, {"q", "검색"},
 	}
 	chips := make([]filterChip, 0)
 	seen := make(map[string]bool)
@@ -241,6 +273,9 @@ func eventFilterChips(r *http.Request, session sessionData) []filterChip {
 				labelValue = "정보"
 			}
 		}
+		if item.Key == "category" {
+			labelValue = attackCategoryLabel(value)
+		}
 		query := r.URL.Query()
 		query.Del(item.Key)
 		if item.Key == "server" {
@@ -252,6 +287,7 @@ func eventFilterChips(r *http.Request, session sessionData) []filterChip {
 		query.Del("page")
 		query.Del("cursor")
 		query.Del("event")
+		query.Del("incident")
 		chips = append(chips, filterChip{Label: item.Prefix + " · " + labelValue, RemoveURL: "/events?" + query.Encode()})
 	}
 	return chips
@@ -269,6 +305,30 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, data)
+}
+
+func (s *Server) apiIncidents(w http.ResponseWriter, r *http.Request) {
+	enterpriseID, ok := s.effectiveEnterpriseFilter(r, r.URL.Query().Get("enterprise_id"))
+	if !ok {
+		writeProblem(w, http.StatusBadRequest, "invalid enterprise filter")
+		return
+	}
+	eventFilter, _ := eventFilterFromRequest(r, enterpriseID)
+	category := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("category")))
+	if !validateIncidentCategory(category) {
+		category = ""
+	}
+	filter := IncidentFilter{
+		EnterpriseID: enterpriseID, GroupID: eventFilter.GroupID, ServerID: eventFilter.ServerID,
+		Category: category, Severity: eventFilter.Severity, RuleID: eventFilter.RuleID, Query: eventFilter.Query,
+		Blocked: eventFilter.Blocked, Since: eventFilter.Since,
+	}
+	items, err := s.store.ListIncidents(r.Context(), sessionFrom(r).ScopeEnterpriseID(), filter, 100)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "load incidents")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) apiEventDetail(w http.ResponseWriter, r *http.Request) {

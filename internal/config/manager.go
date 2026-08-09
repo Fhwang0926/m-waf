@@ -38,6 +38,7 @@ type Manager struct {
 	CRSSyncInterval     time.Duration
 	CRSGitHubToken      string
 	CRSLTSLine          string
+	GeoIPDatabase       string
 	ShutdownTimeout     time.Duration
 }
 
@@ -93,6 +94,7 @@ func LoadManager() (Manager, error) {
 		CRSSyncInterval:     duration("MWAF_CRS_SYNC_INTERVAL", 24*time.Hour),
 		CRSGitHubToken:      strings.TrimSpace(os.Getenv("MWAF_CRS_GITHUB_TOKEN")),
 		CRSLTSLine:          value("MWAF_CRS_LTS_LINE", "4.25"),
+		GeoIPDatabase:       strings.TrimSpace(os.Getenv("MWAF_GEOIP_DATABASE")),
 		ShutdownTimeout:     duration("MWAF_SHUTDOWN_TIMEOUT", 15*time.Second),
 	}
 	if override := os.Getenv("MWAF_DB_DSN"); override != "" {

@@ -71,6 +71,9 @@ type systemPolicyMigrationValidation struct {
 	Candidate        systempolicy.Template    `json:"candidate"`
 	RuleDiff         sourceRuleDiff           `json:"rule_diff"`
 	SetupDiff        []sourceSetupDiff        `json:"setup_diff"`
+	SourceSetupDiff  []sourceSetupDiff        `json:"source_setup_diff"`
+	FileDiff         []sourceFileDiff         `json:"file_diff"`
+	DirectiveDiff    []sourceDirectiveDiff    `json:"directive_diff"`
 	Compatibility    []migrationCompatibility `json:"compatibility"`
 	StrategyImpact   migrationStrategyImpact  `json:"strategy_impact"`
 	ArtifactSHA256   string                   `json:"artifact_sha256,omitempty"`
@@ -130,9 +133,12 @@ func (s *Server) renderSystemPolicyMigration(w http.ResponseWriter, r *http.Requ
 	if base.Key != "" {
 		baseID = base.Reference()
 	}
-	nextVersion := "1.0.0"
-	if base.Key == systempolicy.DefaultTemplateKey {
-		nextVersion = nextSystemPolicyVersion(base.Version)
+	nextVersion, versionErr := s.store.NextSystemPolicyVersion(r.Context())
+	if versionErr != nil {
+		nextVersion = "1.0.0"
+		if pageError == "" {
+			pageError = "다음 시스템 정책 개정본 번호를 확인할 수 없습니다."
+		}
 	}
 	defaultName := base.Name
 	if defaultName == "" {
@@ -164,6 +170,9 @@ func (s *Server) renderSystemPolicyMigration(w http.ResponseWriter, r *http.Requ
 		"FormConfirmChannelChange": false,
 		"FormConfirmLegacyBypass":  false,
 		"FormBypassField":          "REQUEST_URI", "FormBypassOperator": "@beginsWith", "FormBypassExpiresAt": time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02T15:04"),
+	}
+	if s.catalog != nil {
+		data["HotRuleSet"] = s.catalog.HotRuleSet()
 	}
 	if r.Method == http.MethodPost {
 		data["FormRequestBody"] = r.FormValue("request_body") == "on"
@@ -265,7 +274,7 @@ func (s *Server) publishSystemPolicyMigration(w http.ResponseWriter, r *http.Req
 func systemPolicyPublishedURL(candidate systempolicy.Template) string {
 	values := url.Values{}
 	values.Set("published", candidate.Reference())
-	values.Set("notice", "검증된 CRS "+candidate.CRSVersion+" 기반 정책 버전 "+candidate.Reference()+"을 게시했습니다.")
+	values.Set("notice", "OWASP CRS "+candidate.CRSVersion+" 기반 시스템 정책을 게시했습니다.")
 	return "/system-policies?" + values.Encode()
 }
 
@@ -436,7 +445,7 @@ func (s *Server) validateSystemPolicyMigration(r *http.Request, request systemPo
 	base := s.defaultSystemPolicyTemplate(r.Context())
 	if request.ExpectedSystemPolicyID == "" {
 		if base.Key != "" {
-			result.FieldErrors["expected_system_policy_id"] = "다른 관리자가 최초 시스템 정책을 게시했습니다. 최신 상태를 다시 확인하세요."
+			result.FieldErrors["expected_system_policy_id"] = "다른 관리자가 최초 CRS 기준을 게시했습니다. 최신 상태를 다시 확인하세요."
 			return result
 		}
 	} else {
@@ -458,18 +467,22 @@ func (s *Server) validateSystemPolicyMigration(r *http.Request, request systemPo
 		result.FieldErrors["source_id"] = "annotated tag 서명이 검증된 CRS 소스만 게시할 수 있습니다."
 		return result
 	}
+	if !request.ConfirmChangedRules {
+		result.FieldErrors["confirm_changed_rules"] = "upstream Rule과 공통 예외의 변경 영향을 확인하세요."
+	}
 	if base.Key != "" {
 		channelChange := !strings.EqualFold(source.Channel, base.CRSTrack)
 		ref := base.Defaults.CRSSource
 		legacyPinRepair := (ref == nil || ref.ID == "" || ref.ArchiveSHA256 == "" || ref.IndexSHA256 == "") && normalizeCRSVersion(source.Version) == normalizeCRSVersion(base.CRSVersion)
+		samePinnedSource := exactSourceMatchesSystemPolicy(source, base)
 		switch {
 		case channelChange:
 			result.Warnings = append(result.Warnings, fmt.Sprintf("CRS 채널을 %s에서 %s로 전환합니다. 버전 숫자보다 지원 주기와 Rule 차이를 기준으로 검토하세요.", strings.ToUpper(base.CRSTrack), strings.ToUpper(source.Channel)))
 			if !request.ConfirmChannelChange {
 				result.FieldErrors["confirm_channel_change"] = "LTS와 Stable 간 채널 전환 영향을 확인하세요."
 			}
-		case legacyPinRepair:
-			// Preserve the current settings while adding the missing immutable source pin.
+		case legacyPinRepair, samePinnedSource:
+			// The CRS base stays fixed while the system override is reviewed again.
 		case !newerCRSVersion(source.Version, base.CRSVersion):
 			result.FieldErrors["source_id"] = "같은 채널에서는 현재 CRS보다 높은 검증 버전만 반영할 수 있습니다."
 			return result
@@ -492,6 +505,15 @@ func (s *Server) validateSystemPolicyMigration(r *http.Request, request systemPo
 	} else if request.Configuration != nil {
 		result.FieldErrors["configuration"] = "구조화 configuration에는 config_schema_version 2가 필요합니다."
 		return result
+	}
+	var hotRuleVersion, hotRuleSHA string
+	if s.catalog != nil {
+		if hotRules := s.catalog.HotRuleSet(); hotRules != nil {
+			hotRuleVersion, hotRuleSHA = hotRules.Version, hotRules.SHA256
+			if strings.TrimSpace(hotRules.Rules) != "" && hotRules.Version != base.Defaults.HotRuleSetVersion {
+				request.ServiceRules = strings.TrimSpace(strings.TrimSpace(request.ServiceRules) + "\n" + strings.TrimSpace(hotRules.Rules))
+			}
+		}
 	}
 	setup, setupErrors := validateMigrationSetup(index.Setup, request.CRSSetup)
 	if parseSetupInt(setup, "detection_paranoia_level") < parseSetupInt(setup, "blocking_paranoia_level") {
@@ -558,6 +580,7 @@ func (s *Server) validateSystemPolicyMigration(r *http.Request, request systemPo
 	}
 	diff, _, _ := s.openSourceDiff(r, source.ID, baseID)
 	result.RuleDiff, result.SetupDiff = diff.Rules, diff.Setup
+	result.SourceSetupDiff, result.FileDiff, result.DirectiveDiff = diff.SourceSetup, diff.Files, diff.Directives
 	setupChanges := make(map[string]bool, len(result.SetupDiff))
 	for _, change := range result.SetupDiff {
 		setupChanges[change.Key] = true
@@ -645,9 +668,10 @@ func (s *Server) validateSystemPolicyMigration(r *http.Request, request systemPo
 	if samplingPercentage == 0 {
 		samplingPercentage = 100
 	}
-	policyVersion := "1.0.0"
-	if base.Key == systempolicy.DefaultTemplateKey {
-		policyVersion = nextSystemPolicyVersion(base.Version)
+	policyVersion, versionErr := s.store.NextSystemPolicyVersion(r.Context())
+	if versionErr != nil {
+		result.FieldErrors["candidate"] = "다음 시스템 정책 개정본 번호를 확인할 수 없습니다."
+		return result
 	}
 	artifactFormat := source.ArtifactFormat
 	if artifactFormat == "" {
@@ -664,6 +688,7 @@ func (s *Server) validateSystemPolicyMigration(r *http.Request, request systemPo
 			CustomRules: normalizedSettings.CustomRules, CustomRuleCount: normalizedSettings.CustomRuleCount,
 			CRSSource: &ref, CRSSetup: setup, BeforeExclusions: request.BeforeExclusions, AfterExclusions: request.AfterExclusions,
 			TagExclusions: request.TagExclusions, TargetExclusions: request.TargetExclusions, EngineBypasses: request.EngineBypasses, ArtifactFormat: artifactFormat,
+			HotRuleSetVersion: hotRuleVersion, HotRuleSetSHA256: hotRuleSHA,
 		},
 		MigrationNotes: request.MigrationNotes,
 	}

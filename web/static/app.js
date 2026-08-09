@@ -387,7 +387,7 @@
     const series = (data.series || []).map((item) => ({ at: item.at, events: Number(item.events), blocked: Number(item.blocked) }));
     drawTrendChart($("[data-overview-chart]"), series);
     renderActions(data.actions || []);
-    renderRank("top_rules", data.top_rules || []);
+    renderRank("top_categories", data.top_categories || []);
     renderRank("top_uris", data.top_uris || []);
     renderRank("top_servers", data.top_servers || []);
   }
@@ -419,8 +419,9 @@
 
   function setDrawerURL(id) {
     const url = new URL(window.location.href);
-    if (id) url.searchParams.set("event", id);
-    else url.searchParams.delete("event");
+    url.searchParams.delete("event");
+    if (id) url.searchParams.set("incident", id);
+    else url.searchParams.delete("incident");
     window.history.replaceState({}, "", url);
   }
 
@@ -434,31 +435,32 @@
     if (scrim) scrim.classList.add("open");
     const close = $("[data-event-drawer-close]", drawer);
     if (close) window.requestAnimationFrame(() => close.focus());
-    body.textContent = "이벤트 상세를 불러오는 중입니다.";
+    body.textContent = "공격 요청 상세를 불러오는 중입니다.";
     setDrawerURL(id);
     try {
-      const response = await fetch(`/api/v1/events/${encodeURIComponent(id)}`, { headers: { Accept: "application/json" }, cache: "no-store" });
-      if (!response.ok) throw new Error("event detail failed");
+      const response = await fetch(`/api/v1/incidents/${encodeURIComponent(id)}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (!response.ok) throw new Error("incident detail failed");
       const data = await response.json();
-      const event = data.event;
+      const event = data.incident;
       body.replaceChildren();
       const result = document.createElement("div");
       result.className = `alert ${event.blocked ? "error" : "warn"}`;
       const title = document.createElement("strong");
       title.textContent = event.blocked ? "요청 차단" : "탐지 후 허용";
       const message = document.createElement("div");
-      message.textContent = event.message || "Rule 메시지가 없습니다.";
+      message.textContent = `${data.labels.category} · ${event.method || ""} ${event.uri || ""}`;
       result.append(title, message);
       const details = document.createElement("dl");
       details.className = "detail-list";
       appendDetailItem(details, "발생 시각", new Date(event.occurred_at).toLocaleString("ko-KR"));
       appendDetailItem(details, "서버", event.server_name);
       appendDetailItem(details, "요청", `${event.method} ${event.uri}`, true);
+      appendDetailItem(details, "탐지 입력 위치", event.matched_variable || "확인 불가", true);
+      appendDetailItem(details, "출발지 IP", event.client_ip || "확인 불가", true);
+      appendDetailItem(details, "국가", data.labels.country);
       appendDetailItem(details, "HTTP 상태", String(event.status_code || "확인 안 됨"));
-      appendDetailItem(details, "서비스", event.service);
-      appendDetailItem(details, "위험도", severityLabel(event.severity));
       appendDetailItem(details, "정책 개정본", event.policy_revision, true);
-      appendDetailItem(details, "트랜잭션", event.transaction_id, true);
+      appendDetailItem(details, "요청 식별자", event.incident_key, true);
       const heading = document.createElement("h3");
       heading.textContent = `관련 Rule ${(data.related_rules || []).length}건`;
       const tableWrap = document.createElement("div");
@@ -476,17 +478,66 @@
       });
       table.append(tbody);
       tableWrap.append(table);
-      const actions = document.createElement("div");
-      actions.className = "actions";
-      [[data.links.server, "서버 상세"], [data.links.policy, "정책 상세"], [data.links.exception_review, "이 URL 예외 검토"]].forEach(([href, label]) => {
+      const links = document.createElement("div");
+      links.className = "actions";
+      [[data.links.server, "서버 상세"], [data.links.policy, "보호 정책"]].forEach(([href, label]) => {
         if (!href) return;
         const link = document.createElement("a");
         link.className = "button secondary";
         link.href = href;
         link.textContent = label;
-        actions.append(link);
+        links.append(link);
       });
-      body.append(result, details, heading, tableWrap, actions);
+      const actionHeading = document.createElement("h3");
+      actionHeading.textContent = "바로 조치";
+      const actionPanel = document.createElement("div");
+      actionPanel.className = "drawer-actions";
+      const csrf = document.body.dataset.csrf || "";
+      const actionForm = (action, fields, label, dangerous = false) => {
+        const form = document.createElement("form");
+        form.method = "post";
+        form.action = action;
+        Object.entries({ csrf, expected_revision_id: event.policy_revision, ...fields }).forEach(([name, value]) => {
+          const input = document.createElement("input");
+          input.type = "hidden";
+          input.name = name;
+          input.value = value || "";
+          form.append(input);
+        });
+        const button = document.createElement("button");
+        button.type = "submit";
+        button.className = dangerous ? "danger" : "secondary";
+        button.textContent = label;
+        form.append(button);
+        return form;
+      };
+      const confirmedActionForm = (action, fields, label, confirmation) => {
+        const form = actionForm(action, fields, label, true);
+        const button = $("button[type=submit]", form);
+        const confirmLabel = document.createElement("label");
+        confirmLabel.className = "check-row danger-check";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.name = "confirm";
+        checkbox.value = "confirmed";
+        checkbox.required = true;
+        const text = document.createElement("span");
+        text.textContent = confirmation;
+        confirmLabel.append(checkbox, text);
+        form.insertBefore(confirmLabel, button);
+        return form;
+      };
+      if (event.policy_id && data.can_create_exception) {
+        if (event.matched_variable) actionPanel.append(actionForm(`/policies/${encodeURIComponent(event.policy_id)}/exceptions/from-incident`, { incident_id: event.id, scope: "input" }, "이 입력 항목에서만 예외"));
+        actionPanel.append(actionForm(`/policies/${encodeURIComponent(event.policy_id)}/exceptions/from-incident`, { incident_id: event.id, scope: "url" }, "이 URL에서만 예외"));
+        const global = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = "모든 요청에서 이 Rule 제외";
+        global.append(summary, confirmedActionForm(`/policies/${encodeURIComponent(event.policy_id)}/exceptions/from-incident`, { incident_id: event.id, scope: "global" }, "전체 범위 예외 적용", "모든 URL에서 이 Rule이 더 이상 검사되지 않음을 확인합니다."));
+        actionPanel.append(global);
+      }
+      if (event.policy_id && event.client_ip) actionPanel.append(actionForm(`/policies/${encodeURIComponent(event.policy_id)}/ip-rules`, { action: "BLOCK", network: event.client_ip, reason: `보안 이벤트 ${event.id} 출발지 차단` }, "이 IP 차단", true));
+      body.append(result, details, actionHeading, actionPanel, heading, tableWrap, links);
     } catch (_) {
       body.textContent = "상세 정보를 불러오지 못했습니다. 목록 데이터는 유지됩니다.";
       setRefreshState(true);
@@ -505,11 +556,21 @@
     lastEventTrigger = null;
   }
 
+  function categoryLabel(value) {
+    return ({ HTTP_PROTOCOL: "HTTP·프로토콜", INJECTION: "인젝션", XSS: "XSS", FILE_PATH: "파일·경로 공격", SCANNER_BOT: "스캐너·자동화", OTHER: "기타" })[value] || "기타";
+  }
+
+  function countryLabel(value) {
+    if (!value || value === "ZZ") return "알 수 없음";
+    if (value === "--") return "내부 네트워크";
+    return value;
+  }
+
   function eventRow(event, systemAdmin) {
     const row = document.createElement("tr");
     row.className = "selectable-row";
     row.tabIndex = 0;
-    row.dataset.eventId = event.id;
+    row.dataset.incidentId = event.id;
     row.setAttribute("aria-label", `${event.server_name} ${event.method} ${event.uri} ${event.blocked ? "차단" : "탐지"}`);
     const timeCell = document.createElement("td");
     const occurredAt = new Date(event.occurred_at);
@@ -523,30 +584,32 @@
       enterpriseCell.textContent = event.enterprise_name;
       row.append(enterpriseCell);
     }
-    const serverCell = document.createElement("td");
-    const server = document.createElement("strong");
-    server.textContent = event.server_name;
-    serverCell.append(server);
-    row.append(serverCell);
+    const categoryCell = document.createElement("td");
+    const category = document.createElement("span");
+    category.className = `badge ${event.category === "OTHER" ? "info" : "warn"}`;
+    category.textContent = categoryLabel(event.category);
+    categoryCell.append(category);
+    row.append(categoryCell);
     const requestCell = document.createElement("td");
     const request = document.createElement("span");
     request.className = "mono cell-truncate";
     request.textContent = `${event.method} ${event.uri}`;
     request.title = request.textContent;
-    requestCell.append(request);
+    const target = document.createElement("small");
+    target.textContent = event.matched_variable ? `입력 위치 · ${event.matched_variable}` : "입력 위치 확인 불가";
+    requestCell.append(request, target);
     row.append(requestCell);
-    const ruleCell = document.createElement("td");
-    const rule = document.createElement("strong");
-    rule.textContent = event.rule_id || "-";
-    const message = document.createElement("small");
-    message.className = "cell-truncate";
-    message.textContent = event.message || "Rule 메시지 없음";
-    message.title = message.textContent;
-    ruleCell.append(rule, message);
-    row.append(ruleCell);
-    const severityCell = document.createElement("td");
-    severityCell.textContent = severityLabel(event.severity);
-    row.append(severityCell);
+    const sourceCell = document.createElement("td");
+    const source = document.createElement("span");
+    source.className = "mono";
+    source.textContent = event.client_ip || "-";
+    const country = document.createElement("small");
+    country.textContent = countryLabel(event.country_code);
+    sourceCell.append(source, country);
+    row.append(sourceCell);
+    const serverCell = document.createElement("td");
+    serverCell.textContent = event.server_name;
+    row.append(serverCell);
     const resultCell = document.createElement("td");
     const result = document.createElement("span");
     result.className = `badge ${event.blocked ? "danger" : "warn"}`;
@@ -560,12 +623,13 @@
 
   function initializeEvents() {
     if (!document.body.hasAttribute("data-events-page")) return;
-    const selected = document.body.dataset.selectedEvent;
+    const selected = document.body.dataset.selectedIncident;
     if (selected) openEventDrawer(selected);
     startVisiblePolling(async () => {
       const params = new URLSearchParams(window.location.search);
       params.delete("event");
-      const response = await fetch(`/api/v1/events?${params}`, { headers: { Accept: "application/json" }, cache: "no-store" });
+      params.delete("incident");
+      const response = await fetch(`/api/v1/incidents?${params}`, { headers: { Accept: "application/json" }, cache: "no-store" });
       if (!response.ok) throw new Error("events refresh failed");
       const data = await response.json();
       const items = data.items || [];
@@ -585,6 +649,7 @@
   function serializeGuidedRules(form) {
     const rules = $$("[data-guided-rule-row]", form).map((row) => ({
       field: $("[data-rule-field]", row).value,
+      argument: $("[data-rule-argument]", row) ? $("[data-rule-argument]", row).value : "",
       operator: $("[data-rule-operator]", row).value,
       value: $("[data-rule-value]", row).value,
       action: $("[data-rule-action]", row).value
@@ -599,10 +664,11 @@
     if (!template || !root) return;
     const row = template.content.firstElementChild.cloneNode(true);
     if (rule.field) $("[data-rule-field]", row).value = rule.field;
+    if (rule.argument && $("[data-rule-argument]", row)) $("[data-rule-argument]", row).value = rule.argument;
     if (rule.operator) $("[data-rule-operator]", row).value = rule.operator;
     if (rule.value) $("[data-rule-value]", row).value = rule.value;
     if (rule.action) $("[data-rule-action]", row).value = rule.action;
-    if (!rule.operator) alignGuidedRuleOperator(row);
+    alignGuidedRuleOperator(row);
     root.append(row);
   }
 
@@ -610,11 +676,41 @@
     const field = $("[data-rule-field]", row);
     const operator = $("[data-rule-operator]", row);
     if (!field || !operator) return;
-    if (field.value === "REMOTE_ADDR") {
-      operator.value = "@ipMatch";
-    } else if (operator.value === "@ipMatch") {
-      operator.value = "@contains";
+    const argument = $("[data-rule-argument]", row);
+    const argumentLabel = $("[data-rule-argument-label]", row);
+    const needsArgument = field.value === "ARGS";
+    if (argument) {
+      argument.disabled = !needsArgument;
+      argument.required = needsArgument;
+      if (!needsArgument) argument.value = "";
     }
+    if (argumentLabel) argumentLabel.hidden = !needsArgument;
+  }
+
+  function initializeSimplePolicyForm() {
+    const form = $("[data-simple-policy-form]");
+    if (!form) return;
+    const guidedRoot = $("[data-guided-rule-list]", form);
+    const guidedValue = $("[name=guided_rules_json]", form);
+    if (guidedRoot && guidedValue && guidedValue.value) {
+      try {
+        const rules = JSON.parse(guidedValue.value);
+        if (Array.isArray(rules)) rules.forEach((rule) => addGuidedRule(guidedRoot, rule));
+      } catch (_) {
+        // The server keeps the original hidden value and will reject malformed input.
+      }
+    }
+    form.addEventListener("change", (event) => {
+      if (event.target.matches("[data-rule-field]")) alignGuidedRuleOperator(event.target.closest("[data-guided-rule-row]"));
+    });
+    form.addEventListener("click", (event) => {
+      if (event.target.closest("[data-add-guided-rule]")) addGuidedRule(guidedRoot);
+      const remove = event.target.closest("[data-remove-guided-rule]");
+      if (remove) remove.closest("[data-guided-rule-row]").remove();
+    });
+    form.addEventListener("submit", () => {
+      serializeGuidedRules(form);
+    });
   }
 
   function policyValidationPayload(form) {
@@ -669,10 +765,18 @@
         panel.setAttribute("aria-hidden", active ? "false" : "true");
       });
       $$('[data-wizard-step]', form).forEach((item) => {
-        const active = Number(item.dataset.wizardStep) === step;
+        const itemStep = Number(item.dataset.wizardStep);
+        const active = itemStep === step;
+        const completed = itemStep < step;
         item.classList.toggle("active", active);
+        item.classList.toggle("completed", completed);
         if (active) item.setAttribute("aria-current", "step");
         else item.removeAttribute("aria-current");
+        const status = $("[data-step-status]", item);
+        if (status) {
+          status.hidden = !active && !completed;
+          status.textContent = active ? "현재 단계" : completed ? "완료" : "";
+        }
       });
       if (onStepChange) onStepChange(step);
     };
@@ -802,11 +906,17 @@
     const removed = rules.removed || [];
     const changed = rules.changed || [];
     const setup = diff.setup || [];
+    const sourceSetup = diff.source_setup || [];
+    const files = diff.files || [];
+    const directives = diff.directives || [];
     root.append(migrationMetricGrid([
       { label: "추가 Rule", value: `${added.length}개`, detail: "새 보호 범위" },
       { label: "삭제 Rule", value: `${removed.length}개`, detail: removed.length ? "기존 예외 참조 확인" : "영향 없음" },
       { label: "내용 변경 Rule", value: `${changed.length}개`, detail: changed.length ? "공통 예외 영향 확인" : "영향 없음" },
-      { label: "Setup 변경", value: `${setup.length}개`, detail: setup.length ? "지원 항목 구조 변경" : "구조 변경 없음" }
+      { label: "관리 Setup 변경", value: `${setup.length}개`, detail: setup.length ? "지원 항목 구조 변경" : "구조 변경 없음" },
+      { label: "원본 Setup 변경", value: `${sourceSetup.length}개`, detail: sourceSetup.length ? "읽기 전용 항목 포함" : "변경 없음" },
+      { label: "파일 변경", value: `${files.length}개`, detail: files.length ? ".data와 원본 구성 포함" : "변경 없음" },
+      { label: "기타 지시문 변경", value: `${directives.length}개`, detail: directives.length ? "marker와 target 제외 포함" : "변경 없음" }
     ]));
     if (removed.length || changed.length) {
       const messages = [];
@@ -880,8 +990,11 @@
     if (!card) return;
     const inherited = $("[data-setup-inherited]", card);
     const editor = $("[data-setup-editor]", card);
+    const editorPanel = $("[data-setup-editor-panel]", card);
     if (!inherited || !editor) return;
     card.classList.toggle("is-overridden", toggle.checked);
+    toggle.setAttribute("aria-expanded", String(toggle.checked));
+    if (editorPanel) editorPanel.hidden = !toggle.checked;
     if (toggle.checked) {
       inherited.removeAttribute("name");
       editor.name = editor.dataset.setupName;
@@ -897,7 +1010,8 @@
     const status = $("[data-setup-inheritance-status]", card);
     if (status) {
       if (!card.dataset.inheritedLabel && !toggle.checked) card.dataset.inheritedLabel = status.textContent.trim();
-      status.textContent = toggle.checked ? "직접 변경" : card.dataset.inheritedLabel || "상속값 사용";
+      status.textContent = toggle.checked ? "직접 설정" : card.dataset.inheritedLabel || "상속값 사용";
+      status.classList.toggle("info", toggle.checked);
     }
     const effective = $("[data-setup-effective-value]", card);
     if (effective) effective.textContent = editor.value || inherited.value || "미설정";
@@ -930,7 +1044,7 @@
       confirm_changed_rules: "변경 Rule 확인", confirm_channel_change: "CRS 채널 전환 확인", excluded_paths: "URL 예외", excluded_ips: "IP/CIDR 예외",
       rule_exclusions: "Rule ID 제외", target_exclusions: "Target 제외", conditional_exclusions: "조건부 예외",
       service_rules: "시스템 공통 Service Rule", compatibility: "서버 호환성", enterprise_impact: "기업 적용 영향",
-      artifact: "정책 배포 파일", candidate: "새 정책 버전", policy: "공통 보호 설정"
+      artifact: "정책 배포 파일", candidate: "시스템 오버라이드", policy: "공통 보호 설정"
     };
     if (field.startsWith("crs_setup.")) return "CRS 고급 설정";
     return labels[field] || "검증 항목";
@@ -1023,8 +1137,8 @@
     const compatibility = data.compatibility || [];
     impactSection.append(migrationMetricGrid([
       { label: "자동 업데이트", value: `${impact.automatic || 0}개`, detail: "카나리·확대 배포" },
-      { label: "수동 승인", value: `${impact.manual || 0}개`, detail: "승인 전까지 기존 버전 유지" },
-      { label: "버전 고정", value: `${impact.pinned || 0}개`, detail: "변경 없음" },
+      { label: "수동 승인", value: `${impact.manual || 0}개`, detail: "승인 전까지 현재 CRS 기준 유지" },
+      { label: "CRS 고정", value: `${impact.pinned || 0}개`, detail: "변경 없음" },
       { label: "활성 서버", value: `${compatibility.length}대`, detail: "Agent·모듈·롤백 조합 확인" }
     ]));
     root.append(impactSection);
@@ -1062,7 +1176,7 @@
       root.append(migrationTextElement("div", "등록된 활성 서버가 없어 패키지 호환성 대상이 없습니다.", "empty"));
     }
 
-    if (data.valid) root.append(migrationAlert("ok", "게시 가능", ["현재 입력값과 서버 상태를 기준으로 새 정책 버전을 게시할 수 있습니다."]));
+    if (data.valid) root.append(migrationAlert("ok", "게시 가능", ["선택한 CRS 버전에 현재 시스템 오버라이드를 게시할 수 있습니다."]));
     const details = document.createElement("details");
     details.className = "validation-details";
     details.append(migrationTextElement("summary", "검증 상세 정보"));
@@ -1085,6 +1199,16 @@
     let dirty = false;
     let leaving = false;
     let wizard;
+
+    const updateConfirmationGates = () => {
+      $$('[data-confirm-fields]', form).forEach((button) => {
+        const fieldNames = (button.dataset.confirmFields || "").split(/\s+/).filter(Boolean);
+        button.disabled = fieldNames.some((name) => {
+          const field = form.elements[name];
+          return !field || !field.checked;
+        });
+      });
+    };
 
     $$("[data-setup-token-editor]", form).forEach((root) => {
       populateSetupTokenEditor(root);
@@ -1168,6 +1292,7 @@
       initialErrors[item.dataset.validationErrorField] = parts.length > 1 ? parts.slice(1).join("—").trim() : item.textContent.trim();
     });
     if (Object.keys(initialErrors).length) showMigrationFieldErrors(form, initialErrors, wizard, true);
+    updateConfirmationGates();
     updatePublishAvailability();
 
     form.addEventListener("invalid", (event) => {
@@ -1176,6 +1301,10 @@
     }, true);
     form.addEventListener("input", (event) => {
       const setupTokenInput = event.target.matches("[data-setup-token-option],[data-setup-token-custom]");
+      if (event.target.matches("[data-setup-editor]")) {
+        const effective = $("[data-setup-effective-value]", event.target.closest("[data-setup-override-card]"));
+        if (effective) effective.textContent = event.target.value || "미설정";
+      }
       if ((!event.target.name && !setupTokenInput) || ["csrf", "expected_system_policy_id", "validation_digest", "publish_confirm"].includes(event.target.name)) return;
       dirty = true;
       if (form.dataset.validationState !== "idle" && form.dataset.validationState !== "dirty") {
@@ -1185,6 +1314,7 @@
     });
     form.addEventListener("change", (event) => {
       if (event.target.matches("[data-setup-override]")) syncSetupOverride(event.target, event.target.checked);
+      if (event.target.matches("[data-wizard-confirm]")) updateConfirmationGates();
       if (event.target.name === "publish_confirm") updatePublishAvailability();
     });
     form.addEventListener("click", (event) => {
@@ -1249,10 +1379,17 @@
       window.location.reload();
     }
     if (event.target.closest("[data-event-drawer-close]")) closeEventDrawer();
-    const row = event.target.closest("[data-event-id]");
+    const row = event.target.closest("[data-incident-id]");
     if (row) {
       lastEventTrigger = row;
-      openEventDrawer(row.dataset.eventId);
+      openEventDrawer(row.dataset.incidentId);
+    }
+    const navigationRow = event.target.closest("[data-row-href]");
+    const rowControl = event.target.closest("a, button, input, select, textarea, summary, [role='button']");
+    if (navigationRow && !rowControl && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+      showGlobalBusy("상세 정보를 불러오는 중입니다.");
+      window.location.assign(navigationRow.dataset.rowHref);
+      return;
     }
     const button = event.target.closest("[data-copy-target], [data-copy-text]");
     if (!button) return;
@@ -1280,16 +1417,17 @@
       setSidebar(false);
       closeEventDrawer();
     }
-    if ((event.key === "Enter" || event.key === " ") && event.target.matches("[data-event-id]")) {
+    if ((event.key === "Enter" || event.key === " ") && event.target.matches("[data-incident-id]")) {
       event.preventDefault();
       lastEventTrigger = event.target;
-      openEventDrawer(event.target.dataset.eventId);
+      openEventDrawer(event.target.dataset.incidentId);
     }
   });
 
   initializeOverview();
   initializeEvents();
   initializePolicyWizard();
+  initializeSimplePolicyForm();
   initializeSystemPolicyWizard();
   initializeDesktopSidebar();
   initializeTaskDialogs();

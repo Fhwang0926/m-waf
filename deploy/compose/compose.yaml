@@ -70,6 +70,7 @@ services:
       MWAF_CRS_SYNC_INTERVAL: ${MWAF_CRS_SYNC_INTERVAL:-24h}
       MWAF_CRS_GITHUB_TOKEN: ${MWAF_CRS_GITHUB_TOKEN:-}
       MWAF_CRS_LTS_LINE: ${MWAF_CRS_LTS_LINE:-4.25}
+      MWAF_GEOIP_DATABASE: ${MWAF_GEOIP_DATABASE:-}
     secrets:
       - mariadb_app_password
       - mwaf_session_key

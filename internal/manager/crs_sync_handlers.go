@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +46,10 @@ func (s *Server) SyncCRSChannels(ctx context.Context) error {
 	for _, channel := range []string{"lts", "stable"} {
 		if _, _, err := s.SyncLatestCRSChannel(ctx, channel); err != nil {
 			syncErrors = append(syncErrors, fmt.Errorf("%s: %w", channel, err))
+			var rateLimitErr *crssource.RateLimitError
+			if errors.As(err, &rateLimitErr) {
+				break
+			}
 		}
 	}
 	if err := errors.Join(syncErrors...); err != nil {
@@ -74,7 +79,7 @@ func (s *Server) syncOpenSourcePolicies(w http.ResponseWriter, r *http.Request) 
 	if channel == "all" {
 		if err := s.SyncCRSChannels(ctx); err != nil {
 			s.audit(r, sessionFrom(r).Username, "crs_source.sync", "official-lts-stable-v4", "failed")
-			s.renderAdminError(w, r, http.StatusBadGateway, "공식 CRS 소스를 연동할 수 없습니다", err.Error())
+			s.renderCRSSyncFailure(w, r, err)
 			return
 		}
 		s.audit(r, sessionFrom(r).Username, "crs_source.sync", "official-lts-stable-v4", "success")
@@ -84,7 +89,7 @@ func (s *Server) syncOpenSourcePolicies(w http.ResponseWriter, r *http.Request) 
 	source, created, err := s.SyncLatestCRSChannel(ctx, channel)
 	if err != nil {
 		s.audit(r, sessionFrom(r).Username, "crs_source.sync", "official-"+channel+"-v4", "failed")
-		s.renderAdminError(w, r, http.StatusBadGateway, "공식 CRS 소스를 연동할 수 없습니다", err.Error())
+		s.renderCRSSyncFailure(w, r, err)
 		return
 	}
 	result := "current"
@@ -112,9 +117,49 @@ func (s *Server) apiSyncOpenSourcePolicies(w http.ResponseWriter, r *http.Reques
 	}
 	source, created, err := s.SyncLatestCRSChannel(ctx, channel)
 	if err != nil {
-		writeProblem(w, http.StatusBadGateway, err.Error())
+		failure := s.crsSyncFailure(err, time.Now())
+		setCRSSyncRetryAfter(w, failure.RetryIn)
+		writeProblem(w, failure.Status, failure.Title+": "+failure.Detail)
 		return
 	}
 	s.audit(r, sessionFrom(r).Username, "crs_source.sync", source.ID+":"+source.Commit, "success")
 	writeJSON(w, http.StatusOK, map[string]any{"source": source, "imported": created})
+}
+
+func (s *Server) renderCRSSyncFailure(w http.ResponseWriter, r *http.Request, err error) {
+	failure := s.crsSyncFailure(err, time.Now())
+	setCRSSyncRetryAfter(w, failure.RetryIn)
+	s.renderOpenSourcePolicies(w, r, failure.Status, &failure)
+}
+
+func (s *Server) crsSyncFailure(err error, now time.Time) crsSyncPageError {
+	failure := crsSyncPageError{
+		Status: http.StatusBadGateway, Title: "GitHub에서 새 CRS를 확인하지 못했습니다",
+		Detail:    "기존에 검증된 CRS와 현재 시스템 정책은 계속 사용할 수 있습니다. 네트워크와 GitHub 연결 상태를 확인한 뒤 다시 시도하세요.",
+		Technical: truncate(err.Error(), 512),
+	}
+	var rateLimitErr *crssource.RateLimitError
+	if !errors.As(err, &rateLimitErr) {
+		return failure
+	}
+	failure.Status = http.StatusServiceUnavailable
+	failure.Title = "GitHub API 호출 한도가 소진되었습니다"
+	failure.Detail = "기존에 검증된 CRS와 현재 시스템 정책은 그대로 유지됩니다."
+	failure.Technical = ""
+	if s.cfg.CRSGitHubToken == "" {
+		failure.Detail += " 현재 익명 API를 사용 중이므로 deploy/compose/.env에 MWAF_CRS_GITHUB_TOKEN을 설정하면 호출 한도를 높일 수 있습니다."
+	}
+	failure.RetryIn = rateLimitErr.RetryAfter(now)
+	if !rateLimitErr.ResetAt.IsZero() {
+		failure.RetryAt = rateLimitErr.ResetAt.Local().Format("2006-01-02 15:04:05 MST")
+	}
+	return failure
+}
+
+func setCRSSyncRetryAfter(w http.ResponseWriter, retryIn time.Duration) {
+	if retryIn <= 0 {
+		return
+	}
+	seconds := int64((retryIn + time.Second - 1) / time.Second)
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 }

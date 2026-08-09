@@ -33,20 +33,62 @@ type Source struct {
 }
 
 type Index struct {
-	SchemaVersion int          `json:"schema_version"`
-	GeneratedBy   string       `json:"generated_by"`
-	Source        Source       `json:"source"`
-	Statistics    Statistics   `json:"statistics"`
-	Setup         []SetupField `json:"setup"`
-	Rules         []Rule       `json:"rules"`
+	SchemaVersion int               `json:"schema_version"`
+	GeneratedBy   string            `json:"generated_by"`
+	Source        Source            `json:"source"`
+	Statistics    Statistics        `json:"statistics"`
+	Setup         []SetupField      `json:"setup"`
+	SourceSetup   []SourceSetupItem `json:"source_setup,omitempty"`
+	Files         []SourceFile      `json:"files,omitempty"`
+	Directives    []SourceDirective `json:"directives,omitempty"`
+	Rules         []Rule            `json:"rules"`
 }
 
 type Statistics struct {
-	RuleCount int            `json:"rule_count"`
-	FileCount int            `json:"file_count"`
-	ByPhase   map[string]int `json:"by_phase"`
-	ByPL      map[string]int `json:"by_paranoia_level"`
-	ByTag     map[string]int `json:"by_tag"`
+	RuleCount      int            `json:"rule_count"`
+	FileCount      int            `json:"file_count"`
+	TotalFileCount int            `json:"total_file_count,omitempty"`
+	DataFileCount  int            `json:"data_file_count,omitempty"`
+	DirectiveCount int            `json:"directive_count,omitempty"`
+	SetupKeyCount  int            `json:"setup_key_count,omitempty"`
+	ByPhase        map[string]int `json:"by_phase"`
+	ByPL           map[string]int `json:"by_paranoia_level"`
+	ByTag          map[string]int `json:"by_tag"`
+}
+
+// SourceSetupItem describes every tx.* declaration present in the immutable
+// upstream setup example. Managed is true only for values M-WAF can safely
+// override when authoring a system policy.
+type SourceSetupItem struct {
+	Key     string `json:"key"`
+	Value   string `json:"value"`
+	Line    int    `json:"line"`
+	Active  bool   `json:"active"`
+	Managed bool   `json:"managed"`
+}
+
+// SourceFile is a compact inventory entry. The original bytes remain in the
+// verified archive; hashes and references are sufficient for version diffing.
+type SourceFile struct {
+	Path           string `json:"path"`
+	Kind           string `json:"kind"`
+	Size           int64  `json:"size"`
+	LineCount      int    `json:"line_count"`
+	SHA256         string `json:"sha256"`
+	RuleCount      int    `json:"rule_count,omitempty"`
+	DirectiveCount int    `json:"directive_count,omitempty"`
+	ReferencedBy   []int  `json:"referenced_by,omitempty"`
+}
+
+// SourceDirective records executable CRS directives that are not represented
+// by an ID-bearing Rule, such as markers and target exclusions.
+type SourceDirective struct {
+	Name           string   `json:"name"`
+	File           string   `json:"file"`
+	Line           int      `json:"line"`
+	ContentHash    string   `json:"content_sha256"`
+	Directive      string   `json:"directive"`
+	RuleReferences []string `json:"rule_references,omitempty"`
 }
 
 type SetupField struct {
@@ -81,11 +123,12 @@ type logicalDirective struct {
 }
 
 var (
-	ruleIDPattern   = regexp.MustCompile(`(?i)(?:^|,)\s*id\s*:\s*'?([0-9]+)'?`)
-	phasePattern    = regexp.MustCompile(`(?i)(?:^|,)\s*phase\s*:\s*'?([0-9]+)'?`)
-	severityPattern = regexp.MustCompile(`(?i)(?:^|,)\s*severity\s*:\s*'?([^,']+)'?`)
-	messagePattern  = regexp.MustCompile(`(?i)(?:^|,)\s*msg\s*:\s*'([^']*)'`)
-	tagPattern      = regexp.MustCompile(`(?i)(?:^|,)\s*tag\s*:\s*'([^']*)'`)
+	ruleIDPattern    = regexp.MustCompile(`(?i)(?:^|,)\s*id\s*:\s*'?([0-9]+)'?`)
+	phasePattern     = regexp.MustCompile(`(?i)(?:^|,)\s*phase\s*:\s*'?([0-9]+)'?`)
+	severityPattern  = regexp.MustCompile(`(?i)(?:^|,)\s*severity\s*:\s*'?([^,']+)'?`)
+	messagePattern   = regexp.MustCompile(`(?i)(?:^|,)\s*msg\s*:\s*'([^']*)'`)
+	tagPattern       = regexp.MustCompile(`(?i)(?:^|,)\s*tag\s*:\s*'([^']*)'`)
+	setupItemPattern = regexp.MustCompile(`(?i)setvar:\s*'?tx\.([a-z0-9_]+)=([^'\"]*)`)
 )
 
 func BuildFromArchive(reader io.Reader, source Source) (Index, error) {
@@ -95,61 +138,29 @@ func BuildFromArchive(reader io.Reader, source Source) (Index, error) {
 	if source.Version == "" || source.Commit == "" || len(source.ArchiveSHA256) != 64 {
 		return Index{}, errors.New("CRS source version, commit and archive sha256 are required")
 	}
-	gz, err := gzip.NewReader(io.LimitReader(reader, maxArchiveBytes+1))
+	policyFiles, err := PolicyFilesFromArchive(reader)
 	if err != nil {
-		return Index{}, fmt.Errorf("open CRS archive: %w", err)
+		return Index{}, err
 	}
-	defer gz.Close()
-	tarReader := tar.NewReader(gz)
 	rules := make([]Rule, 0, 1000)
 	files := make(map[string]bool)
 	seenIDs := make(map[int]string)
-	setupExample := ""
-	for {
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return Index{}, fmt.Errorf("read CRS archive: %w", err)
-		}
-		if !header.FileInfo().Mode().IsRegular() {
+	setupExample := string(policyFiles["crs/crs-setup.conf"])
+	fileNames := make([]string, 0, len(policyFiles))
+	for name := range policyFiles {
+		fileNames = append(fileNames, name)
+	}
+	sort.Strings(fileNames)
+	for _, name := range fileNames {
+		relative := policyRelativePath(name)
+		if !strings.HasPrefix(relative, "rules/") || !strings.HasSuffix(relative, ".conf") {
 			continue
 		}
-		clean := path.Clean(strings.TrimPrefix(header.Name, "./"))
-		if clean == "." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
-			return Index{}, fmt.Errorf("unsafe CRS archive path %q", header.Name)
-		}
-		parts := strings.SplitN(clean, "/", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		if parts[1] == "crs-setup.conf.example" {
-			if header.Size < 0 || header.Size > maxFileBytes {
-				return Index{}, errors.New("CRS setup example exceeds the size limit")
-			}
-			raw, err := io.ReadAll(io.LimitReader(tarReader, maxFileBytes+1))
-			if err != nil {
-				return Index{}, err
-			}
-			setupExample = string(raw)
-			continue
-		}
-		if !strings.HasPrefix(parts[1], "rules/") || !strings.HasSuffix(parts[1], ".conf") {
-			continue
-		}
-		if header.Size < 0 || header.Size > maxFileBytes {
-			return Index{}, fmt.Errorf("CRS rule file %s exceeds the size limit", parts[1])
-		}
-		raw, err := io.ReadAll(io.LimitReader(tarReader, maxFileBytes+1))
+		fileRules, err := parseRuleFile(relative, string(policyFiles[name]))
 		if err != nil {
 			return Index{}, err
 		}
-		fileRules, err := parseRuleFile(parts[1], string(raw))
-		if err != nil {
-			return Index{}, err
-		}
-		files[parts[1]] = true
+		files[relative] = true
 		for _, rule := range fileRules {
 			if previous, exists := seenIDs[rule.ID]; exists {
 				return Index{}, fmt.Errorf("duplicate CRS rule id %d in %s and %s", rule.ID, previous, rule.File)
@@ -179,7 +190,66 @@ func BuildFromArchive(reader io.Reader, source Source) (Index, error) {
 	if err != nil {
 		return Index{}, err
 	}
-	return Index{SchemaVersion: SchemaVersion, GeneratedBy: "mwaf-crs-index", Source: source, Statistics: statistics, Setup: setup, Rules: rules}, nil
+	index := Index{SchemaVersion: SchemaVersion, GeneratedBy: "mwaf-crs-index", Source: source, Statistics: statistics, Setup: setup, Rules: rules}
+	return EnrichFromPolicyFiles(index, policyFiles), nil
+}
+
+// EnrichFromPolicyFiles adds complete, deterministic source inventory metadata
+// to both new and legacy indexes without changing the immutable archive.
+func EnrichFromPolicyFiles(index Index, files map[string][]byte) Index {
+	result := index
+	result.Files = nil
+	result.Directives = nil
+	result.SourceSetup = sourceSetupItems(string(files["crs/crs-setup.conf"]), index.Setup)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	filePositions := make(map[string]int, len(names))
+	for _, name := range names {
+		relative := policyRelativePath(name)
+		raw := files[name]
+		digest := sha256.Sum256(raw)
+		item := SourceFile{Path: relative, Kind: sourceFileKind(relative), Size: int64(len(raw)), LineCount: sourceLineCount(raw), SHA256: hex.EncodeToString(digest[:])}
+		if strings.HasSuffix(relative, ".conf") {
+			for _, directive := range logicalDirectives(string(raw)) {
+				fields := strings.Fields(directive.text)
+				if len(fields) == 0 || fields[0] == "SecRule" || fields[0] == "SecAction" || !strings.HasPrefix(fields[0], "Sec") {
+					continue
+				}
+				normalized := strings.Join(strings.Fields(directive.text), " ")
+				hash := sha256.Sum256([]byte(normalized))
+				entry := SourceDirective{Name: fields[0], File: relative, Line: directive.line, ContentHash: hex.EncodeToString(hash[:]), Directive: strings.TrimSpace(directive.text)}
+				if len(fields) > 1 && fields[0] == "SecRuleUpdateTargetById" {
+					entry.RuleReferences = splitRuleReferences(fields[1])
+				}
+				result.Directives = append(result.Directives, entry)
+				item.DirectiveCount++
+			}
+		}
+		filePositions[relative] = len(result.Files)
+		result.Files = append(result.Files, item)
+	}
+	for _, rule := range result.Rules {
+		if position, ok := filePositions[rule.File]; ok {
+			result.Files[position].RuleCount++
+		}
+		for position := range result.Files {
+			if result.Files[position].Kind == "data" && strings.Contains(rule.Directive, path.Base(result.Files[position].Path)) {
+				result.Files[position].ReferencedBy = append(result.Files[position].ReferencedBy, rule.ID)
+			}
+		}
+	}
+	for position := range result.Files {
+		result.Files[position].ReferencedBy = uniqueSortedInts(result.Files[position].ReferencedBy)
+	}
+	result.Statistics.FileCount = countSourceFiles(result.Files, "rule")
+	result.Statistics.TotalFileCount = len(result.Files)
+	result.Statistics.DataFileCount = countSourceFiles(result.Files, "data")
+	result.Statistics.DirectiveCount = len(result.Directives)
+	result.Statistics.SetupKeyCount = len(result.SourceSetup)
+	return result
 }
 
 // PolicyFilesFromArchive returns the unchanged CRS files required by an Agent.
@@ -325,6 +395,116 @@ func SupportedSetupFromExample(raw string) ([]SetupField, error) {
 		}
 	}
 	return fields, nil
+}
+
+func sourceSetupItems(raw string, managedFields []SetupField) []SourceSetupItem {
+	managed := make(map[string]bool, len(managedFields))
+	for _, field := range managedFields {
+		managed[field.Key] = true
+	}
+	items := make(map[string]SourceSetupItem)
+	for index, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
+		match := setupItemPattern.FindStringSubmatch(line)
+		if len(match) != 3 {
+			continue
+		}
+		key := strings.TrimSpace(match[1])
+		value := strings.TrimSpace(strings.TrimRight(match[2], "\\, \t"))
+		if key == "" || value == "" {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		item := SourceSetupItem{Key: key, Value: value, Line: index + 1, Active: !strings.HasPrefix(trimmed, "#"), Managed: managed[key]}
+		previous, exists := items[key]
+		if !exists || item.Active && !previous.Active {
+			items[key] = item
+		}
+	}
+	result := make([]SourceSetupItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, item)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Key < result[j].Key })
+	return result
+}
+
+func policyRelativePath(name string) string {
+	return strings.TrimPrefix(path.Clean(strings.TrimPrefix(name, "./")), "crs/")
+}
+
+func sourceFileKind(name string) string {
+	switch {
+	case name == "crs-setup.conf":
+		return "setup"
+	case name == "LICENSE":
+		return "license"
+	case strings.HasSuffix(name, ".data"):
+		return "data"
+	case strings.HasSuffix(name, ".conf.example"):
+		return "example"
+	case strings.HasSuffix(name, ".conf"):
+		return "rule"
+	default:
+		return "other"
+	}
+}
+
+func sourceLineCount(raw []byte) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	lines := bytesCount(raw, '\n')
+	if raw[len(raw)-1] != '\n' {
+		lines++
+	}
+	return lines
+}
+
+func bytesCount(raw []byte, value byte) int {
+	count := 0
+	for _, current := range raw {
+		if current == value {
+			count++
+		}
+	}
+	return count
+}
+
+func splitRuleReferences(value string) []string {
+	value = strings.Trim(value, "'\"")
+	parts := strings.FieldsFunc(value, func(char rune) bool { return char == ',' || char == '|' })
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return uniqueSortedStrings(result)
+}
+
+func uniqueSortedInts(values []int) []int {
+	seen := make(map[int]bool, len(values))
+	result := make([]int, 0, len(values))
+	for _, value := range values {
+		if value == 0 || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	sort.Ints(result)
+	return result
+}
+
+func countSourceFiles(files []SourceFile, kind string) int {
+	count := 0
+	for _, file := range files {
+		if file.Kind == kind {
+			count++
+		}
+	}
+	return count
 }
 
 func parseRuleFile(name, raw string) ([]Rule, error) {

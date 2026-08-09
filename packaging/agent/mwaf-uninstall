@@ -1,0 +1,115 @@
+#!/bin/sh
+set -eu
+
+dry_run=0
+purge=0
+package_prerm=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) dry_run=1 ;;
+    --purge) purge=1 ;;
+    --package-prerm) package_prerm=1 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+[ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+
+state=/var/lib/mwaf/install-state.json
+agent_config=/etc/mwaf-agent/agent.json
+json_value() {
+  key=$1
+  file=$2
+  [ -r "$file" ] || return 0
+  sed -n "s/.*\"$key\": \"\([^\"]*\)\".*/\1/p" "$file" | head -n 1
+}
+hash_file() {
+  file=$1
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$file" | awk '{print $1}'; else shasum -a 256 "$file" | awk '{print $1}'; fi
+}
+web_server=$(json_value web_server "$state")
+integration_mode=$(json_value integration_mode "$state")
+integration_config=$(json_value integration_config "$state")
+integration_sha=$(json_value integration_sha256 "$state")
+[ -n "$web_server" ] || web_server=$(json_value web_server "$agent_config")
+[ -n "$integration_mode" ] || integration_mode=$(json_value integration_mode "$agent_config")
+
+modified_config=0
+if [ -n "$integration_config" ] && [ -f "$integration_config" ] && [ -n "$integration_sha" ]; then
+  actual_integration_sha=$(hash_file "$integration_config")
+  if [ "$actual_integration_sha" != "$integration_sha" ]; then modified_config=1; fi
+fi
+
+echo "M-WAF 제거 대상"
+echo "- 웹서버 연동: ${web_server:-확인 불가} / ${integration_mode:-확인 불가}"
+if [ -n "$integration_config" ]; then echo "- 연동 설정: $integration_config"; fi
+if [ "$modified_config" -eq 1 ]; then echo "- 사용자 수정 연동 설정: 삭제하지 않고 보존"; fi
+echo "- Agent 서비스와 M-WAF 패키지"
+if [ "$purge" -eq 1 ]; then echo "- M-WAF 소유 설정, 정책 개정본, 인증서와 이벤트 spool"; fi
+if [ "$dry_run" -eq 1 ]; then exit 0; fi
+
+disabled_dir=/etc/mwaf/disabled
+install -d -m 0750 "$disabled_dir"
+restore_path=""
+disabled_path=""
+if [ "$modified_config" -eq 1 ]; then
+  echo "사용자가 수정한 연동 설정은 삭제하지 않고 별도 백업으로 보존합니다: $integration_config" >&2
+fi
+case "$web_server:$integration_mode" in
+  apache:distro)
+    if [ -e /etc/apache2/conf-enabled/mwaf.conf ]; then
+      a2disconf mwaf >/dev/null
+      restore_path=/etc/apache2/conf-enabled/mwaf.conf
+    fi
+    ;;
+  nginx:distro)
+    integration_config=/etc/nginx/conf.d/mwaf.conf
+    ;;
+esac
+if [ -n "$integration_config" ] && [ -e "$integration_config" ]; then
+  if [ "$modified_config" -eq 1 ] && [ "$purge" -eq 1 ]; then
+    preserve_dir=/var/backups/mwaf
+    install -d -m 0700 "$preserve_dir"
+    disabled_path="$preserve_dir/modified-integration-$(date +%s).conf"
+  else
+    disabled_path="$disabled_dir/integration-$(date +%s).conf"
+  fi
+  mv "$integration_config" "$disabled_path"
+  restore_path=$integration_config
+fi
+
+configtest_ok=1
+if [ "$web_server" = apache ]; then
+  apachectl configtest >/dev/null 2>&1 || configtest_ok=0
+elif [ "$web_server" = nginx ]; then
+  nginx -t >/dev/null 2>&1 || configtest_ok=0
+fi
+if [ "$configtest_ok" -ne 1 ]; then
+  if [ -n "$disabled_path" ]; then install -d -m 0755 "$(dirname "$restore_path")"; mv "$disabled_path" "$restore_path"; fi
+  if [ "$web_server:$integration_mode" = apache:distro ]; then a2enconf mwaf >/dev/null; fi
+  echo "웹서버 설정 검사에 실패해 연동 설정을 복구했습니다." >&2
+  exit 1
+fi
+if [ "$web_server" = apache ] && systemctl is-active --quiet apache2; then systemctl reload apache2; fi
+if [ "$web_server" = nginx ] && systemctl is-active --quiet nginx; then systemctl reload nginx; fi
+
+manager=$(json_value manager_url "$agent_config")
+if [ -n "$manager" ] && [ -r /etc/mwaf-agent/manager-ca.crt ] && [ -r /var/lib/mwaf-agent/agent.crt ] && [ -r /var/lib/mwaf-agent/agent.key ]; then
+  curl --fail --silent --show-error --max-time 5 --cacert /etc/mwaf-agent/manager-ca.crt --cert /var/lib/mwaf-agent/agent.crt --key /var/lib/mwaf-agent/agent.key -X POST "$manager/agent/v1/unregister" >/dev/null 2>&1 || echo "Manager 등록 해제는 완료하지 못했습니다. 관리자 화면에서 수동 등록 해제하세요." >&2
+fi
+systemctl disable --now mwaf-agent >/dev/null 2>&1 || true
+
+if [ "$package_prerm" -eq 0 ]; then
+  packages=""
+  for package_name in mwaf-modsecurity-apache mwaf-modsecurity-nginx mwaf-modsecurity-apache-external mwaf-modsecurity-nginx-external mwaf-agent; do
+    if dpkg-query -W "$package_name" >/dev/null 2>&1; then packages="$packages $package_name"; fi
+  done
+  if [ -n "$packages" ]; then DEBIAN_FRONTEND=noninteractive apt-get remove -y $packages; fi
+fi
+
+if [ "$purge" -eq 1 ]; then
+  rm -rf /etc/mwaf /etc/mwaf-agent /var/lib/mwaf /var/lib/mwaf-agent
+else
+  echo "정책과 로컬 상태는 재설치를 위해 보존했습니다. 완전 삭제는 --purge를 사용하세요."
+fi
+echo "M-WAF 연동을 안전하게 제거했습니다. Apache/Nginx와 배포판 ModSecurity Connector는 유지했습니다."

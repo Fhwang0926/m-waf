@@ -359,6 +359,14 @@ VALUES (?,?,?,?,?,NULLIF(?,0),NULLIF(?,''),NULLIF(?,''),NULLIF(?,0),?,?,?,?,?)`,
 			return err
 		}
 	}
+	for _, item := range configuration.IPRules {
+		if item.ID == "" {
+			item.ID = randomID()
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO policy_configuration_ip_rules(id,configuration_id,source_scope,action_type,network_cidr,generated_rule_id,reason,expires_at,created_by,enabled,order_no) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, item.ID, configuration.ID, item.SourceScope, item.Action, item.Network, item.GeneratedRuleID, item.Reason, item.ExpiresAt, item.CreatedBy, item.Enabled, item.Order); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -661,6 +669,27 @@ FROM policy_configuration_custom_rules WHERE configuration_id=? ORDER BY order_n
 		item.CustomRules = append(item.CustomRules, value)
 	}
 	if err := ruleRows.Close(); err != nil {
+		return PolicyConfiguration{}, err
+	}
+	ipRows, err := s.db.QueryContext(ctx, `SELECT id,source_scope,action_type,network_cidr,generated_rule_id,reason,expires_at,created_by,enabled,order_no
+FROM policy_configuration_ip_rules WHERE configuration_id=? ORDER BY order_no,id`, item.ID)
+	if err != nil {
+		return PolicyConfiguration{}, err
+	}
+	for ipRows.Next() {
+		var value PolicyIPRule
+		var expiresAt sql.NullTime
+		if err := ipRows.Scan(&value.ID, &value.SourceScope, &value.Action, &value.Network, &value.GeneratedRuleID, &value.Reason, &expiresAt, &value.CreatedBy, &value.Enabled, &value.Order); err != nil {
+			ipRows.Close()
+			return PolicyConfiguration{}, err
+		}
+		if expiresAt.Valid {
+			expires := expiresAt.Time
+			value.ExpiresAt = &expires
+		}
+		item.IPRules = append(item.IPRules, value)
+	}
+	if err := ipRows.Close(); err != nil {
 		return PolicyConfiguration{}, err
 	}
 	storedDigest := item.ConfigSHA256

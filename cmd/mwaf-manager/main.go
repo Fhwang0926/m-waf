@@ -64,6 +64,7 @@ func main() {
 		logger.Error("initialize_manager", "error", err)
 		os.Exit(1)
 	}
+	defer app.Close()
 	if err := app.SyncCatalog(startupCtx); err != nil {
 		logger.Warn("package_catalog_unavailable", "error", err)
 	}
@@ -71,7 +72,9 @@ func main() {
 	defer stopCleanup()
 	go runLogCleanup(cleanupCtx, cfg, store, logger)
 	go runSystemPolicySync(cleanupCtx, cfg.PolicySyncInterval, app, logger)
-	go runCRSSourceSync(cleanupCtx, cfg.CRSSyncInterval, app, logger)
+	go runCRSSourceSync(cleanupCtx, cfg.CRSSyncInterval, !cfg.DevLiveReload, app, logger)
+	go runIncidentBackfill(cleanupCtx, store, logger)
+	go runIPRuleExpiry(cleanupCtx, app, logger)
 	tlsConfig, err := app.TLSConfig()
 	if err != nil {
 		logger.Error("manager_tls_config", "error", err)
@@ -104,7 +107,7 @@ func main() {
 	_ = managerServer.Shutdown(shutdownCtx)
 }
 
-func runCRSSourceSync(ctx context.Context, interval time.Duration, app *manager.Server, logger *slog.Logger) {
+func runCRSSourceSync(ctx context.Context, interval time.Duration, syncOnStart bool, app *manager.Server, logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	syncSources := func() {
@@ -116,7 +119,11 @@ func runCRSSourceSync(ctx context.Context, interval time.Duration, app *manager.
 		}
 		logger.Info("crs_source_sync", "channels", "lts,stable")
 	}
-	syncSources()
+	if syncOnStart {
+		syncSources()
+	} else {
+		logger.Info("crs_source_startup_sync_skipped", "reason", "development live reload")
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -171,6 +178,14 @@ func runLogCleanup(ctx context.Context, cfg config.Manager, store *manager.Store
 		if err != nil {
 			logger.Warn("event_cleanup_failed", "error", err)
 		}
+		incidentCtx, cancelIncidents := context.WithTimeout(ctx, 2*time.Minute)
+		incidentDeleted, err := pruneInBatches(func() (int64, error) {
+			return store.PruneIncidents(incidentCtx, now.AddDate(0, 0, -settings.EventDays), 5000)
+		})
+		cancelIncidents()
+		if err != nil {
+			logger.Warn("incident_cleanup_failed", "error", err)
+		}
 		batchCtx, cancelBatches := context.WithTimeout(ctx, 2*time.Minute)
 		batchDeleted, err := pruneInBatches(func() (int64, error) {
 			return store.PruneEventBatches(batchCtx, now.AddDate(0, 0, -settings.EventDays), 5000)
@@ -187,8 +202,8 @@ func runLogCleanup(ctx context.Context, cfg config.Manager, store *manager.Store
 		if err != nil {
 			logger.Warn("audit_cleanup_failed", "error", err)
 		}
-		if eventDeleted != 0 || batchDeleted != 0 || auditDeleted != 0 {
-			logger.Info("log_cleanup", "events_deleted", eventDeleted, "event_batches_deleted", batchDeleted, "audit_logs_deleted", auditDeleted, "event_retention_days", settings.EventDays, "audit_retention_days", settings.AuditDays)
+		if eventDeleted != 0 || incidentDeleted != 0 || batchDeleted != 0 || auditDeleted != 0 {
+			logger.Info("log_cleanup", "events_deleted", eventDeleted, "incidents_deleted", incidentDeleted, "event_batches_deleted", batchDeleted, "audit_logs_deleted", auditDeleted, "event_retention_days", settings.EventDays, "audit_retention_days", settings.AuditDays)
 		}
 	}
 	cleanup()
@@ -198,6 +213,32 @@ func runLogCleanup(ctx context.Context, cfg config.Manager, store *manager.Store
 			return
 		case <-ticker.C:
 			cleanup()
+		}
+	}
+}
+
+func runIncidentBackfill(ctx context.Context, store *manager.Store, logger *slog.Logger) {
+	backfillCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	if err := store.BackfillSecurityIncidents(backfillCtx); err != nil {
+		logger.Warn("security_incident_backfill_failed", "error", err)
+	}
+}
+
+func runIPRuleExpiry(ctx context.Context, app *manager.Server, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		expireCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		err := app.ExpireIPRules(expireCtx)
+		cancel()
+		if err != nil {
+			logger.Warn("ip_rule_expiry_failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
 		}
 	}
 }

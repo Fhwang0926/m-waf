@@ -63,6 +63,7 @@ type Server struct {
 	sourceSyncMu     sync.Mutex
 	runtimeSources   map[string]runtimePolicySource
 	lastCRSSync      time.Time
+	geoIP            *geoIPResolver
 	logger           *slog.Logger
 }
 
@@ -84,17 +85,25 @@ func NewServer(cfg config.Manager, store *Store, logger *slog.Logger) (*Server, 
 		return nil, err
 	}
 	catalog, catalogErr := packages.Load(cfg.BundleRoot, cfg.BundlePublicKey, version.Commit, cfg.BundleAllowUnsigned)
+	geoIP, geoErr := openGeoIPDatabase(cfg.GeoIPDatabase)
+	if geoErr != nil {
+		logger.Warn("geoip_database_unavailable", "path", cfg.GeoIPDatabase, "error", geoErr)
+		geoIP = &geoIPResolver{}
+	}
 	server := &Server{
 		cfg: cfg, instanceID: randomID(), store: store, catalog: catalog, catalogErr: catalogErr, ca: ca, policySigner: policySigner, policyCatalog: policyCatalog, templates: templates,
 		sessions: newSessionManager(cfg.SessionKey), loginLimiter: newLoginLimiter(),
 		bootstrapLimiter: newRequestLimiter(60, time.Minute), installLimiter: newRequestLimiter(60, time.Minute), downloadLimiter: newRequestLimiter(8, time.Minute), logger: logger,
-		policySyncSignal: make(chan struct{}, 1), overviewCache: make(map[string]overviewCacheEntry), runtimeSources: make(map[string]runtimePolicySource),
+		policySyncSignal: make(chan struct{}, 1), overviewCache: make(map[string]overviewCacheEntry), runtimeSources: make(map[string]runtimePolicySource), geoIP: geoIP,
 	}
 	if err := server.loadRuntimePolicySources(); err != nil {
+		_ = geoIP.Close()
 		return nil, fmt.Errorf("load Manager CRS sources: %w", err)
 	}
 	return server, nil
 }
+
+func (s *Server) Close() error { return s.geoIP.Close() }
 
 func (s *Server) TriggerPolicySync() {
 	select {
@@ -322,18 +331,23 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		s.renderAdminError(w, r, http.StatusBadRequest, "기업 필터가 올바르지 않습니다", "활성 기업을 다시 선택하세요.")
 		return
 	}
-	filter, rangeKey := eventFilterFromRequest(r, enterpriseID)
+	eventFilter, rangeKey := eventFilterFromRequest(r, enterpriseID)
+	category := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("category")))
+	if !validateIncidentCategory(category) {
+		category = ""
+	}
+	filter := IncidentFilter{EnterpriseID: enterpriseID, GroupID: eventFilter.GroupID, ServerID: eventFilter.ServerID, Category: category, Severity: eventFilter.Severity, RuleID: eventFilter.RuleID, Query: eventFilter.Query, Blocked: eventFilter.Blocked, Since: eventFilter.Since, CursorAt: eventFilter.CursorAt, CursorID: eventFilter.CursorID, CursorDirection: eventFilter.CursorDirection}
 	page := queryPage(r)
 	const pageSize = 100
 	if filter.CursorDirection == "" {
 		filter.Offset = (page - 1) * pageSize
 	}
-	items, err := s.store.ListEventsFiltered(r.Context(), "", filter, pageSize+1)
+	items, err := s.store.ListIncidents(r.Context(), "", filter, pageSize+1)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "이벤트 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	pageResult := paginateEventRecords(items, pageSize, page, filter.CursorDirection)
+	pageResult := paginateIncidentRecords(items, pageSize, page, filter.CursorDirection)
 	items = pageResult.Items
 	servers, err := s.store.ListServers(r.Context(), enterpriseID, 500)
 	if err != nil {
@@ -345,7 +359,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "이벤트 그룹 필터를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	data := map[string]any{"Events": items, "Servers": servers, "Groups": groups, "Range": rangeKey, "FilterEnterprise": enterpriseID, "FilterGroup": filter.GroupID, "FilterServer": filter.ServerID, "FilterSeverity": filter.Severity, "FilterRuleID": filter.RuleID, "FilterQuery": filter.Query, "FilterResult": r.URL.Query().Get("result"), "FilterChips": eventFilterChips(r, session), "SelectedEvent": r.URL.Query().Get("event"), "Page": page, "HasNext": pageResult.HasNext}
+	data := map[string]any{"Events": items, "Servers": servers, "Groups": groups, "Range": rangeKey, "FilterEnterprise": enterpriseID, "FilterGroup": filter.GroupID, "FilterServer": filter.ServerID, "FilterCategory": category, "FilterQuery": filter.Query, "FilterResult": r.URL.Query().Get("result"), "FilterChips": eventFilterChips(r, session), "SelectedIncident": firstNonEmpty(r.URL.Query().Get("incident"), r.URL.Query().Get("event")), "Page": page, "HasNext": pageResult.HasNext, "Notice": r.URL.Query().Get("notice")}
 	if session.IsSystemAdmin() {
 		enterprises, enterpriseErr := s.store.ListEnterprises(r.Context())
 		if enterpriseErr != nil {
@@ -355,20 +369,48 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		data["Enterprises"] = enterprises
 	}
 	if pageResult.HasPrevious && len(items) != 0 {
-		data["PreviousURL"] = eventPageURL(r, max(page-1, 1), encodeEventCursor(items[0], eventCursorAfter))
+		data["PreviousURL"] = eventPageURL(r, max(page-1, 1), encodeIncidentCursor(items[0], eventCursorAfter))
 	}
 	if pageResult.HasNext && len(items) != 0 {
-		data["NextURL"] = eventPageURL(r, page+1, encodeEventCursor(items[len(items)-1], eventCursorBefore))
+		data["NextURL"] = eventPageURL(r, page+1, encodeIncidentCursor(items[len(items)-1], eventCursorBefore))
 	}
 	_ = s.templates.ExecuteTemplate(w, "events.html", s.viewData(r, "events", data))
 }
 
 func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
 	session := sessionFrom(r)
+	systemPolicyID := truncate(strings.TrimSpace(r.URL.Query().Get("system_policy_id")), 255)
+	filterQuery := truncate(strings.TrimSpace(r.URL.Query().Get("q")), 255)
+	filterStrategy := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("strategy")))
+	filterRollout := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("rollout")))
 	enterpriseID, ok := s.effectiveEnterpriseFilter(r, r.URL.Query().Get("enterprise_id"))
 	if !ok {
 		s.renderAdminError(w, r, http.StatusBadRequest, "기업 필터가 올바르지 않습니다", "활성 기업을 다시 선택하세요.")
 		return
+	}
+	var enterprises []EnterpriseRecord
+	if session.IsSystemAdmin() {
+		var enterpriseErr error
+		enterprises, enterpriseErr = s.store.ListEnterprises(r.Context())
+		if enterpriseErr != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+		if enterpriseID == "" {
+			data := map[string]any{
+				"Policies":                    []EnterprisePolicyRecord{},
+				"PolicyTotal":                 0,
+				"Enterprises":                 enterprises,
+				"FilterEnterprise":            "",
+				"FilterSystemPolicyID":        systemPolicyID,
+				"FilterQuery":                 filterQuery,
+				"FilterStrategy":              filterStrategy,
+				"FilterRollout":               filterRollout,
+				"RequiresEnterpriseSelection": true,
+			}
+			_ = s.templates.ExecuteTemplate(w, "policies.html", s.viewData(r, "policies", data))
+			return
+		}
 	}
 	items, err := s.store.ListEnterprisePolicies(r.Context(), enterpriseID, 500)
 	if err != nil {
@@ -376,7 +418,6 @@ func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	policyTotal := len(items)
-	systemPolicyID := truncate(strings.TrimSpace(r.URL.Query().Get("system_policy_id")), 255)
 	filterLabel := ""
 	if systemPolicyID != "" {
 		filtered := make([]EnterprisePolicyRecord, 0, len(items))
@@ -391,13 +432,10 @@ func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
 			filterLabel = policyTemplate.Name + " " + policyTemplate.Version
 		}
 	}
-	filterQuery := truncate(strings.TrimSpace(r.URL.Query().Get("q")), 255)
-	filterStrategy := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("strategy")))
-	filterRollout := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("rollout")))
 	query := strings.ToLower(filterQuery)
 	filtered := make([]EnterprisePolicyRecord, 0, len(items))
 	for _, item := range items {
-		if query != "" && !strings.Contains(strings.ToLower(item.Name+" "+item.Description+" "+item.EnterpriseName+" "+item.TargetLabel()), query) {
+		if query != "" && !strings.Contains(strings.ToLower(item.Name+" "+item.Description+" "+item.TargetLabel()), query) {
 			continue
 		}
 		if filterStrategy != "" && item.UpdateStrategy != filterStrategy {
@@ -408,14 +446,9 @@ func (s *Server) policies(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered = append(filtered, item)
 	}
-	hasPolicyFilter := strings.TrimSpace(r.URL.Query().Get("enterprise_id")) != "" || systemPolicyID != "" || filterQuery != "" || filterStrategy != "" || filterRollout != ""
+	hasPolicyFilter := systemPolicyID != "" || filterQuery != "" || filterStrategy != "" || filterRollout != ""
 	data := map[string]any{"Policies": filtered, "PolicyTotal": policyTotal, "FilterEnterprise": enterpriseID, "FilterSystemPolicyID": systemPolicyID, "FilterSystemPolicyLabel": filterLabel, "FilterQuery": filterQuery, "FilterStrategy": filterStrategy, "FilterRollout": filterRollout, "HasPolicyFilter": hasPolicyFilter}
 	if session.IsSystemAdmin() {
-		enterprises, enterpriseErr := s.store.ListEnterprises(r.Context())
-		if enterpriseErr != nil {
-			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 목록을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-			return
-		}
 		data["Enterprises"] = enterprises
 	}
 	_ = s.templates.ExecuteTemplate(w, "policies.html", s.viewData(r, "policies", data))
@@ -427,6 +460,7 @@ func (s *Server) newPolicy(w http.ResponseWriter, r *http.Request) {
 
 func policyFormState(r *http.Request) map[string]any {
 	return map[string]any{
+		"FormEnterpriseID":          strings.TrimSpace(r.FormValue("enterprise_id")),
 		"FormTemplateKey":           strings.TrimSpace(r.FormValue("template_key")),
 		"FormName":                  truncate(strings.TrimSpace(r.FormValue("name")), 255),
 		"FormDescription":           truncate(strings.TrimSpace(r.FormValue("description")), 1024),
@@ -458,13 +492,23 @@ func policyFormState(r *http.Request) map[string]any {
 }
 
 func (s *Server) renderPolicyForm(w http.ResponseWriter, r *http.Request, status int, pageError string, form map[string]any) {
-	session := sessionFrom(r)
-	servers, err := s.store.ListServers(r.Context(), session.ScopeEnterpriseID(), 500)
+	requestedEnterpriseID := strings.TrimSpace(r.URL.Query().Get("enterprise_id"))
+	if value, exists := form["FormEnterpriseID"]; exists {
+		if formEnterpriseID, valueOK := value.(string); valueOK && strings.TrimSpace(formEnterpriseID) != "" {
+			requestedEnterpriseID = strings.TrimSpace(formEnterpriseID)
+		}
+	}
+	enterpriseID, scopeOK := s.effectiveEnterpriseFilter(r, requestedEnterpriseID)
+	if !scopeOK || enterpriseID == "" {
+		s.renderAdminError(w, r, http.StatusBadRequest, "운영 기업을 선택해야 합니다", "보호 정책 목록에서 기업을 선택한 뒤 다시 시도하세요.")
+		return
+	}
+	servers, err := s.store.ListServers(r.Context(), enterpriseID, 500)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "정책 대상을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	groups, err := s.store.ListGroups(r.Context(), session.ScopeEnterpriseID())
+	groups, err := s.store.ListGroups(r.Context(), enterpriseID)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
@@ -484,8 +528,27 @@ func (s *Server) renderPolicyForm(w http.ResponseWriter, r *http.Request, status
 		s.renderAdminError(w, r, http.StatusInternalServerError, "시스템 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
+	targetEnterprises, err := s.store.ListEnterprises(r.Context())
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 범위를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	allEnterprises := targetEnterprises
+	targetEnterpriseIDs := make(map[string]bool)
+	for _, server := range servers {
+		if !server.Revoked {
+			targetEnterpriseIDs[server.EnterpriseID] = true
+		}
+	}
+	filteredEnterprises := make([]EnterpriseRecord, 0, 1)
+	for _, enterprise := range targetEnterprises {
+		if targetEnterpriseIDs[enterprise.ID] && enterprise.ID == enterpriseID {
+			filteredEnterprises = append(filteredEnterprises, enterprise)
+		}
+	}
+	targetEnterprises = filteredEnterprises
 	data := map[string]any{
-		"Servers": servers, "Groups": groups, "PolicyTemplates": policyTemplates, "DefaultTemplate": defaultTemplate,
+		"Servers": servers, "Groups": groups, "PolicyTargetEnterprises": targetEnterprises, "PolicyTemplates": policyTemplates, "DefaultTemplate": defaultTemplate,
 		"Error": pageError, "FormTemplateKey": defaultTemplate.Key, "FormStrategy": PolicyStrategyManual, "FormMode": defaultTemplate.Defaults.Mode,
 		"FormParanoia": strconv.Itoa(defaultTemplate.Defaults.ParanoiaLevel), "FormExecutingParanoia": strconv.Itoa(defaultTemplate.Defaults.ExecutingParanoiaLevel),
 		"FormScore": strconv.Itoa(defaultTemplate.Defaults.InboundScore), "FormOutboundScore": strconv.Itoa(defaultTemplate.Defaults.OutboundScore),
@@ -496,6 +559,9 @@ func (s *Server) renderPolicyForm(w http.ResponseWriter, r *http.Request, status
 	for key, value := range form {
 		data[key] = value
 	}
+	data["FormEnterpriseID"] = enterpriseID
+	data["FilterEnterpriseID"] = enterpriseID
+	data["Enterprises"] = allEnterprises
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
@@ -570,7 +636,12 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := sessionFrom(r)
-	enterpriseID, serverIDs, err := s.store.ResolvePolicyTarget(r.Context(), session.ScopeEnterpriseID(), target)
+	selectedEnterpriseID, ok := s.requestEnterpriseID(r)
+	if !ok {
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "운영 기업을 다시 선택하세요.", form)
+		return
+	}
+	enterpriseID, serverIDs, err := s.store.ResolvePolicyTarget(r.Context(), selectedEnterpriseID, target)
 	if err != nil {
 		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 대상을 찾을 수 없습니다: "+err.Error(), form)
 		return
@@ -1006,9 +1077,18 @@ func (s *Server) eventBatch(w http.ResponseWriter, r *http.Request) {
 			event.OccurredAt = now
 		}
 		event.URI = truncate(event.URI, 2048)
+		event.RequestID = truncate(strings.TrimSpace(event.RequestID), 128)
+		event.TransactionID = truncate(strings.TrimSpace(event.TransactionID), 255)
+		event.Service = truncate(strings.TrimSpace(event.Service), 255)
+		event.Method = truncate(strings.TrimSpace(event.Method), 16)
+		event.ClientIP, _ = canonicalEventIP(event.ClientIP)
+		event.CountryCode = s.geoIP.CountryCode(event.ClientIP)
 		event.Message = truncate(event.Message, 2048)
+		event.MatchedVariable = truncate(strings.TrimSpace(event.MatchedVariable), 512)
 		event.RuleID = truncate(event.RuleID, 64)
+		event.RuleTags = normalizeEventRuleTags(event.RuleTags)
 	}
+	s.enrichEventRuleTags(r.Context(), batch.Events)
 	duplicate, err := s.store.InsertEventBatch(r.Context(), agentIDFrom(r), batch)
 	if err != nil {
 		w.Header().Set("Retry-After", "5")
@@ -1016,6 +1096,16 @@ func (s *Server) eventBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": true, "duplicate": duplicate, "count": len(batch.Events)})
+}
+
+func (s *Server) unregisterAgent(w http.ResponseWriter, r *http.Request) {
+	serverID := agentIDFrom(r)
+	if err := s.store.UnregisterAgent(r.Context(), serverID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writeProblem(w, http.StatusServiceUnavailable, "agent unregister unavailable")
+		return
+	}
+	_ = s.store.Audit(r.Context(), requestID(r), "agent:"+serverID, "agent.unregister", serverID, "success", remoteIP(r))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) requireAdmin(next http.Handler) http.Handler {
@@ -1045,9 +1135,45 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		data.Username = user.Username
 		data.DisplayName = user.DisplayName
 		data.Role = user.Role
+		data.ActualRole = user.Role
+		data.ConsoleArea = ""
 		data.EnterpriseID = user.EnterpriseID
 		data.EnterpriseName = user.EnterpriseName
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextSession, data)))
+	})
+}
+
+func (s *Server) requireEnterpriseConsole(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data := sessionFrom(r).asEnterpriseConsole()
+		r = r.WithContext(context.WithValue(r.Context(), contextSession, data))
+		if strings.TrimSpace(data.EnterpriseID) == "" {
+			s.renderAdminError(w, r, http.StatusForbidden, "소속 기업을 확인할 수 없습니다", "기업 운영을 사용하려면 시스템 관리자 계정에도 소속 기업이 필요합니다.")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) requireSystemConsole(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data := sessionFrom(r)
+		if !data.CanAccessSystemManagement() {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		data = data.asSystemConsole()
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextSession, data)))
+	})
+}
+
+func (s *Server) requireAccountConsole(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("area") == string(ConsoleAreaSystem) {
+			s.requireSystemConsole(next).ServeHTTP(w, r)
+			return
+		}
+		s.requireEnterpriseConsole(next).ServeHTTP(w, r)
 	})
 }
 
@@ -1092,6 +1218,21 @@ func (s *Server) requireAgent(next http.Handler) http.Handler {
 	})
 }
 
+func (s *Server) requireEventVerification(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimSpace(r.Header.Get(protocol.EventVerificationHeader))
+		if token == "" {
+			writeProblem(w, http.StatusUnauthorized, "event verification token required")
+			return
+		}
+		if err := s.store.AuthorizeEventIngestToken(r.Context(), agentIDFrom(r), token); err != nil {
+			writeProblem(w, http.StatusUnauthorized, "event verification token is invalid")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) validCSRF(r *http.Request) bool {
 	if err := r.ParseForm(); err != nil {
 		return false
@@ -1104,6 +1245,10 @@ func (s *Server) validCSRF(r *http.Request) bool {
 }
 
 func (s *Server) audit(r *http.Request, actor, action, target, result string) {
+	session := sessionFrom(r)
+	if session.ConsoleArea == ConsoleAreaEnterprise && session.CanAccessSystemManagement() && !session.IsSystemAdmin() {
+		target += "|console=enterprise|effective_role=" + string(session.Role) + "|enterprise=" + session.EnterpriseID
+	}
 	if err := s.store.Audit(r.Context(), requestID(r), actor, action, target, result, remoteIP(r)); err != nil {
 		s.logger.Error("admin audit write failed", "request_id", requestID(r), "actor", actor, "action", action, "error", err)
 	}

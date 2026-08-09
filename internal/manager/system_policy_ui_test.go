@@ -50,6 +50,9 @@ func TestSystemPolicyMigrationTemplateUsesGuidedWizard(t *testing.T) {
 	if strings.Count(html, `data-wizard-panel="`) != 5 || !strings.Contains(html, "data-system-policy-wizard") {
 		t.Fatalf("system policy wizard structure is incomplete: %s", html)
 	}
+	if strings.Count(html, "data-step-status") != 5 || strings.Count(html, "data-step-error-count hidden") != 5 {
+		t.Fatalf("system policy wizard step states are incomplete: %s", html)
+	}
 	for _, text := range []string{"기준 선택", "변경 확인", "보호 설정", "예외·Rule", "검증·게시", "고급 CRS 설정", "고급 예외 및 사용자 Rule"} {
 		if !strings.Contains(html, text) {
 			t.Fatalf("system policy wizard is missing %q", text)
@@ -65,8 +68,71 @@ func TestSystemPolicyMigrationTemplateUsesGuidedWizard(t *testing.T) {
 			t.Fatalf("system policy context recovery is missing %q", marker)
 		}
 	}
+	for _, marker := range []string{`name="confirm_changed_rules"`, "required data-wizard-confirm", `data-confirm-fields="confirm_changed_rules`} {
+		if !strings.Contains(html, marker) {
+			t.Fatalf("system policy change confirmation gate is missing %q", marker)
+		}
+	}
 	if strings.Contains(html, "검증된 CRS로 마이그레이션") || strings.Contains(html, "migration-steps") {
 		t.Fatalf("legacy migration UI is still exposed: %s", html)
+	}
+}
+
+func TestSystemPolicyVersionWithdrawalEligibility(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy SystemPolicyVersionRecord
+		want   bool
+	}{
+		{name: "unused published", policy: SystemPolicyVersionRecord{Status: systempolicy.StatusPublished}, want: true},
+		{name: "unused deprecated", policy: SystemPolicyVersionRecord{Status: systempolicy.StatusDeprecated}, want: true},
+		{name: "enterprise using", policy: SystemPolicyVersionRecord{Status: systempolicy.StatusPublished, EnterpriseCount: 1}},
+		{name: "rollout active", policy: SystemPolicyVersionRecord{Status: systempolicy.StatusPublished, ActiveRolloutCount: 1}},
+		{name: "already withdrawn", policy: SystemPolicyVersionRecord{Status: systempolicy.StatusWithdrawn}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.policy.CanWithdraw(); got != test.want {
+				t.Fatalf("CanWithdraw() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCurrentSystemPolicyTitleLinksToCRSSource(t *testing.T) {
+	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := systemPolicyVersionView{SystemPolicyVersionRecord: SystemPolicyVersionRecord{
+		ID: "crs-baseline@1.0.0", Name: "OWASP CRS 4.25.1 시스템 보호 정책", CRSVersion: "4.25.1", CRSTrack: "lts", Status: systempolicy.StatusPublished,
+		Defaults: systempolicy.Defaults{CRSSource: &systempolicy.PolicySourceRef{ID: "owasp-crs-lts-4.25.1"}},
+	}}
+	data := map[string]any{
+		"Active": "system-policies", "Session": sessionData{DisplayName: "Operator", Role: RoleSystemAdmin},
+		"CSRF": "token", "IsSystemAdmin": true, "CanOperate": true, "CanManageUsers": true,
+		"Tab": "policies", "HasCurrentPolicy": true, "CurrentPolicy": current,
+		"Summary": systemPolicyOperationsSummary{}, "Lifecycle": systemPolicyLifecycleView{}, "PublishedResult": systemPolicyPublishedResult{},
+	}
+	var output bytes.Buffer
+	if err := templates.ExecuteTemplate(&output, "system-policies.html", data); err != nil {
+		t.Fatal(err)
+	}
+	html := output.String()
+	if !strings.Contains(html, `<a class="system-policy-source-link" href="/open-source-policies/owasp-crs-lts-4.25.1" title="CRS 원본 상세로 이동">`) || !strings.Contains(html, `class="system-policy-source-link-icon"`) {
+		t.Fatalf("current system policy title does not link to the CRS source: %s", html)
+	}
+	if strings.Contains(html, "CRS 원본 확인") {
+		t.Fatalf("duplicate CRS source action remains: %s", html)
+	}
+}
+
+func TestNextSystemPolicyVersionAfterWithdrawal(t *testing.T) {
+	if got := nextSystemPolicyVersionAfter(nil); got != "1.0.0" {
+		t.Fatalf("empty history next version = %s", got)
+	}
+	if got := nextSystemPolicyVersionAfter([]string{"1.0.1", "1.0.0", "1.0.2"}); got != "1.0.3" {
+		t.Fatalf("withdrawn history next version = %s", got)
 	}
 }
 
@@ -85,7 +151,7 @@ func TestSystemPolicyMigrationTemplateBlocksWithoutSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := output.String()
-	if !strings.Contains(html, "검증된 CRS 소스가 없습니다") || !strings.Contains(html, "CRS 소스 확인") {
+	if !strings.Contains(html, "검증된 CRS 소스가 없습니다") || !strings.Contains(html, "CRS 관리로 이동") {
 		t.Fatalf("missing source guidance was not rendered: %s", html)
 	}
 	if strings.Contains(html, "data-system-policy-wizard") {
@@ -111,7 +177,7 @@ func TestSystemPolicyMigrationTemplateAllowsFirstManagerPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := output.String()
-	if !strings.Contains(html, "최초 시스템 정책 만들기") || !strings.Contains(html, `name="source_id" value="crs-stable"`) || !strings.Contains(html, "data-system-policy-wizard") {
+	if !strings.Contains(html, "최초 시스템 정책 설정") || !strings.Contains(html, `name="source_id" value="crs-stable"`) || !strings.Contains(html, "data-system-policy-wizard") {
 		t.Fatalf("first Manager policy wizard is incomplete: %s", html)
 	}
 }
@@ -119,7 +185,7 @@ func TestSystemPolicyMigrationTemplateAllowsFirstManagerPolicy(t *testing.T) {
 func TestBuildSystemPolicyLifecycleSelectsNaturalAction(t *testing.T) {
 	sources := []model.PolicySourceArtifact{{ID: "crs-new", Version: "4.18.0"}, {ID: "crs-current", Version: "4.17.1"}}
 	initial := buildSystemPolicyLifecycle(nil, sources, systempolicy.Template{})
-	if initial.CreateLabel != "CRS 소스 확인" || initial.CreateURL != "/open-source-policies" {
+	if initial.CreateLabel != "CRS 관리" || initial.CreateURL != "/open-source-policies" {
 		t.Fatalf("initial lifecycle action = %#v", initial)
 	}
 	current := systempolicy.Template{
@@ -128,11 +194,11 @@ func TestBuildSystemPolicyLifecycleSelectsNaturalAction(t *testing.T) {
 	}
 	items := []SystemPolicyVersionRecord{{ID: current.Reference(), EnterpriseCount: 3, ServerCount: 12}}
 	upgrade := buildSystemPolicyLifecycle(items, sources, current)
-	if !upgrade.HasNewSource || upgrade.CreateLabel != "새 CRS로 정책 버전 만들기" || upgrade.CurrentEnterpriseCount != 3 || upgrade.CurrentServerCount != 12 {
+	if !upgrade.HasNewSource || upgrade.CreateLabel != "시스템 정책 검토" || upgrade.CurrentEnterpriseCount != 3 || upgrade.CurrentServerCount != 12 {
 		t.Fatalf("upgrade lifecycle = %#v", upgrade)
 	}
 	currentOnly := buildSystemPolicyLifecycle(items, sources[1:], current)
-	if currentOnly.HasNewSource || currentOnly.CreateLabel != "CRS 버전 관리" || currentOnly.CreateURL != "/open-source-policies" {
+	if currentOnly.HasNewSource || currentOnly.CreateLabel != "시스템 정책 수정" || !strings.HasPrefix(currentOnly.CreateURL, "/system-policies/migrations/new?") {
 		t.Fatalf("settings-only lifecycle = %#v", currentOnly)
 	}
 }
@@ -191,7 +257,7 @@ func TestSystemPolicyPublishedURLIncludesResultReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if location.Path != "/system-policies" || location.Query().Get("published") != candidate.Reference() || !strings.Contains(location.Query().Get("notice"), candidate.Reference()) {
+	if location.Path != "/system-policies" || location.Query().Get("published") != candidate.Reference() || !strings.Contains(location.Query().Get("notice"), "OWASP CRS 4.18.0") || !strings.Contains(location.Query().Get("notice"), "시스템 정책") {
 		t.Fatalf("published location = %s", location.String())
 	}
 }

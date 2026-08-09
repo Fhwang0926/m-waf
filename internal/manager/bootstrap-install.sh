@@ -4,6 +4,7 @@ set -eu
 manager=""
 token=""
 install_token=""
+event_verification_token=""
 install_token_file=""
 install_token_stdin=0
 ca_file=""
@@ -74,6 +75,7 @@ if [ -z "$token" ]; then
   [ -n "$install_token" ] || { echo "enterprise install token is empty" >&2; exit 2; }
 fi
 [ ! -s /var/lib/mwaf-agent/server-id ] || { echo "this server is already enrolled; use the existing M-WAF Agent identity" >&2; exit 1; }
+if [ -n "$install_token" ]; then event_verification_token=$install_token; else event_verification_token=$token; fi
 case "$integration_mode" in distro|external) ;; *) echo "--integration must be distro or external" >&2; exit 2 ;; esac
 case "$installation_mode" in package|manual) ;; *) echo "--module-install must be package or manual" >&2; exit 2 ;; esac
 if [ "$installation_mode" = manual ] && [ "$integration_mode" != external ]; then
@@ -204,28 +206,15 @@ case "$os_id" in
   *) echo "unsupported distribution: $os_id" >&2; exit 1 ;;
 esac
 
-if [ "$integration_mode" = external ] && [ "$installation_mode" = package ]; then
-  [ -x /usr/lib/mwaf/configure-external ] || { echo "external integration helper is missing from module package" >&2; exit 1; }
-  set -- --webserver "$web_server" --binary "$web_cmd" --integration-config "$integration_config" --audit-log "$audit_log" --web-group "$web_group"
-  if [ -n "$modsecurity_base" ]; then set -- "$@" --modsecurity-base "$modsecurity_base"; fi
-  if [ "$reload_web_server" -eq 1 ]; then set -- "$@" --reload; fi
-  /usr/lib/mwaf/configure-external "$@"
-fi
-
 if [ "$installation_mode" = manual ]; then
-  marker="# Managed by M-WAF manual integration."
   if [ "$web_server" = apache ]; then
     "$web_cmd" -M 2>&1 | grep -q security2_module || { echo "Apache security2_module is not loaded" >&2; exit 1; }
   else
     { "$web_cmd" -V; "$web_cmd" -T; } 2>&1 | grep -Eq 'modsecurity|ngx_http_modsecurity_module' || { echo "Nginx ModSecurity connector is not loaded" >&2; exit 1; }
   fi
-  install -d -m 0750 /etc/mwaf/revisions/manual-bootstrap
-  if [ ! -e /etc/mwaf/active ]; then
-    printf '%s\n' '# Managed by M-WAF Agent.' 'SecRuleEngine DetectionOnly' 'SecRequestBodyAccess On' > /etc/mwaf/revisions/manual-bootstrap/00-engine.conf
-    printf '%s\n' '# Compatibility entry managed by M-WAF Agent.' > /etc/mwaf/revisions/manual-bootstrap/main.conf
-    chmod 0640 /etc/mwaf/revisions/manual-bootstrap/*.conf
-    ln -s /etc/mwaf/revisions/manual-bootstrap /etc/mwaf/active
-  fi
+  install -d -m 0750 /etc/mwaf/active
+  if [ ! -f /etc/mwaf/active/main.conf ]; then printf '%s\n' '# Policy staging placeholder. Not included by the web server.' > /etc/mwaf/active/main.conf; fi
+  chmod 0640 /etc/mwaf/active/main.conf
   install -d -o root -g "$web_group" -m 0770 "$(dirname "$audit_log")"
   touch "$audit_log"
   chown root:"$web_group" "$audit_log"
@@ -243,71 +232,18 @@ $audit_log {
     su root $web_group
 }
 EOF
-  integration_backup="$tmp_dir/integration.backup"
-  integration_existed=0
-  if [ -e "$integration_config" ]; then
-    grep -Fqx "$marker" "$integration_config" || { echo "refusing to replace an unmanaged integration config: $integration_config" >&2; exit 1; }
-    cp -p "$integration_config" "$integration_backup"
-    integration_existed=1
-  fi
-  install -d -m 0755 "$(dirname "$integration_config")"
-  if [ "$web_server" = apache ]; then
-    cat > "$integration_config" <<EOF
-$marker
-<IfModule security2_module>
-    SecAuditEngine RelevantOnly
-    SecAuditLogRelevantStatus "^(?:5|4(?!04))"
-    SecAuditLogParts ABIJDEFHZ
-    SecAuditLogType Serial
-    SecAuditLog $audit_log
-    SecAuditLogFormat JSON
-    Include /etc/mwaf/active/*.conf
-</IfModule>
-EOF
-  else
-    install -d -m 0750 /etc/mwaf/manual
-    engine_config=/etc/mwaf/manual/modsecurity.conf
-    {
-      printf '%s\n' "$marker"
-      if [ -n "$modsecurity_base" ]; then printf 'Include %s\n' "$modsecurity_base"; fi
-      printf '%s\n' \
-        'SecAuditEngine RelevantOnly' \
-        'SecAuditLogRelevantStatus "^(?:5|4(?!04))"' \
-        'SecAuditLogParts ABIJDEFHZ' \
-        'SecAuditLogType Serial' \
-        "SecAuditLog $audit_log" \
-        'SecAuditLogFormat JSON' \
-        'Include /etc/mwaf/active/*.conf'
-    } > "$engine_config"
-    cat > "$integration_config" <<EOF
-$marker
-modsecurity on;
-modsecurity_rules_file $engine_config;
-EOF
-  fi
-  chmod 0640 "$integration_config"
-  if [ "$web_server" = apache ]; then
-    configtest_output=$("$web_cmd" configtest 2>&1) || configtest_status=$?
-  else
-    configtest_output=$("$web_cmd" -t 2>&1) || configtest_status=$?
-  fi
-  if [ "${configtest_status:-0}" -ne 0 ]; then
-    if [ "$integration_existed" -eq 1 ]; then cp -p "$integration_backup" "$integration_config"; else rm -f "$integration_config"; fi
-    echo "web-server configtest failed; manual M-WAF config was restored: $configtest_output" >&2
-    exit 1
-  fi
   install -d -m 0750 /var/lib/mwaf-agent
   printf '%s\n' "manual:$web_server:$web_version:$web_build" > /var/lib/mwaf-agent/connector.version
   chmod 0640 /var/lib/mwaf-agent/connector.version
-  if [ "$reload_web_server" -eq 1 ]; then
-    if [ "$web_server" = apache ]; then "$web_cmd" graceful; else "$web_cmd" -s reload; fi
-  fi
 fi
 
 install -d -m 0750 /etc/mwaf-agent /var/lib/mwaf-agent /var/lib/mwaf-agent/spool
 install -m 0644 "$ca_file" /etc/mwaf-agent/manager-ca.crt
 printf '%s\n' "$token" > /etc/mwaf-agent/enrollment.token
 chmod 0600 /etc/mwaf-agent/enrollment.token
+printf '%s\n' "$event_verification_token" > /etc/mwaf-agent/event-verification.token
+chmod 0600 /etc/mwaf-agent/event-verification.token
+event_verification_token=""
 cat > /etc/mwaf-agent/agent.json <<EOF
 {
   "manager_url": "$(json_escape "$manager")",
@@ -317,6 +253,7 @@ cat > /etc/mwaf-agent/agent.json <<EOF
   "integration_mode": "$(json_escape "$integration_mode")",
   "installation_mode": "$(json_escape "$installation_mode")",
   "enrollment_token_file": "/etc/mwaf-agent/enrollment.token",
+  "event_verification_token_file": "/etc/mwaf-agent/event-verification.token",
   "ca_certificate": "/etc/mwaf-agent/manager-ca.crt",
   "certificate": "/var/lib/mwaf-agent/agent.crt",
   "private_key": "/var/lib/mwaf-agent/agent.key",
@@ -336,4 +273,76 @@ cat > /etc/mwaf-agent/agent.json <<EOF
 EOF
 chmod 0640 /etc/mwaf-agent/agent.json
 systemctl enable --now mwaf-agent
-echo "M-WAF Agent and $web_server $integration_mode/$installation_mode integration were installed"
+
+policy_ready=0
+policy_wait=0
+while [ "$policy_wait" -lt 90 ]; do
+  if [ -L /etc/mwaf/active ] && [ -s /var/lib/mwaf-agent/desired-state.json ]; then policy_ready=1; break; fi
+  systemctl is-active --quiet mwaf-agent || { echo "M-WAF Agent stopped before the initial policy was applied" >&2; exit 1; }
+  sleep 2
+  policy_wait=$((policy_wait + 2))
+done
+if [ "$policy_ready" -ne 1 ]; then
+  systemctl disable --now mwaf-agent >/dev/null 2>&1 || true
+  echo "initial signed LTS policy was not applied; web-server integration remains disabled" >&2
+  exit 1
+fi
+
+if [ "$integration_mode" = external ]; then
+  [ -x /usr/lib/mwaf/configure-external ] || { echo "external integration helper is missing" >&2; exit 1; }
+  set -- --webserver "$web_server" --binary "$web_cmd" --integration-config "$integration_config" --audit-log "$audit_log" --web-group "$web_group" --reload
+  if [ -n "$modsecurity_base" ]; then set -- "$@" --modsecurity-base "$modsecurity_base"; fi
+  /usr/lib/mwaf/configure-external "$@"
+elif [ "$web_server" = apache ]; then
+  a2enconf mwaf >/dev/null
+  if ! apachectl configtest; then a2disconf mwaf >/dev/null; echo "Apache configtest failed; M-WAF include was disabled" >&2; exit 1; fi
+  if systemctl is-active --quiet apache2; then systemctl reload apache2; fi
+  integration_config=/etc/apache2/conf-available/mwaf.conf
+else
+  [ -r /usr/share/mwaf/integration/nginx.conf ] && [ -r /usr/share/mwaf/integration/modsecurity-nginx.conf ] || { echo "Nginx integration files are missing" >&2; exit 1; }
+  if [ -e /etc/nginx/conf.d/mwaf.conf ] && ! cmp -s /etc/nginx/conf.d/mwaf.conf /usr/share/mwaf/integration/nginx.conf; then echo "refusing to replace unmanaged /etc/nginx/conf.d/mwaf.conf" >&2; exit 1; fi
+  install -d -m 0750 /etc/mwaf/nginx
+  install -m 0644 /usr/share/mwaf/integration/modsecurity-nginx.conf /etc/mwaf/nginx/modsecurity.conf
+  install -m 0644 /usr/share/mwaf/integration/nginx.conf /etc/nginx/conf.d/mwaf.conf
+  if ! nginx -t; then rm -f /etc/nginx/conf.d/mwaf.conf; echo "Nginx configtest failed; M-WAF include was removed" >&2; exit 1; fi
+  if systemctl is-active --quiet nginx; then systemctl reload nginx; fi
+  integration_config=/etc/nginx/conf.d/mwaf.conf
+fi
+
+install -d -m 0750 /var/lib/mwaf
+integration_sha=""
+if [ -r "$integration_config" ]; then integration_sha=$(hash_text < "$integration_config"); fi
+integration_package=""
+if [ "$installation_mode" = package ]; then integration_package="mwaf-modsecurity-$web_server"; fi
+if [ "$installation_mode:$integration_mode" = package:external ]; then integration_package="$integration_package-external"; fi
+cat > /var/lib/mwaf/install-state.json <<EOF
+{
+  "schema_version": 1,
+  "web_server": "$(json_escape "$web_server")",
+  "integration_mode": "$(json_escape "$integration_mode")",
+  "installation_mode": "$(json_escape "$installation_mode")",
+  "integration_config": "$(json_escape "$integration_config")",
+  "integration_sha256": "$integration_sha",
+  "agent_package": "mwaf-agent",
+  "integration_package": "$(json_escape "$integration_package")",
+  "managed_files": [{"path":"$(json_escape "$integration_config")","sha256":"$integration_sha"},{"path":"/etc/mwaf/active","sha256":"signed-policy-symlink"}],
+  "active_policy": "/etc/mwaf/active",
+  "backup_directory": "/etc/mwaf/disabled"
+}
+EOF
+chmod 0600 /var/lib/mwaf/install-state.json
+desired_revision=$(sed -n 's/.*"revision_id": "\([^"]*\)".*/\1/p' /var/lib/mwaf-agent/desired-state.json | head -n 1)
+heartbeat_confirmed=0
+heartbeat_wait=0
+while [ "$heartbeat_wait" -lt 90 ]; do
+  if [ -n "$desired_revision" ] && [ -r /var/lib/mwaf-agent/last-heartbeat-policy ] && [ "$(sed -n '1p' /var/lib/mwaf-agent/last-heartbeat-policy)" = "$desired_revision" ]; then heartbeat_confirmed=1; break; fi
+  systemctl is-active --quiet mwaf-agent || break
+  sleep 2
+  heartbeat_wait=$((heartbeat_wait + 2))
+done
+if [ "$heartbeat_confirmed" -ne 1 ]; then
+  /usr/sbin/mwaf-uninstall --package-prerm >/dev/null 2>&1 || true
+  echo "Manager가 적용 개정본 heartbeat를 확인하지 못해 웹서버 연동을 비활성화했습니다." >&2
+  exit 1
+fi
+echo "M-WAF Agent and $web_server $integration_mode/$installation_mode integration were installed after the signed LTS policy was applied"

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -139,10 +140,12 @@ func parseAuditLine(line []byte) []model.SecurityEvent {
 	var entry struct {
 		Transaction struct {
 			UniqueID string `json:"unique_id"`
+			ClientIP string `json:"client_ip"`
 			Time     string `json:"time_stamp"`
 			Request  struct {
-				Method string `json:"method"`
-				URI    string `json:"uri"`
+				Method   string `json:"method"`
+				URI      string `json:"uri"`
+				ClientIP string `json:"client_ip"`
 			} `json:"request"`
 			Response struct {
 				HTTPCode int `json:"http_code"`
@@ -152,6 +155,8 @@ func parseAuditLine(line []byte) []model.SecurityEvent {
 				Details struct {
 					RuleID   json.RawMessage `json:"ruleId"`
 					Severity string          `json:"severity"`
+					Match    string          `json:"match"`
+					Tags     []string        `json:"tags"`
 				} `json:"details"`
 			} `json:"messages"`
 		} `json:"transaction"`
@@ -164,6 +169,11 @@ func parseAuditLine(line []byte) []model.SecurityEvent {
 		when = parsed.UTC()
 	}
 	base := sha256.Sum256(line)
+	requestID := hex.EncodeToString(base[:])
+	clientIP := strings.TrimSpace(entry.Transaction.ClientIP)
+	if clientIP == "" {
+		clientIP = strings.TrimSpace(entry.Transaction.Request.ClientIP)
+	}
 	blocked := entry.Transaction.Response.HTTPCode == httpForbidden
 	for _, message := range entry.Transaction.Messages {
 		ruleID := strings.Trim(string(message.Details.RuleID), `"`)
@@ -177,11 +187,36 @@ func parseAuditLine(line []byte) []model.SecurityEvent {
 	for i, message := range entry.Transaction.Messages {
 		ruleID := strings.Trim(string(message.Details.RuleID), `"`)
 		result = append(result, model.SecurityEvent{
-			EventID: fmt.Sprintf("%s-%d", hex.EncodeToString(base[:]), i), OccurredAt: when,
+			EventID: fmt.Sprintf("%s-%d", requestID, i), RequestID: requestID, OccurredAt: when,
 			TransactionID: entry.Transaction.UniqueID, Method: entry.Transaction.Request.Method, URI: entry.Transaction.Request.URI,
-			StatusCode: entry.Transaction.Response.HTTPCode, RuleID: ruleID, Message: message.Message,
+			ClientIP: clientIP, StatusCode: entry.Transaction.Response.HTTPCode, RuleID: ruleID, Message: message.Message,
+			MatchedVariable: auditMatchedVariable(message.Details.Match), RuleTags: uniqueAuditTags(message.Details.Tags),
 			Severity: message.Details.Severity, Blocked: blocked,
 		})
+	}
+	return result
+}
+
+var auditVariablePattern = regexp.MustCompile("(?i)against variable [`']?([^`' ]+)")
+
+func auditMatchedVariable(match string) string {
+	parts := auditVariablePattern.FindStringSubmatch(match)
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func uniqueAuditTags(tags []string) []string {
+	seen := make(map[string]bool, len(tags))
+	result := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		result = append(result, tag)
 	}
 	return result
 }

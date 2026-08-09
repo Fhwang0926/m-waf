@@ -147,3 +147,20 @@ func TestAuditReaderContinuesOversizedTransaction(t *testing.T) {
 		t.Fatalf("unexpected second part: events=%#v position=%#v", second, secondPosition)
 	}
 }
+
+func TestParseAuditLineAddsRequestContextWithoutMatchedValue(t *testing.T) {
+	line := []byte(`{"transaction":{"unique_id":"tx-1","client_ip":"203.0.113.7","time_stamp":"2026-08-06T01:02:03Z","request":{"method":"POST","uri":"/login"},"response":{"http_code":403},"messages":[{"message":"SQL injection detected","details":{"ruleId":"942100","severity":"2","match":"Matched operator against variable 'ARGS:password' value 'secret'","tags":["attack-sqli","attack-sqli",""]}},{"message":"Inbound Anomaly Score Exceeded","details":{"ruleId":"949110","severity":"2","tags":["evaluation"]}}]}}`)
+	events := parseAuditLine(line)
+	if len(events) != 2 || events[0].RequestID == "" || events[0].RequestID != events[1].RequestID {
+		t.Fatalf("messages from one transaction must share a request ID: %#v", events)
+	}
+	if events[0].ClientIP != "203.0.113.7" || events[0].MatchedVariable != "ARGS:password" {
+		t.Fatalf("request context was not extracted: %#v", events[0])
+	}
+	if len(events[0].RuleTags) != 1 || events[0].RuleTags[0] != "attack-sqli" {
+		t.Fatalf("Rule tags were not normalized: %#v", events[0].RuleTags)
+	}
+	if strings.Contains(events[0].MatchedVariable, "secret") {
+		t.Fatal("matched values must never be stored in the event payload")
+	}
+}
