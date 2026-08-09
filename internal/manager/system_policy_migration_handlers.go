@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Fhwang0926/m-waf/internal/crsindex"
+	"github.com/Fhwang0926/m-waf/internal/localtime"
 	"github.com/Fhwang0926/m-waf/internal/model"
 	"github.com/Fhwang0926/m-waf/internal/policybundle"
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
@@ -169,7 +170,7 @@ func (s *Server) renderSystemPolicyMigration(w http.ResponseWriter, r *http.Requ
 		"FormConfirmChanged":       false,
 		"FormConfirmChannelChange": false,
 		"FormConfirmLegacyBypass":  false,
-		"FormBypassField":          "REQUEST_URI", "FormBypassOperator": "@beginsWith", "FormBypassExpiresAt": time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02T15:04"),
+		"FormBypassField":          "REQUEST_URI", "FormBypassOperator": "@beginsWith", "FormBypassExpiresAt": localtime.FormatKST(time.Now().Add(24*time.Hour), "2006-01-02T15:04"),
 	}
 	if s.catalog != nil {
 		data["HotRuleSet"] = s.catalog.HotRuleSet()
@@ -329,7 +330,7 @@ func systemPolicyMigrationRequestFromForm(r *http.Request) (systemPolicyMigratio
 	request.BeforeExclusions = before
 	request.TargetExclusions = append(targets, conditionalTargets...)
 	if bypassValue := strings.TrimSpace(r.FormValue("bypass_value")); bypassValue != "" {
-		expiresAt, err := time.Parse("2006-01-02T15:04", strings.TrimSpace(r.FormValue("bypass_expires_at")))
+		expiresAt, err := localtime.ParseKST("2006-01-02T15:04", strings.TrimSpace(r.FormValue("bypass_expires_at")))
 		if err != nil {
 			return request, systemPolicyMigrationFieldError{Field: "bypass_expires_at", Message: "긴급 우회 만료 시각을 입력하세요."}
 		}

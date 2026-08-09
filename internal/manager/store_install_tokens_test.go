@@ -16,14 +16,18 @@ func TestNewInstallTokenUsesRecognizableHighEntropyFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(first, "mwaf_it_") || len(first) < 48 {
+	if !strings.HasPrefix(first, "mwaf_it_") || len(first) != 30 {
 		t.Fatalf("unexpected install token format: %q", first)
 	}
 	if first == second {
 		t.Fatal("install token generator returned a duplicate")
 	}
-	if prefix := installTokenPrefix(first); !strings.HasPrefix(first, prefix) || len(prefix) != 20 {
+	if prefix := installTokenPrefix(first); !strings.HasPrefix(first, prefix) || len(prefix) != 14 {
 		t.Fatalf("unexpected display prefix: %q", prefix)
+	}
+	legacy := EnterpriseInstallTokenRecord{TokenPrefix: "mwaf_it_legacy-token"}
+	if legacy.DisplayPrefix() != "mwaf_it_legacy" {
+		t.Fatalf("unexpected legacy display prefix: %q", legacy.DisplayPrefix())
 	}
 }
 

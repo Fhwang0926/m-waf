@@ -15,6 +15,7 @@ import (
 const (
 	eventCursorBefore = "before"
 	eventCursorAfter  = "after"
+	auditLogPageSize  = 10
 	overviewCacheTTL  = 15 * time.Second
 	maxOverviewCache  = 128
 )
@@ -498,15 +499,15 @@ func (s *Server) auditLogs(w http.ResponseWriter, r *http.Request) {
 		since = time.Now().UTC().Add(-24 * time.Hour)
 	}
 	page := queryPage(r)
-	filter := AuditLogFilter{Actor: truncate(strings.TrimSpace(r.URL.Query().Get("actor")), 255), Action: truncate(strings.TrimSpace(r.URL.Query().Get("action")), 255), Result: truncate(strings.TrimSpace(r.URL.Query().Get("result")), 32), Since: since, Offset: (page - 1) * 100}
-	items, err := s.store.ListAuditLogs(r.Context(), filter, 101)
+	filter := AuditLogFilter{Actor: truncate(strings.TrimSpace(r.URL.Query().Get("actor")), 255), Action: truncate(strings.TrimSpace(r.URL.Query().Get("action")), 255), Result: truncate(strings.TrimSpace(r.URL.Query().Get("result")), 32), Since: since, Offset: (page - 1) * auditLogPageSize}
+	items, err := s.store.ListAuditLogs(r.Context(), filter, auditLogPageSize+1)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "감사 로그를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	hasNext := len(items) > 100
+	hasNext := len(items) > auditLogPageSize
 	if hasNext {
-		items = items[:100]
+		items = items[:auditLogPageSize]
 	}
 	data := map[string]any{"Logs": items, "Range": rangeKey, "FilterActor": filter.Actor, "FilterAction": filter.Action, "FilterResult": filter.Result, "Page": page, "HasNext": hasNext}
 	query := r.URL.Query()

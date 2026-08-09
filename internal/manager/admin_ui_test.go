@@ -2,7 +2,6 @@ package manager
 
 import (
 	"bytes"
-	"html/template"
 	"strings"
 	"testing"
 
@@ -27,7 +26,7 @@ func TestAdminStatusLabels(t *testing.T) {
 }
 
 func TestNavigationVisibilityByRole(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +108,7 @@ func TestNavigationVisibilityByRole(t *testing.T) {
 }
 
 func TestSystemEnterpriseUsersStayInSystemManagement(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +134,7 @@ func TestSystemEnterpriseUsersStayInSystemManagement(t *testing.T) {
 }
 
 func TestSystemPolicyAdoptionsStayReadOnly(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,5 +155,134 @@ func TestSystemPolicyAdoptionsStayReadOnly(t *testing.T) {
 	}
 	if strings.Contains(html, `href="/policies/policy-a"`) || strings.Contains(html, `action="/policies/`) {
 		t.Fatalf("enterprise operation action leaked into system policy view: %s", html)
+	}
+	if !strings.Contains(html, "각 기업 사용자 또는 기업 관리자") {
+		t.Fatalf("enterprise policy operator guidance is missing: %s", html)
+	}
+}
+
+func TestSystemPolicyOverviewDoesNotLinkEnterpriseOperations(t *testing.T) {
+	templates, err := webassets.ParseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionData{DisplayName: "Operator", Role: RoleSystemAdmin, ActualRole: RoleSystemAdmin, EnterpriseID: "system-enterprise", EnterpriseName: "System"}.asSystemConsole()
+	data := map[string]any{
+		"Active": "system-policies", "Session": session, "CSRF": "token", "ScopeLabel": "전체 기업",
+		"IsSystemAdmin": true, "CanAccessSystemManagement": true, "InSystemConsole": true, "CanOperate": true, "CanManageUsers": true,
+		"AccountURL": "/account?area=system", "Summary": systemPolicyOperationsSummary{PendingUpdateCount: 2, ActiveRolloutCount: 1},
+		"Lifecycle": systemPolicyLifecycleView{}, "PublishedResult": systemPolicyPublishedResult{}, "Tab": "policies",
+	}
+	var output bytes.Buffer
+	if err := templates.ExecuteTemplate(&output, "system-policies.html", data); err != nil {
+		t.Fatal(err)
+	}
+	html := output.String()
+	if !strings.Contains(html, "읽기 전용으로 확인") || !strings.Contains(html, "기업별 검토 대기") {
+		t.Fatalf("read-only system policy guidance is incomplete: %s", html)
+	}
+	if strings.Contains(html, `href="/policies`) || strings.Contains(html, "기업 정책 조치 보기") || strings.Contains(html, "승인 대기 보기") {
+		t.Fatalf("enterprise operation action leaked into system policy overview: %s", html)
+	}
+}
+
+func TestEnterpriseDetailTabSelection(t *testing.T) {
+	cases := map[string]string{
+		"":           "overview",
+		"overview":   "overview",
+		" USERS ":    "users",
+		"servers":    "servers",
+		"policies":   "policies",
+		"groups":     "groups",
+		"management": "management",
+		"unknown":    "overview",
+	}
+	for input, expected := range cases {
+		if actual := enterpriseDetailTab(input); actual != expected {
+			t.Fatalf("enterpriseDetailTab(%q) = %q, want %q", input, actual, expected)
+		}
+	}
+}
+
+func TestEnterpriseDetailRendersOnlySelectedTab(t *testing.T) {
+	templates, err := webassets.ParseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionData{DisplayName: "Operator", Role: RoleSystemAdmin, ActualRole: RoleSystemAdmin, EnterpriseID: "system-enterprise", EnterpriseName: "System"}.asSystemConsole()
+	data := map[string]any{
+		"Active": "enterprises", "Session": session, "CSRF": "token", "ScopeLabel": "전체 기업",
+		"IsSystemAdmin": true, "CanAccessSystemManagement": true, "InSystemConsole": true, "CanOperate": true, "CanManageUsers": true,
+		"AccountURL": "/account?area=system", "Enterprise": EnterpriseRecord{ID: "enterprise-a", Name: "Example", Status: "ACTIVE"},
+		"Users": []UserRecord{}, "Servers": []ServerRecord{}, "Policies": []EnterprisePolicyRecord{}, "Groups": []GroupRecord{},
+	}
+	tabs := []string{"overview", "users", "servers", "policies", "groups", "management"}
+	for _, selected := range tabs {
+		data["Tab"] = selected
+		var output bytes.Buffer
+		if err := templates.ExecuteTemplate(&output, "enterprise-detail.html", data); err != nil {
+			t.Fatalf("render %s tab: %v", selected, err)
+		}
+		html := output.String()
+		for _, section := range tabs {
+			visible := strings.Contains(html, `id="`+section+`"`)
+			if section == selected && !visible {
+				t.Fatalf("selected %s section is missing: %s", selected, html)
+			}
+			if section != selected && visible {
+				t.Fatalf("inactive %s section rendered with selected %s: %s", section, selected, html)
+			}
+		}
+		if selected == "overview" && !strings.Contains(html, `aria-label="기업 연결 현황"`) {
+			t.Fatalf("overview summary is missing: %s", html)
+		}
+		if selected != "overview" && strings.Contains(html, `aria-label="기업 연결 현황"`) {
+			t.Fatalf("overview summary leaked into %s tab: %s", selected, html)
+		}
+	}
+}
+
+func TestEnrollmentQuickInstallKeepsTokenOutOfCommand(t *testing.T) {
+	templates, err := webassets.ParseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionData{DisplayName: "Operator", Role: RoleSystemAdmin, ActualRole: RoleSystemAdmin, EnterpriseID: "system-enterprise", EnterpriseName: "System"}.asSystemConsole()
+	const installToken = "mwaf_it_example-secret"
+	data := map[string]any{
+		"Active": "enrollments", "Session": session, "CSRF": "token", "ScopeLabel": "전체 기업",
+		"IsSystemAdmin": true, "CanAccessSystemManagement": true, "InSystemConsole": true, "CanOperate": true, "CanManageUsers": true,
+		"AccountURL": "/account?area=system", "SelectedEnterpriseName": "Example", "InstallToken": installToken,
+		"CABase64": "Q0E=", "AgentURL": "https://manager.example:10443",
+	}
+	var output bytes.Buffer
+	if err := templates.ExecuteTemplate(&output, "enrollment.html", data); err != nil {
+		t.Fatal(err)
+	}
+	html := output.String()
+	for _, expected := range []string{"서버에서 설치", "설치 명령 복사", "기업 설치 토큰을 붙여넣으세요", `class="install-command-details"`, "--install-token-stdin"} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("quick install content %q is missing: %s", expected, html)
+		}
+	}
+	if strings.Contains(html, "install-quick-steps") {
+		t.Fatalf("redundant install step cards remain: %s", html)
+	}
+	if strings.Contains(html, "설치 구성") || strings.Contains(html, "Agent + 통합 모듈") {
+		t.Fatalf("removed installation composition card remains: %s", html)
+	}
+	if strings.Contains(html, "curl -k") {
+		t.Fatalf("insecure TLS bypass leaked into the install command: %s", html)
+	}
+	commandStart := strings.Index(html, `id="enterprise-install-command"`)
+	if commandStart < 0 {
+		t.Fatalf("install command is missing: %s", html)
+	}
+	commandEnd := strings.Index(html[commandStart:], "</pre>")
+	if commandEnd < 0 {
+		t.Fatalf("install command closing tag is missing: %s", html)
+	}
+	if strings.Contains(html[commandStart:commandStart+commandEnd], installToken) {
+		t.Fatalf("install token must not be embedded in the copied command")
 	}
 }

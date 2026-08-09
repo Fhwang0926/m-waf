@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Fhwang0926/m-waf/internal/crssource"
+	"github.com/Fhwang0926/m-waf/internal/localtime"
 	"github.com/Fhwang0926/m-waf/internal/model"
 )
 
@@ -151,7 +152,7 @@ func (s *Server) crsSyncFailure(err error, now time.Time) crsSyncPageError {
 	}
 	failure.RetryIn = rateLimitErr.RetryAfter(now)
 	if !rateLimitErr.ResetAt.IsZero() {
-		failure.RetryAt = rateLimitErr.ResetAt.Local().Format("2006-01-02 15:04:05 MST")
+		failure.RetryAt = localtime.FormatKST(rateLimitErr.ResetAt, "2006-01-02 15:04:05 MST")
 	}
 	return failure
 }

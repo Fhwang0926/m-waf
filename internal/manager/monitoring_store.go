@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Fhwang0926/m-waf/internal/localtime"
 )
 
 type OverviewFilter struct {
@@ -136,7 +138,7 @@ func (s *Store) Overview(ctx context.Context, filter OverviewFilter, now time.Ti
 		if server.Status == "OFFLINE" {
 			detail := "마지막 수신 시각을 확인할 수 없습니다."
 			if server.LastHeartbeatAt.Valid {
-				detail = fmt.Sprintf("마지막 수신 %s UTC", server.LastHeartbeatAt.Time.UTC().Format("2006-01-02 15:04"))
+				detail = fmt.Sprintf("마지막 수신 %s KST", localtime.FormatKST(server.LastHeartbeatAt.Time, "2006-01-02 15:04"))
 			}
 			level := "warn"
 			title := "Agent 오프라인"

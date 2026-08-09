@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -68,7 +67,7 @@ func TestValidSetupCSRFRequestRequiresMatchingCookie(t *testing.T) {
 }
 
 func TestRenderSetupReturnsRecoverableCSRFError(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}

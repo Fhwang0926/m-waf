@@ -88,6 +88,16 @@ func (s *Server) enterprises(w http.ResponseWriter, r *http.Request) {
 	s.renderEnterprises(w, r, http.StatusOK, "", "")
 }
 
+func enterpriseDetailTab(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "users", "servers", "policies", "groups", "management":
+		return value
+	default:
+		return "overview"
+	}
+}
+
 func (s *Server) enterpriseDetail(w http.ResponseWriter, r *http.Request) {
 	enterpriseID := strings.TrimSpace(r.PathValue("id"))
 	enterprise, err := s.store.EnterpriseManagementByID(r.Context(), enterpriseID)
@@ -100,36 +110,49 @@ func (s *Server) enterpriseDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	users, err := s.store.ListUsers(r.Context(), enterpriseID)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "소속 사용자를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	session := sessionFrom(r)
+	tab := enterpriseDetailTab(r.URL.Query().Get("tab"))
+	var users []UserRecord
+	var servers []ServerRecord
+	var policies []EnterprisePolicyRecord
+	var groups []GroupRecord
 	activeUserCount := 0
-	for i := range users {
-		users[i].Manageable = enterprise.Active() && sessionCanManageUser(session, users[i])
-		if users[i].Active {
-			activeUserCount++
+	if tab == "overview" || tab == "users" {
+		users, err = s.store.ListUsers(r.Context(), enterpriseID)
+		if err != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "소속 사용자를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+		session := sessionFrom(r)
+		for i := range users {
+			users[i].Manageable = enterprise.Active() && sessionCanManageUser(session, users[i])
+			if users[i].Active {
+				activeUserCount++
+			}
 		}
 	}
-	servers, err := s.store.ListServers(r.Context(), enterpriseID, 5000)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "소속 서버를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	policies, err := s.store.ListEnterprisePolicies(r.Context(), enterpriseID, 5000)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	groups, err := s.store.ListGroups(r.Context(), enterpriseID)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
+	switch tab {
+	case "servers":
+		servers, err = s.store.ListServers(r.Context(), enterpriseID, 5000)
+		if err != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "소속 서버를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+	case "policies":
+		policies, err = s.store.ListEnterprisePolicies(r.Context(), enterpriseID, 5000)
+		if err != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+	case "groups":
+		groups, err = s.store.ListGroups(r.Context(), enterpriseID)
+		if err != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
 	}
 
 	data := map[string]any{
+		"Tab":                tab,
 		"Enterprise":         enterprise,
 		"Users":              users,
 		"ActiveUserCount":    activeUserCount,
@@ -221,7 +244,7 @@ func (s *Server) deleteEnterprise(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "enterprise.terminate", enterpriseID, "success")
-	http.Redirect(w, r, "/enterprises/"+url.PathEscape(enterpriseID)+"?notice="+url.QueryEscape("기업 운영을 종료했습니다. 사용자·신규 등록·Agent 연결은 차단되고 기존 이력은 보존됩니다."), http.StatusSeeOther)
+	http.Redirect(w, r, "/enterprises/"+url.PathEscape(enterpriseID)+"?tab=management&notice="+url.QueryEscape("기업 운영을 종료했습니다. 사용자·신규 등록·Agent 연결은 차단되고 기존 이력은 보존됩니다."), http.StatusSeeOther)
 }
 
 func (s *Server) redirectEnterpriseDetailError(w http.ResponseWriter, r *http.Request, enterpriseID, message string) {
@@ -229,7 +252,7 @@ func (s *Server) redirectEnterpriseDetailError(w http.ResponseWriter, r *http.Re
 		s.renderAdminError(w, r, http.StatusBadRequest, "기업 작업을 처리할 수 없습니다", message)
 		return
 	}
-	http.Redirect(w, r, "/enterprises/"+url.PathEscape(enterpriseID)+"?error="+url.QueryEscape(message), http.StatusSeeOther)
+	http.Redirect(w, r, "/enterprises/"+url.PathEscape(enterpriseID)+"?tab=management&error="+url.QueryEscape(message), http.StatusSeeOther)
 }
 
 func (s *Server) createEnterprise(w http.ResponseWriter, r *http.Request) {

@@ -3,7 +3,6 @@ package manager
 import (
 	"bytes"
 	"errors"
-	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,7 +16,7 @@ import (
 )
 
 func TestSystemPolicyMigrationTemplateUsesGuidedWizard(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +99,7 @@ func TestSystemPolicyVersionWithdrawalEligibility(t *testing.T) {
 }
 
 func TestCurrentSystemPolicyTitleLinksToCRSSource(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +136,7 @@ func TestNextSystemPolicyVersionAfterWithdrawal(t *testing.T) {
 }
 
 func TestSystemPolicyMigrationTemplateBlocksWithoutSource(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +159,7 @@ func TestSystemPolicyMigrationTemplateBlocksWithoutSource(t *testing.T) {
 }
 
 func TestSystemPolicyMigrationTemplateAllowsFirstManagerPolicy(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}

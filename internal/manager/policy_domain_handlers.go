@@ -115,7 +115,6 @@ func (s *Server) systemPolicies(w http.ResponseWriter, r *http.Request) {
 		}
 		versions = append(versions, item)
 	}
-	actionPolicyCount := 0
 	strategyImpact := migrationStrategyImpact{}
 	for _, policy := range enterprisePolicies {
 		if policy.CurrentSystemPolicyID != "" {
@@ -129,9 +128,6 @@ func (s *Server) systemPolicies(w http.ResponseWriter, r *http.Request) {
 		}
 		if policy.LatestRolloutStatus == "FAILED" {
 			summary.FailedRolloutCount++
-		}
-		if policy.HasUpdate() || policy.HasActiveRollout || policy.LatestRolloutStatus == "FAILED" {
-			actionPolicyCount++
 		}
 		switch policy.UpdateStrategy {
 		case PolicyStrategyAutomatic:
@@ -154,7 +150,7 @@ func (s *Server) systemPolicies(w http.ResponseWriter, r *http.Request) {
 	}
 	data := map[string]any{
 		"Versions": versions, "HistoryTotal": historyTotal, "ShowHistorySearch": historyTotal > 5 || query != "" || statusFilter != "",
-		"CurrentPolicy": currentPolicy, "HasCurrentPolicy": hasCurrentPolicy, "Summary": summary, "ActionPolicyCount": actionPolicyCount,
+		"CurrentPolicy": currentPolicy, "HasCurrentPolicy": hasCurrentPolicy, "Summary": summary,
 		"Lifecycle": lifecycle, "PublishedResult": publishedResult,
 		"Tab": tab, "FilterQuery": r.URL.Query().Get("q"), "FilterStatus": statusFilter, "Notice": r.URL.Query().Get("notice"), "ErrorNotice": r.URL.Query().Get("error"),
 	}

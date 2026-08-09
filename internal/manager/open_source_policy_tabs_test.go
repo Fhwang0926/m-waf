@@ -2,7 +2,6 @@ package manager
 
 import (
 	"bytes"
-	"html/template"
 	"net/url"
 	"strings"
 	"testing"
@@ -52,7 +51,7 @@ func TestOpenSourceRulePageURLKeepsRulesTab(t *testing.T) {
 }
 
 func TestOpenSourcePolicyTemplateRendersOnlySelectedTab(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +119,7 @@ func TestOpenSourcePolicyTemplateRendersOnlySelectedTab(t *testing.T) {
 }
 
 func TestOpenSourcePolicyFilesSubviewsRenderSeparately(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +158,7 @@ func TestOpenSourcePolicyFilesSubviewsRenderSeparately(t *testing.T) {
 }
 
 func TestOpenSourcePolicyReadinessHidesActionForCurrentSource(t *testing.T) {
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		t.Fatal(err)
 	}

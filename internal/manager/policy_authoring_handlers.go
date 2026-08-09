@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Fhwang0926/m-waf/internal/localtime"
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
 )
 
@@ -378,7 +379,7 @@ func enterprisePolicyExclusionsFromForm(r *http.Request) ([]PolicyExclusion, err
 	bypassValue := strings.TrimSpace(r.FormValue("bypass_value"))
 	bypassReason := strings.TrimSpace(r.FormValue("bypass_reason"))
 	if bypassValue != "" || bypassReason != "" {
-		expiresAt, err := time.ParseInLocation("2006-01-02T15:04", strings.TrimSpace(r.FormValue("bypass_expires_at")), time.Local)
+		expiresAt, err := localtime.ParseKST("2006-01-02T15:04", strings.TrimSpace(r.FormValue("bypass_expires_at")))
 		if err != nil {
 			return nil, errors.New("긴급 전체 우회의 만료 시각을 입력하세요")
 		}
@@ -387,6 +388,7 @@ func enterprisePolicyExclusionsFromForm(r *http.Request) ([]PolicyExclusion, err
 		if bypassReason == "" || !validConditionField(field) || !validConditionOperator(operator) {
 			return nil, errors.New("긴급 전체 우회의 사유와 안전한 조건을 입력하세요")
 		}
+		expiresAt = expiresAt.UTC()
 		result = append(result, PolicyExclusion{
 			SourceScope: PolicyScopeEnterprise, Type: PolicyExclusionEngineBypass, LoadStage: PolicyExclusionBefore,
 			Reason: bypassReason, ExpiresAt: &expiresAt, Enabled: true,

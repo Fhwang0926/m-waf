@@ -550,7 +550,7 @@ func (s *Server) openSourceLifecycle(r *http.Request, items []openSourcePolicyVi
 		}
 		item = classifyOpenSourcePolicyView(item, current)
 		if item.VerifiedAt.After(view.LastCheckedAt) {
-			view.LastCheckedAt = item.VerifiedAt.Local()
+			view.LastCheckedAt = item.VerifiedAt
 		}
 		if view.LatestSourceID == "" {
 			view.LatestSourceID, view.LatestSourceVersion, view.LatestSourceTag = source.ID, source.Version, source.Tag
@@ -573,7 +573,7 @@ func (s *Server) openSourceLifecycle(r *http.Request, items []openSourcePolicyVi
 			view.HasNewSource = true
 		}
 	}
-	if checkedAt := s.lastCRSSourceSyncAt().Local(); checkedAt.After(view.LastCheckedAt) {
+	if checkedAt := s.lastCRSSourceSyncAt(); checkedAt.After(view.LastCheckedAt) {
 		view.LastCheckedAt = checkedAt
 	}
 	return view

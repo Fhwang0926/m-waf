@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Fhwang0926/m-waf/internal/localtime"
 )
 
 type policyIPRuleView struct {
@@ -176,7 +178,7 @@ func (s *Server) createPolicyIPRule(w http.ResponseWriter, r *http.Request) {
 	if action == PolicyIPActionTrust {
 		expires := time.Now().UTC().Add(24 * time.Hour)
 		if raw := strings.TrimSpace(r.FormValue("expires_at")); raw != "" {
-			parsed, parseErr := time.Parse("2006-01-02T15:04", raw)
+			parsed, parseErr := localtime.ParseKST("2006-01-02T15:04", raw)
 			if parseErr != nil {
 				s.renderAdminError(w, r, http.StatusBadRequest, "만료 시각을 확인할 수 없습니다", "날짜와 시간을 다시 선택하세요.")
 				return

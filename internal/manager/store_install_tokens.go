@@ -59,7 +59,7 @@ func installTokenUsable(expiresAt time.Time, revokedAt sql.NullTime, maximum sql
 }
 
 func newInstallToken() (string, error) {
-	raw := make([]byte, 32)
+	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
@@ -67,11 +67,15 @@ func newInstallToken() (string, error) {
 }
 
 func installTokenPrefix(token string) string {
-	const prefixLength = 20
+	const prefixLength = 14
 	if len(token) <= prefixLength {
 		return token
 	}
 	return token[:prefixLength]
+}
+
+func (r EnterpriseInstallTokenRecord) DisplayPrefix() string {
+	return installTokenPrefix(r.TokenPrefix)
 }
 
 func (s *Store) CreateEnterpriseInstallToken(ctx context.Context, enterpriseID, name, createdBy string, expiresAt time.Time, maxEnrollments int) (EnterpriseInstallTokenRecord, string, error) {

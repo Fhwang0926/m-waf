@@ -4,11 +4,32 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const svgNS = "http://www.w3.org/2000/svg";
+  const kstTimeZone = "Asia/Seoul";
+  const kstDateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: kstTimeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
   let sidebarTrigger = null;
   let lastEventTrigger = null;
   let taskDialogTrigger = null;
   let globalBusyDialog = null;
   let globalBusyTimer = 0;
+
+  function formatKSTDateTime(value) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    const parts = {};
+    kstDateTimeFormatter.formatToParts(date).forEach((part) => {
+      if (part.type !== "literal") parts[part.type] = part.value;
+    });
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+  }
 
   function ensureGlobalBusyDialog() {
     if (globalBusyDialog) return globalBusyDialog;
@@ -235,7 +256,7 @@
     const time = $("[data-last-refreshed]");
     if (status) status.title = delayed ? "API 갱신에 실패해 기존 데이터를 유지하고 있습니다." : "정상적으로 갱신되었습니다.";
     if (dot) dot.className = `status-dot ${delayed ? "warn" : "ok"}`;
-    if (time) time.textContent = delayed ? "갱신 지연" : at.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    if (time) time.textContent = delayed ? "갱신 지연" : `${formatKSTDateTime(at).slice(11)} KST`;
   }
 
   function startVisiblePolling(callback) {
@@ -304,7 +325,7 @@
       const x = series.length === 1 ? plot.left + plotWidth / 2 : plot.left + (index * plotWidth) / (series.length - 1);
       const date = new Date(series[index].at);
       const label = createSVGElement("text", { x, y: height - 7, class: "chart-axis-label", "text-anchor": index === 0 ? "start" : index === series.length - 1 ? "end" : "middle" });
-      label.textContent = Number.isNaN(date.getTime()) ? "" : date.toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      label.textContent = Number.isNaN(date.getTime()) ? "" : date.toLocaleString("ko-KR", { timeZone: kstTimeZone, month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
       svg.append(label);
     });
     const eventPoints = series.map((item, index) => point(item, index, "events"));
@@ -452,7 +473,7 @@
       result.append(title, message);
       const details = document.createElement("dl");
       details.className = "detail-list";
-      appendDetailItem(details, "발생 시각", new Date(event.occurred_at).toLocaleString("ko-KR"));
+      appendDetailItem(details, "발생 시각", `${formatKSTDateTime(event.occurred_at) || event.occurred_at} KST`);
       appendDetailItem(details, "서버", event.server_name);
       appendDetailItem(details, "요청", `${event.method} ${event.uri}`, true);
       appendDetailItem(details, "탐지 입력 위치", event.matched_variable || "확인 불가", true);
@@ -574,9 +595,9 @@
     row.setAttribute("aria-label", `${event.server_name} ${event.method} ${event.uri} ${event.blocked ? "차단" : "탐지"}`);
     const timeCell = document.createElement("td");
     const occurredAt = new Date(event.occurred_at);
-    timeCell.textContent = Number.isNaN(occurredAt.getTime()) ? event.occurred_at : occurredAt.toISOString().slice(0, 19).replace("T", " ");
+    timeCell.textContent = Number.isNaN(occurredAt.getTime()) ? event.occurred_at : formatKSTDateTime(occurredAt);
     const timezone = document.createElement("small");
-    timezone.textContent = "UTC";
+    timezone.textContent = "KST";
     timeCell.append(timezone);
     row.append(timeCell);
     if (systemAdmin) {
@@ -1391,6 +1412,17 @@
       window.location.assign(navigationRow.dataset.rowHref);
       return;
     }
+    const detailsButton = event.target.closest("[data-open-details]");
+    if (detailsButton) {
+      const details = document.getElementById(detailsButton.dataset.openDetails);
+      if (details) {
+        details.open = true;
+        details.scrollIntoView({ behavior: "smooth", block: "start" });
+        const summary = $("summary", details);
+        if (summary) summary.focus();
+      }
+      return;
+    }
     const button = event.target.closest("[data-copy-target], [data-copy-text]");
     if (!button) return;
     const target = document.getElementById(button.dataset.copyTarget);
@@ -1402,7 +1434,11 @@
       if (status) status.textContent = button.dataset.copySuccess || "클립보드에 복사했습니다.";
     } catch (_) {
       if (status) status.textContent = "클립보드 복사에 실패했습니다.";
-      if (target) target.focus();
+      if (target) {
+        const details = target.closest("details");
+        if (details) details.open = true;
+        target.focus();
+      }
     }
   });
 

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/Fhwang0926/m-waf/internal/config"
+	"github.com/Fhwang0926/m-waf/internal/localtime"
 	"github.com/Fhwang0926/m-waf/internal/model"
 	"github.com/Fhwang0926/m-waf/internal/packages"
 	"github.com/Fhwang0926/m-waf/internal/protocol"
@@ -80,7 +81,7 @@ func NewServer(cfg config.Manager, store *Store, logger *slog.Logger) (*Server, 
 	if err != nil {
 		return nil, err
 	}
-	templates, err := template.ParseFS(webassets.Assets, "templates/*.html")
+	templates, err := webassets.ParseTemplates()
 	if err != nil {
 		return nil, err
 	}
@@ -554,7 +555,7 @@ func (s *Server) renderPolicyForm(w http.ResponseWriter, r *http.Request, status
 		"FormScore": strconv.Itoa(defaultTemplate.Defaults.InboundScore), "FormOutboundScore": strconv.Itoa(defaultTemplate.Defaults.OutboundScore),
 		"FormRequestBody": defaultTemplate.Defaults.RequestBody, "FormResponseBody": defaultTemplate.Defaults.ResponseBody,
 		"FormEarlyBlocking": defaultTemplate.Defaults.EarlyBlocking, "FormSamplingPercentage": strconv.Itoa(defaultTemplate.Defaults.SamplingPercentage),
-		"FormBypassExpiresAt": time.Now().Add(24 * time.Hour).Format("2006-01-02T15:04"),
+		"FormBypassExpiresAt": localtime.FormatKST(time.Now().Add(24*time.Hour), "2006-01-02T15:04"),
 	}
 	for key, value := range form {
 		data[key] = value
