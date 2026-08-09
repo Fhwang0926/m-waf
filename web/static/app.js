@@ -177,6 +177,7 @@
   }
 
   function initializeDesktopSidebar() {
+    if (!$(".sidebar")) return;
     let preference = "";
     try {
       preference = window.localStorage.getItem("mwaf-sidebar") || "";

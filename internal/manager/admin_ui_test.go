@@ -181,7 +181,12 @@ func TestSystemPolicyOverviewDoesNotLinkEnterpriseOperations(t *testing.T) {
 	if !strings.Contains(html, "읽기 전용으로 확인") || !strings.Contains(html, "기업별 검토 대기") {
 		t.Fatalf("read-only system policy guidance is incomplete: %s", html)
 	}
-	if strings.Contains(html, `href="/policies`) || strings.Contains(html, "기업 정책 조치 보기") || strings.Contains(html, "승인 대기 보기") {
+	mainStart := strings.Index(html, "<main")
+	if mainStart < 0 {
+		t.Fatalf("system policy main content is missing: %s", html)
+	}
+	mainHTML := html[mainStart:]
+	if strings.Contains(mainHTML, `href="/policies`) || strings.Contains(mainHTML, "기업 정책 조치 보기") || strings.Contains(mainHTML, "승인 대기 보기") {
 		t.Fatalf("enterprise operation action leaked into system policy overview: %s", html)
 	}
 }

@@ -18,7 +18,7 @@ func TestEventCursorRoundTrip(t *testing.T) {
 }
 
 func TestPaginateEventRecordsForward(t *testing.T) {
-	items := eventRecordsWithIDs(300, 200, -1)
+	items := eventRecordsWithIDs(300, 199, -1)
 	result := paginateEventRecords(items, 100, 1, eventCursorBefore)
 	if !result.HasPrevious || !result.HasNext || len(result.Items) != 100 {
 		t.Fatalf("page flags: previous=%v next=%v length=%d", result.HasPrevious, result.HasNext, len(result.Items))
@@ -29,7 +29,7 @@ func TestPaginateEventRecordsForward(t *testing.T) {
 }
 
 func TestPaginateEventRecordsBackward(t *testing.T) {
-	items := eventRecordsWithIDs(101, 201, 1)
+	items := eventRecordsWithIDs(101, 202, 1)
 	result := paginateEventRecords(items, 100, 2, eventCursorAfter)
 	if !result.HasPrevious || !result.HasNext || len(result.Items) != 100 {
 		t.Fatalf("page flags: previous=%v next=%v length=%d", result.HasPrevious, result.HasNext, len(result.Items))
@@ -38,7 +38,7 @@ func TestPaginateEventRecordsBackward(t *testing.T) {
 		t.Fatalf("unexpected page boundary: first=%d last=%d", result.Items[0].ID, result.Items[len(result.Items)-1].ID)
 	}
 
-	firstPage := paginateEventRecords(eventRecordsWithIDs(201, 300, 1), 100, 1, eventCursorAfter)
+	firstPage := paginateEventRecords(eventRecordsWithIDs(201, 301, 1), 100, 1, eventCursorAfter)
 	if firstPage.HasPrevious || !firstPage.HasNext || firstPage.Items[0].ID != 300 || firstPage.Items[len(firstPage.Items)-1].ID != 201 {
 		t.Fatalf("unexpected first page: previous=%v next=%v first=%d last=%d", firstPage.HasPrevious, firstPage.HasNext, firstPage.Items[0].ID, firstPage.Items[len(firstPage.Items)-1].ID)
 	}
