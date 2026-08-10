@@ -15,6 +15,16 @@ func TestNormalizeBuildOutputRemovesRuntimeApacheWarning(t *testing.T) {
 	}
 }
 
+func TestReadMemoryTotalBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meminfo")
+	if err := os.WriteFile(path, []byte("MemTotal:       8388608 kB\nMemFree:         1024 kB\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if actual := readMemoryTotalBytes(path); actual != 8<<30 {
+		t.Fatalf("memory total = %d, want %d", actual, uint64(8<<30))
+	}
+}
+
 func TestWebServerInfoUsesConfiguredBinary(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "custom-nginx")
 	script := []byte("#!/bin/sh\ncase \"$1\" in\n-v) echo 'nginx version: nginx/1.30.4' >&2 ;;\n-V) echo 'nginx version: nginx/1.30.4' >&2; echo 'configure arguments: --prefix=/opt/hosting/nginx' >&2 ;;\n*) exit 2 ;;\nesac\n")

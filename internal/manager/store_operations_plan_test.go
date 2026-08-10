@@ -47,3 +47,24 @@ func TestPackageDeploymentPlanDefaultsToStandardControl(t *testing.T) {
 		t.Fatal("arbitrary control mode was accepted")
 	}
 }
+
+func TestAgentOnlyDeploymentPlanSurvivesResultUpdate(t *testing.T) {
+	encoded, err := encodePackageDeploymentPlanWithScope(model.WebServerControlStandard, model.PackageScopeAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := decodePackageDeploymentPlan(encoded)
+	if plan.Scope != model.PackageScopeAgent || plan.WebServerControl != model.WebServerControlStandard {
+		t.Fatalf("unexpected Agent-only plan: %#v", plan)
+	}
+	encoded, err = encodePackageDeploymentResult(plan, "Agent 업데이트 완료")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodePackageDeploymentPlan(encoded).Scope; got != model.PackageScopeAgent {
+		t.Fatalf("result update lost Agent-only scope: %q", got)
+	}
+	if got := packageDeploymentDisplayDetail(encoded); got != "Agent 업데이트 완료" {
+		t.Fatalf("unexpected display detail %q", got)
+	}
+}

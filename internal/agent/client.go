@@ -222,6 +222,13 @@ func (c *Client) DownloadPolicy(ctx context.Context, path string) ([]byte, error
 	return c.doBytes(ctx, path, protocol.AgentV1.PolicyArtifactLimit)
 }
 
+func (c *Client) DownloadBasePolicy(ctx context.Context, path string) ([]byte, error) {
+	if !strings.HasPrefix(path, protocol.PolicyBaseArtifactPrefix) {
+		return nil, errors.New("invalid base policy artifact path")
+	}
+	return c.doBytes(ctx, path, protocol.AgentV1.PolicyArtifactLimit)
+}
+
 func (c *Client) DownloadPackage(ctx context.Context, item model.PackageDownload, destination string) error {
 	if item.ID == "" || !strings.HasPrefix(item.URL, protocol.AgentPackagePrefix) || item.Size < 1 || item.Size > protocol.AgentV1.PackageLimit {
 		return errors.New("invalid package download")

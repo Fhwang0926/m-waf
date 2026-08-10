@@ -21,6 +21,7 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /servers/{id}", enterprise(http.HandlerFunc(s.serverDetail)))
 	mux.Handle("POST /servers/{id}/commands", enterprise(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.createServerCommand))))
 	mux.Handle("POST /servers/{id}/packages", enterprise(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.deployServerPackages))))
+	mux.Handle("POST /servers/{id}/agent-package", enterprise(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.deployServerAgent))))
 	mux.Handle("POST /servers/{id}/installation", enterprise(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.installServerModule))))
 	mux.Handle("POST /servers/{id}/revoke", enterprise(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.revokeServer))))
 	mux.Handle("GET /events", enterprise(http.HandlerFunc(s.events)))

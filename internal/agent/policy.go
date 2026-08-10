@@ -93,13 +93,95 @@ func (p *PolicyApplier) Apply(parent context.Context, webServer string, state mo
 	return nil
 }
 
-func (p *PolicyApplier) applyBundle(parent context.Context, webServer string, state model.DesiredState, artifact []byte) error {
-	if !policyRevisionName.MatchString(state.RevisionID) {
-		return errors.New("policy revision id is unsafe")
+func (p *PolicyApplier) ApplySplit(parent context.Context, webServer string, state model.DesiredState, baseArtifact, overrideArtifact []byte) error {
+	if state.Mode != "DetectionOnly" && state.Mode != "On" {
+		return fmt.Errorf("unsupported policy mode %q", state.Mode)
 	}
+	if state.ArtifactFormat != policybundle.FormatOverride || state.BasePolicy == nil || state.OverridePolicy == nil {
+		return errors.New("split policy references are invalid")
+	}
+	base := state.BasePolicy
+	override := state.OverridePolicy
+	if base.Format != policybundle.FormatBase || override.Format != policybundle.FormatOverride || override.RevisionID != state.RevisionID {
+		return errors.New("split policy formats do not match desired state")
+	}
+	if len(baseArtifact) == 0 || len(baseArtifact) > 64<<20 || len(overrideArtifact) == 0 || len(overrideArtifact) > 4<<20 {
+		return errors.New("split policy artifact size is invalid")
+	}
+	if err := p.verifyArtifact(baseArtifact, base.SHA256, base.Signature); err != nil {
+		return fmt.Errorf("verify base policy: %w", err)
+	}
+	if err := p.verifyArtifact(overrideArtifact, override.SHA256, override.Signature); err != nil {
+		return fmt.Errorf("verify policy override: %w", err)
+	}
+	if !strings.EqualFold(override.SHA256, state.SHA256) || override.Signature != state.Signature {
+		return errors.New("override policy does not match desired state")
+	}
+	baseManifest, baseFiles, err := policybundle.Parse(baseArtifact)
+	if err != nil {
+		return fmt.Errorf("parse base policy: %w", err)
+	}
+	overrideManifest, overrideFiles, err := policybundle.Parse(overrideArtifact)
+	if err != nil {
+		return fmt.Errorf("parse policy override: %w", err)
+	}
+	if baseManifest.ArtifactFormat != policybundle.FormatBase || overrideManifest.ArtifactFormat != policybundle.FormatOverride ||
+		baseManifest.BasePolicyID != base.ID || overrideManifest.BasePolicyID != base.ID ||
+		!strings.EqualFold(overrideManifest.BaseArtifactSHA256, base.SHA256) ||
+		!strings.EqualFold(overrideManifest.OverrideConfigSHA256, override.OverrideConfigSHA256) ||
+		!strings.EqualFold(overrideManifest.EffectiveConfigSHA256, override.EffectiveConfigSHA256) ||
+		!strings.EqualFold(overrideManifest.ValidationDigest, override.ValidationDigest) ||
+		baseManifest.PolicySource.ID != overrideManifest.PolicySource.ID ||
+		!strings.EqualFold(baseManifest.PolicySource.IndexSHA256, overrideManifest.PolicySource.IndexSHA256) {
+		return errors.New("base and override policy composition verification failed")
+	}
+	files := make(map[string][]byte, len(baseFiles)+len(overrideFiles))
+	for name, content := range baseFiles {
+		files[name] = content
+	}
+	for name, content := range overrideFiles {
+		if _, exists := files[name]; exists {
+			return fmt.Errorf("duplicate split policy file %q", name)
+		}
+		files[name] = content
+	}
+	baseManifestRaw, err := json.MarshalIndent(baseManifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	overrideManifestRaw, err := json.MarshalIndent(overrideManifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return p.applyBundleFiles(parent, webServer, state, files, map[string][]byte{
+		"manifest.json":          append(baseManifestRaw, '\n'),
+		"override-manifest.json": append(overrideManifestRaw, '\n'),
+	})
+}
+
+func (p *PolicyApplier) verifyArtifact(artifact []byte, expectedSHA256, signature string) error {
+	hash := sha256.Sum256(artifact)
+	if !strings.EqualFold(hex.EncodeToString(hash[:]), expectedSHA256) {
+		return errors.New("policy artifact checksum mismatch")
+	}
+	return p.verifySignature(artifact, signature)
+}
+
+func (p *PolicyApplier) applyBundle(parent context.Context, webServer string, state model.DesiredState, artifact []byte) error {
 	manifest, files, err := policybundle.Parse(artifact)
 	if err != nil {
 		return err
+	}
+	manifestRaw, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return p.applyBundleFiles(parent, webServer, state, files, map[string][]byte{"manifest.json": append(manifestRaw, '\n')})
+}
+
+func (p *PolicyApplier) applyBundleFiles(parent context.Context, webServer string, state model.DesiredState, files, metadataFiles map[string][]byte) error {
+	if !policyRevisionName.MatchString(state.RevisionID) {
+		return errors.New("policy revision id is unsafe")
 	}
 	activePath := filepath.Clean(filepath.Dir(p.cfg.PolicyPath))
 	if activePath == "." || activePath == string(filepath.Separator) {
@@ -119,12 +201,13 @@ func (p *PolicyApplier) applyBundle(parent context.Context, webServer string, st
 			return fmt.Errorf("stage policy bundle: %w", err)
 		}
 	}
-	manifestRaw, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := atomicWrite(filepath.Join(stagingPath, "manifest.json"), append(manifestRaw, '\n'), 0o640); err != nil {
-		return fmt.Errorf("stage policy manifest: %w", err)
+	for name, content := range metadataFiles {
+		if filepath.Base(name) != name || filepath.Ext(name) != ".json" {
+			return errors.New("policy metadata filename is unsafe")
+		}
+		if err := atomicWrite(filepath.Join(stagingPath, name), content, 0o640); err != nil {
+			return fmt.Errorf("stage policy metadata: %w", err)
+		}
 	}
 	if err := atomicWrite(filepath.Join(stagingPath, "main.conf"), []byte("# Compatibility entry for rollback packages. Managed by mwaf-agent.\n"), 0o640); err != nil {
 		return fmt.Errorf("stage rollback compatibility policy: %w", err)

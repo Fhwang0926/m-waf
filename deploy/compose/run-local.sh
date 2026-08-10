@@ -86,10 +86,15 @@ bundle_mode=${MWAF_DEV_BUNDLE_MODE:-release}
 case "$bundle_mode" in release|local) ;; *) echo "MWAF_DEV_BUNDLE_MODE must be release or local" >&2; exit 1 ;; esac
 
 if [ "$bundle_mode" = local ]; then
-  current_bundle_file="$runtime_root/dev-bundle-current"
-  [ -s "$current_bundle_file" ] || { echo "Local development bundle is missing. Run 'make dev-bundle' first." >&2; exit 1; }
-  local_bundle_release=$(sed -n '1p' "$current_bundle_file")
-  case "$local_bundle_release" in /*) ;; *) echo "Local development bundle path is invalid" >&2; exit 1 ;; esac
+	active_bundle_release="$runtime_root/dev-bundle-active"
+	if [ -L "$active_bundle_release" ]; then
+		local_bundle_release=$active_bundle_release
+	else
+		current_bundle_file="$runtime_root/dev-bundle-current"
+		[ -s "$current_bundle_file" ] || { echo "Local development bundle is missing. Run 'make dev-bundle' first." >&2; exit 1; }
+		local_bundle_release=$(sed -n '1p' "$current_bundle_file")
+		case "$local_bundle_release" in /*) ;; *) echo "Local development bundle path is invalid" >&2; exit 1 ;; esac
+	fi
   local_bundle_root="$local_bundle_release/bundle"
   local_bundle_public_key="$local_bundle_release/package-signing.pub"
   bundle_complete "$local_bundle_root" "$local_bundle_public_key" || { echo "Local development bundle is incomplete" >&2; exit 1; }

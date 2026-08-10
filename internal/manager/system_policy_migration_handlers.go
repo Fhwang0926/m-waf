@@ -869,8 +869,8 @@ func (s *Server) validateMigrationCompatibility(r *http.Request, source model.Po
 		item := migrationCompatibility{ServerID: server.ID, ServerName: server.Name}
 		if source.ArtifactFormat == policybundle.FormatV3 {
 			switch {
-			case !containsString(server.Inventory.PolicyFormats, policybundle.FormatV3):
-				item.Reason = "Agent가 self-contained CRS 정책 형식을 지원하지 않습니다."
+			case !containsString(server.Inventory.PolicyFormats, policybundle.FormatV3) || !serverSupportsSplitPolicy(server):
+				item.Reason = "Agent가 기본 정책과 기업 오버라이드 분리 형식을 지원하지 않습니다."
 			case !server.Inventory.ConnectorLoaded:
 				item.Reason = "ModSecurity Connector 로드 상태를 확인할 수 없습니다."
 			case !server.Inventory.ConfigTestOK:

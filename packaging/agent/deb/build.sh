@@ -6,7 +6,11 @@ set -eu
 : "${AGENT_BINARY:?AGENT_BINARY is required}"
 : "${OUTPUT_DIR:?OUTPUT_DIR is required}"
 : "${METADATA_DIR:?METADATA_DIR is required}"
-MWAF_DEB_TARGETS=${MWAF_DEB_TARGETS:-ubuntu:24.04 debian:12}
+# Agent compatibility is wider than the web-server module matrix because this
+# binary is built without CGO and the DEB declares no runtime dependencies.
+# Keep this target list separate so a legacy discovery target never implies
+# that a ModSecurity module package is available for the same OS.
+MWAF_AGENT_DEB_TARGETS=${MWAF_AGENT_DEB_TARGETS:-ubuntu:18.04 ubuntu:24.04 debian:12}
 command -v dpkg-deb >/dev/null 2>&1 || { echo "dpkg-deb is required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
@@ -16,6 +20,7 @@ mkdir -p "$OUTPUT_DIR" "$METADATA_DIR" "$root/DEBIAN" "$root/usr/bin" "$root/usr
 install -m 0755 "$AGENT_BINARY" "$root/usr/bin/mwaf-agent"
 install -m 0755 packaging/agent/mwaf-uninstall "$root/usr/sbin/mwaf-uninstall"
 install -m 0755 packaging/agent/container/mwaf-agent-service "$root/usr/sbin/mwaf-agent-service"
+install -m 0755 packaging/agent/mwaf-agent-updater "$root/usr/lib/mwaf/mwaf-agent-updater"
 install -m 0755 packaging/module/external/configure.sh "$root/usr/lib/mwaf/configure-external"
 install -m 0644 packaging/agent/systemd/mwaf-agent.service "$root/lib/systemd/system/mwaf-agent.service"
 printf '%s\n' "source: https://github.com/Fhwang0926/m-waf" "commit: $COMMIT" > "$root/usr/share/doc/mwaf-agent/build-info"
@@ -47,10 +52,10 @@ chmod 0755 "$root/DEBIAN/prerm"
 
 filename="mwaf-agent_${VERSION}_amd64.deb"
 dpkg-deb --build --root-owner-group "$root" "$OUTPUT_DIR/$filename"
-for target in $MWAF_DEB_TARGETS; do
+for target in $MWAF_AGENT_DEB_TARGETS; do
   case "$target" in
-    ubuntu:24.04|debian:12) ;;
-    *) echo "unsupported DEB target: $target" >&2; exit 1 ;;
+    ubuntu:18.04|ubuntu:24.04|debian:12) ;;
+    *) echo "unsupported Agent DEB target: $target" >&2; exit 1 ;;
   esac
   target_os=${target%%:*}
   target_version=${target#*:}

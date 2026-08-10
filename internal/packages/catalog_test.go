@@ -89,7 +89,7 @@ func TestResolveCRSAcceptsPolicyBundleModuleWithoutEmbeddedCRS(t *testing.T) {
 	inventory := model.Inventory{OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx"}
 	catalog := &Catalog{manifest: model.BundleManifest{Artifacts: []model.PackageArtifact{
 		{ID: "agent", Kind: "agent", Version: "2", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64"},
-		{ID: "filter", Kind: "module", Version: "2", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", RuntimeABI: "modsecurity-v3", PolicyDelivery: "bundle"},
+		{ID: "filter", Kind: "module", Version: "7", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", RuntimeABI: "modsecurity-v3", PolicyDelivery: "bundle"},
 	}}}
 	agent, module, err := catalog.ResolveCRS(inventory, "v4.25.1")
 	if err != nil {
@@ -132,6 +132,38 @@ func TestResolveSupportedDEBTargetMatrix(t *testing.T) {
 	}
 	if _, _, err := catalog.Resolve(model.Inventory{OSID: "ubuntu", OSVersion: "22.04", Architecture: "amd64", WebServer: "apache"}); err == nil {
 		t.Fatal("unsupported Ubuntu 22.04 target must not resolve")
+	}
+}
+
+func TestResolveUbuntu1804AgentWithoutAdvertisingModule(t *testing.T) {
+	inventory := model.Inventory{OSID: "ubuntu", OSVersion: "18.04", Architecture: "amd64", WebServer: "nginx"}
+	catalog := &Catalog{manifest: model.BundleManifest{Artifacts: []model.PackageArtifact{
+		{ID: "ubuntu-18.04-agent", Kind: "agent", Version: "1", OSID: "ubuntu", OSVersion: "18.04", Architecture: "amd64"},
+		{ID: "ubuntu-24.04-module", Kind: "module", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx"},
+	}}}
+	agent, err := catalog.ResolveAgent(inventory)
+	if err != nil || agent.ID != "ubuntu-18.04-agent" {
+		t.Fatalf("expected Ubuntu 18.04 Agent-only resolution, agent=%+v err=%v", agent, err)
+	}
+	if _, _, err := catalog.Resolve(inventory); err == nil {
+		t.Fatal("Ubuntu 18.04 must not advertise a distro web-server module")
+	}
+}
+
+func TestRollbackAgentDoesNotRequireModule(t *testing.T) {
+	catalog := &Catalog{byID: map[string]model.PackageArtifact{
+		"agent-new": {ID: "agent-new", Kind: "agent", RollbackID: "agent-old"},
+		"agent-old": {ID: "agent-old", Kind: "agent"},
+	}}
+	rollback, err := catalog.RollbackAgent("agent-new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rollback.ID != "agent-old" {
+		t.Fatalf("unexpected Agent rollback target %q", rollback.ID)
+	}
+	if _, err := catalog.RollbackAgent("agent-old"); err == nil {
+		t.Fatal("Agent without rollback metadata must not roll back")
 	}
 }
 

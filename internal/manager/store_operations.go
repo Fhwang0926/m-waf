@@ -18,18 +18,29 @@ const packageDeploymentPlanPrefix = "mwaf-plan-v1:"
 
 type packageDeploymentPlan struct {
 	WebServerControl string `json:"web_server_control"`
+	Scope            string `json:"scope,omitempty"`
 	Detail           string `json:"detail,omitempty"`
 }
 
 func encodePackageDeploymentPlan(controlMode string) (string, error) {
+	return encodePackageDeploymentPlanWithScope(controlMode, model.PackageScopeAgentModule)
+}
+
+func encodePackageDeploymentPlanWithScope(controlMode, scope string) (string, error) {
 	controlMode = model.NormalizeWebServerControl(controlMode)
-	if controlMode == model.WebServerControlStandard {
+	scope = model.NormalizePackageScope(scope)
+	if scope != model.PackageScopeAgent && scope != model.PackageScopeAgentModule {
+		return "", fmt.Errorf("unsupported package deployment scope %q", scope)
+	}
+	if controlMode == model.WebServerControlStandard && scope == model.PackageScopeAgentModule {
 		return "", nil
 	}
 	if controlMode != model.WebServerControlHooks {
-		return "", fmt.Errorf("unsupported web-server control mode %q", controlMode)
+		if controlMode != model.WebServerControlStandard {
+			return "", fmt.Errorf("unsupported web-server control mode %q", controlMode)
+		}
 	}
-	raw, err := json.Marshal(packageDeploymentPlan{WebServerControl: controlMode})
+	raw, err := json.Marshal(packageDeploymentPlan{WebServerControl: controlMode, Scope: scope})
 	if err != nil {
 		return "", err
 	}
@@ -38,21 +49,23 @@ func encodePackageDeploymentPlan(controlMode string) (string, error) {
 
 func decodePackageDeploymentPlan(detail string) packageDeploymentPlan {
 	if !strings.HasPrefix(detail, packageDeploymentPlanPrefix) {
-		return packageDeploymentPlan{WebServerControl: model.WebServerControlStandard}
+		return packageDeploymentPlan{WebServerControl: model.WebServerControlStandard, Scope: model.PackageScopeAgentModule}
 	}
 	var plan packageDeploymentPlan
 	if json.Unmarshal([]byte(strings.TrimPrefix(detail, packageDeploymentPlanPrefix)), &plan) != nil {
-		return packageDeploymentPlan{WebServerControl: model.WebServerControlStandard}
+		return packageDeploymentPlan{WebServerControl: model.WebServerControlStandard, Scope: model.PackageScopeAgentModule}
 	}
 	plan.WebServerControl = model.NormalizeWebServerControl(plan.WebServerControl)
+	plan.Scope = model.NormalizePackageScope(plan.Scope)
 	return plan
 }
 
 func encodePackageDeploymentResult(plan packageDeploymentPlan, detail string) (string, error) {
-	if model.NormalizeWebServerControl(plan.WebServerControl) != model.WebServerControlHooks {
+	plan.Scope = model.NormalizePackageScope(plan.Scope)
+	if model.NormalizeWebServerControl(plan.WebServerControl) != model.WebServerControlHooks && plan.Scope != model.PackageScopeAgent {
 		return detail, nil
 	}
-	plan.WebServerControl = model.WebServerControlHooks
+	plan.WebServerControl = model.NormalizeWebServerControl(plan.WebServerControl)
 	plan.Detail = detail
 	raw, err := json.Marshal(plan)
 	if err != nil {
@@ -317,6 +330,48 @@ func (s *Store) AssignPackagesWithControl(ctx context.Context, enterpriseID, ser
 		return "", err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE desired_states SET agent_package_id=?,module_package_id=?,package_deployment_id=? WHERE server_id=?`, agentID, moduleID, id, serverID)
+	if err != nil {
+		return "", err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		if err != nil {
+			return "", err
+		}
+		return "", sql.ErrNoRows
+	}
+	return id, tx.Commit()
+}
+
+// AssignAgentPackage schedules an Agent-only deployment while preserving the
+// currently selected module and policy. The existing package_deployments
+// columns are reused, so this operation does not require a schema migration.
+func (s *Store) AssignAgentPackage(ctx context.Context, enterpriseID, serverID, agentID, userID string) (string, error) {
+	if agentID == "" {
+		return "", errors.New("agent package is required")
+	}
+	planDetail, err := encodePackageDeploymentPlanWithScope(model.WebServerControlStandard, model.PackageScopeAgent)
+	if err != nil {
+		return "", err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var currentModule sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT ds.module_package_id
+FROM servers s JOIN desired_states ds ON ds.server_id=s.id
+WHERE s.id=? AND s.revoked_at IS NULL AND (?='' OR s.enterprise_id=?) FOR UPDATE`, serverID, enterpriseID, enterpriseID).Scan(&currentModule); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE package_deployments SET status='SUPERSEDED',detail='새 배포 요청으로 대체됨',updated_at=UTC_TIMESTAMP(6) WHERE server_id=? AND status='PENDING'`, serverID); err != nil {
+		return "", err
+	}
+	id := randomID()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO package_deployments(id,server_id,agent_package_id,module_package_id,status,detail,requested_by) VALUES (?,?,?,?,'PENDING',?,NULLIF(?,''))`, id, serverID, agentID, currentModule.String, planDetail, userID); err != nil {
+		return "", err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE desired_states SET agent_package_id=?,package_deployment_id=? WHERE server_id=?`, agentID, id, serverID)
 	if err != nil {
 		return "", err
 	}

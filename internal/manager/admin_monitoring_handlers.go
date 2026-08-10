@@ -380,6 +380,16 @@ func policyDetailURL(id string) string {
 	return "/policies/" + id
 }
 
+func serverDetailTab(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "environment", "policies", "packages", "commands", "risk":
+		return value
+	default:
+		return "status"
+	}
+}
+
 func (s *Server) serverDetail(w http.ResponseWriter, r *http.Request) {
 	session := sessionFrom(r)
 	server, err := s.store.ServerByID(r.Context(), session.ScopeEnterpriseID(), r.PathValue("id"))
@@ -402,50 +412,88 @@ func (s *Server) serverDetail(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if s.catalog != nil {
-		_, _, rollbackErr := s.catalog.Rollback(server.AgentPackageID, server.ModulePackageID)
-		server.CanRollbackPackages = rollbackErr == nil
+	tab := serverDetailTab(r.URL.Query().Get("tab"))
+	if tab == "risk" && (server.Revoked || !session.CanOperate()) {
+		tab = "status"
 	}
-	commands, err := s.store.ListServerCommands(r.Context(), session.ScopeEnterpriseID(), server.ID, 50)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 제어 이력을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	policies, err := s.store.ListEnterprisePolicies(r.Context(), server.EnterpriseID, 5000)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "적용 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	assigned := make([]EnterprisePolicyRecord, 0)
-	for _, policy := range policies {
-		if policy.ID == server.EnterprisePolicyID {
-			assigned = append(assigned, policy)
-			break
+	var commands []AgentCommandRecord
+	var assigned []EnterprisePolicyRecord
+	var installationCandidates []serverInstallationCandidateView
+	agentSelfUpdateReady := false
+	agentPackageAvailable := false
+	agentUpdateAvailable := false
+	agentUpdateBlockedReason := ""
+	canRollbackAgent := false
+	latestAgentVersion := ""
+	installerSHA256 := ""
+	switch tab {
+	case "commands":
+		commands, err = s.store.ListServerCommands(r.Context(), session.ScopeEnterpriseID(), server.ID, 50)
+		if err != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "서버 제어 이력을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
 		}
-	}
-	installationCandidates := make([]serverInstallationCandidateView, 0, len(server.Inventory.WebServerCandidates))
-	candidates := server.Inventory.WebServerCandidates
-	if len(candidates) == 0 && server.Inventory.WebServer != "" {
-		candidates = []model.WebServerCandidate{{Kind: server.Inventory.WebServer, Version: server.Inventory.WebServerVersion, BuildHash: server.Inventory.WebServerBuild, PackageManaged: model.NormalizeIntegrationMode(server.Inventory.IntegrationMode) == model.IntegrationModeDistro}}
-	}
-	for _, candidate := range candidates {
-		view := serverInstallationCandidateView{Kind: candidate.Kind, Version: candidate.Version, BuildHash: candidate.BuildHash, Binary: candidate.Binary, PackageManaged: candidate.PackageManaged, ConfigTestOK: candidate.ConfigTestOK}
-		if s.catalog != nil {
-			inventory := server.Inventory
-			inventory.WebServer, inventory.WebServerVersion, inventory.WebServerBuild = candidate.Kind, candidate.Version, candidate.BuildHash
-			if candidate.PackageManaged {
-				inventory.IntegrationMode, inventory.InstallationMode = model.IntegrationModeDistro, model.InstallationModePackage
-				_, _, resolveErr := s.catalog.Resolve(inventory)
-				view.PackageAvailable = resolveErr == nil
-			} else {
-				inventory.IntegrationMode, inventory.InstallationMode = model.IntegrationModeExternal, model.InstallationModeCustomZIP
-				_, _, resolveErr := s.catalog.Resolve(inventory)
-				view.CustomZIPAvailable = resolveErr == nil
+	case "policies":
+		policies, policyErr := s.store.ListEnterprisePolicies(r.Context(), server.EnterpriseID, 5000)
+		if policyErr != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "적용 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+		for _, policy := range policies {
+			if policy.ID == server.EnterprisePolicyID {
+				assigned = append(assigned, policy)
+				break
 			}
 		}
-		installationCandidates = append(installationCandidates, view)
+	case "packages":
+		if s.catalog != nil {
+			_, _, rollbackErr := s.catalog.Rollback(server.AgentPackageID, server.ModulePackageID)
+			server.CanRollbackPackages = rollbackErr == nil
+			agentSelfUpdateReady = model.HasCapability(server.Inventory.Capabilities, model.AgentCapabilitySelfUpdate) && model.HasCapability(server.Inventory.Capabilities, model.AgentCapabilityLocalRollback)
+			if latestAgent, resolveErr := s.catalog.ResolveAgent(server.Inventory); resolveErr == nil {
+				agentPackageAvailable = true
+				latestAgentVersion = latestAgent.Version
+				if latestAgent.Version != server.Inventory.AgentVersion {
+					if _, rollbackErr := s.catalog.RollbackAgent(latestAgent.ID); rollbackErr == nil {
+						agentUpdateAvailable = true
+					} else {
+						agentUpdateBlockedReason = "직전 검증 Agent가 bundle에 없어 자동 복구가 준비되지 않았습니다."
+					}
+				}
+			}
+			_, rollbackErr = s.catalog.RollbackAgent(server.AgentPackageID)
+			canRollbackAgent = rollbackErr == nil
+		}
+		installerSHA256, _ = bootstrapInstallerSHA256()
+		candidates := server.Inventory.WebServerCandidates
+		if len(candidates) == 0 && server.Inventory.WebServer != "" {
+			candidates = []model.WebServerCandidate{{Kind: server.Inventory.WebServer, Version: server.Inventory.WebServerVersion, BuildHash: server.Inventory.WebServerBuild, PackageManaged: model.NormalizeIntegrationMode(server.Inventory.IntegrationMode) == model.IntegrationModeDistro}}
+		}
+		installationCandidates = make([]serverInstallationCandidateView, 0, len(candidates))
+		for _, candidate := range candidates {
+			view := serverInstallationCandidateView{Kind: candidate.Kind, Version: candidate.Version, BuildHash: candidate.BuildHash, Binary: candidate.Binary, PackageManaged: candidate.PackageManaged, ConfigTestOK: candidate.ConfigTestOK}
+			if s.catalog != nil {
+				inventory := server.Inventory
+				inventory.WebServer, inventory.WebServerVersion, inventory.WebServerBuild = candidate.Kind, candidate.Version, candidate.BuildHash
+				if candidate.PackageManaged {
+					inventory.IntegrationMode, inventory.InstallationMode = model.IntegrationModeDistro, model.InstallationModePackage
+					_, _, resolveErr := s.catalog.Resolve(inventory)
+					view.PackageAvailable = resolveErr == nil
+				} else {
+					inventory.IntegrationMode, inventory.InstallationMode = model.IntegrationModeExternal, model.InstallationModeCustomZIP
+					_, _, resolveErr := s.catalog.Resolve(inventory)
+					view.CustomZIPAvailable = resolveErr == nil
+				}
+			}
+			installationCandidates = append(installationCandidates, view)
+		}
 	}
-	data := map[string]any{"Server": server, "Commands": commands, "Policies": assigned, "InstallationCandidates": installationCandidates, "Notice": r.URL.Query().Get("notice"), "ScopeLabel": server.EnterpriseName}
+	data := map[string]any{
+		"Server": server, "Tab": tab, "Commands": commands, "Policies": assigned, "InstallationCandidates": installationCandidates,
+		"AgentSelfUpdateReady": agentSelfUpdateReady, "AgentPackageAvailable": agentPackageAvailable, "AgentUpdateAvailable": agentUpdateAvailable,
+		"AgentUpdateBlockedReason": agentUpdateBlockedReason, "CanRollbackAgent": canRollbackAgent, "LatestAgentVersion": latestAgentVersion, "AgentURL": s.cfg.PublicURL,
+		"BootstrapInstallerSHA256": installerSHA256, "Notice": r.URL.Query().Get("notice"), "ScopeLabel": server.EnterpriseName,
+	}
 	_ = s.templates.ExecuteTemplate(w, "server-detail.html", s.viewData(r, "servers", data))
 }
 

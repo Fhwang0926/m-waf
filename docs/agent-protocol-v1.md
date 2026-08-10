@@ -14,7 +14,7 @@ Agent never accepts an inbound management connection. At the configured heartbea
 
 Audit events are uploaded by a separate Agent-initiated batch loop. Manager does not use WebSocket, server push, reverse callbacks, or an Agent listening socket.
 
-Heartbeat inventory reports optional capability fields including `installation_mode`, Connector version/load state, configtest status, and supported policy artifact formats. Manager uses those reported capabilities for compatibility gates instead of assuming that every Connector came from an M-WAF module package. Older Agents may omit the fields and continue on the legacy package-managed path.
+Heartbeat inventory reports optional capability fields including `cpu_core_count`, `memory_total_bytes`, `installation_mode`, Connector version/load state, configtest status, supported policy artifact formats, and the `capabilities` list. Agent `0.2.0` reports `agent-self-update-v1` and `agent-local-rollback-v1`; Manager creates Agent-only desired state only when both are present. Older Agents may omit the fields and continue on the legacy package-managed path, or use the authenticated one-time upgrade endpoint through the verified installer.
 
 ## Authoritative contract
 
@@ -54,7 +54,10 @@ The shared TLS listener accepts a client certificate when supplied. Every authen
 | GET | `/agent/v1/desired-state` | none | `DesiredState` |
 | GET | `/agent/v1/policy-key` | none | Ed25519 public key PEM |
 | GET | `/agent/v1/artifacts/{id}` | none | signed policy artifact |
+| GET | `/agent/v1/base-artifacts/{id}` | none | signed immutable base-policy artifact assigned to the Agent |
 | GET | `/agent/v1/packages/{id}` | none | signed package artifact |
+| POST | `/agent/v1/upgrades` | none | latest compatible Agent deployment for the existing mTLS identity |
+| POST | `/agent/v1/upgrades/complete` | Agent version | confirm the one-time legacy transition after the new-version heartbeat is visible |
 | POST | `/agent/v1/events/batch` | `EventBatch` | empty success |
 | POST | `/agent/v1/policies/{id}/result` | `DeploymentResult` | empty success |
 | POST | `/agent/v1/package-deployments/{id}/result` | `DeploymentResult` | empty success |
@@ -62,6 +65,10 @@ The shared TLS listener accepts a client certificate when supplied. Every authen
 | POST | `/agent/v1/commands/{id}/result` | `DeploymentResult` | empty success |
 
 Bootstrap installer, package resolution, and package-key paths are in the same protocol package. Policy artifacts are limited to 64 MiB, package artifacts to 1 GiB, and one event batch to 500 events. The event verification header is an authentication hardening change and requires a coordinated Manager and Agent configuration rollout; deploying the Manager first will reject event batches from Agents that do not yet have the protected token file.
+
+For Agent-only updates, `PackageDeployment.scope` is `agent`, `agent` contains the target DEB, and `rollback_agent` may contain the previous verified DEB. The `module` field is omitted and the Agent does not touch module, policy, or web-server configuration state. A missing scope keeps the existing `agent_module` behavior for older peers.
+
+For new structured enterprise revisions, `DesiredState` includes `base_policy` and `override_policy`. Manager first validates that the immutable system base plus the enterprise-only override reproduces the effective configuration, then signs both artifacts and pins the base hash, override configuration hash, effective configuration hash, and validation digest in the override manifest. Agent downloads both artifacts from the Manager, verifies both signatures and hashes, verifies the pinned composition fields, merges only their allowlisted files, and runs the existing web-server configtest before the atomic switch. Existing `conf-v1`, `policy-bundle-v2`, and `policy-bundle-v3` desired states remain readable through the legacy single-artifact fields.
 
 ## Compatibility rule
 

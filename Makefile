@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: fmt build-manager build-agent dev dev-full dev-bundle dev-down dev-db-logs prepare deploy pull prepare-dev deploy-dev pull-dev down logs e2e e2e-debian12 e2e-up e2e-verify e2e-status e2e-logs e2e-down e2e-remote e2e-remote-verify e2e-remote-down
+.PHONY: fmt build-manager build-agent agent-check dev dev-full dev-bundle dev-agent-bundle dev-down dev-db-logs prepare deploy pull prepare-dev deploy-dev pull-dev down logs e2e e2e-debian12 e2e-up e2e-verify e2e-status e2e-logs e2e-down e2e-remote e2e-remote-verify e2e-remote-down
 
 MWAF_E2E_REMOTE_ADMIN_URL ?= https://192.168.7.200:18443
 MWAF_E2E_REMOTE_CA_CERT ?= deploy/compose/secrets/mwaf_ca_cert.pem
@@ -19,11 +19,20 @@ build-agent:
 	mkdir -p bin
 	go build -trimpath -o bin/mwaf-agent ./cmd/mwaf-agent
 
+agent-check:
+	sh scripts/check-agent-version.sh
+	go test ./internal/agent ./internal/model ./internal/protocol
+	go vet ./cmd/mwaf-agent ./internal/agent ./internal/model ./internal/protocol
+	sh -n packaging/agent/mwaf-agent-updater packaging/agent/container/mwaf-agent-service packaging/agent/deb/build.sh internal/manager/bootstrap-install.sh
+
 dev:
 	sh ./deploy/compose/run-local.sh
 
 dev-bundle:
 	sh ./deploy/compose/build-local-bundle.sh
+
+dev-agent-bundle:
+	MWAF_DEV_AGENT_ONLY=true sh ./deploy/compose/build-local-bundle.sh
 
 dev-full: dev-bundle
 	MWAF_DEV_BUNDLE_MODE=local MWAF_DB_MIGRATE=false sh ./deploy/compose/run-local.sh

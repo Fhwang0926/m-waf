@@ -132,6 +132,23 @@ small { display: block; color: var(--muted); }
 .stats strong.small { font-size: 16px; }
 .stats.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
+.server-system-summary { padding: 0; overflow: hidden; }
+.server-system-summary > .panel-head { min-height: 72px; margin: 0; padding: 16px 20px; border-bottom: 1px solid var(--line); }
+.server-system-summary > .panel-head small { margin-top: 3px; }
+.server-system-layout { display: grid; grid-template-columns: minmax(210px, .8fr) minmax(0, 2.2fr); }
+.server-os-summary { display: flex; min-width: 0; align-items: center; gap: 16px; padding: 24px; border-right: 1px solid var(--line); background: #0c1420; }
+.server-os-summary > div:last-child { min-width: 0; }
+.server-os-summary span { color: var(--muted); font-size: 12px; }
+.server-os-summary strong { display: block; margin: 5px 0 1px; font-size: 19px; overflow-wrap: anywhere; }
+.server-os-logo { display: grid; width: 72px; height: 72px; flex: 0 0 72px; place-items: center; border: 1px solid var(--line); border-radius: 15px; background: #080f19; color: #c5d5eb; font-size: 14px; font-weight: 800; letter-spacing: .08em; }
+.server-os-logo img { display: block; width: 52px; height: 52px; object-fit: contain; }
+.server-system-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin: 0; background: var(--line); }
+.server-system-facts > div { min-width: 0; padding: 16px 18px; background: #101824; }
+.server-system-facts dt { color: var(--muted); font-size: 11px; }
+.server-system-facts dd { margin: 6px 0 0; overflow-wrap: anywhere; }
+.server-system-facts dd > strong { display: block; color: var(--text); font-size: 16px; }
+.server-system-facts dd > small { margin-top: 4px; }
+
 .panel { padding: 22px; margin-bottom: 20px; }
 .panel-head { margin-bottom: var(--space-4); }
 .panel-head h2 { margin-bottom: 0; }
@@ -585,6 +602,8 @@ pre,
   .admin-grid,
   .operations-grid,
   .operations-grid.two { grid-template-columns: 1fr; }
+  .server-system-layout { grid-template-columns: 1fr; }
+  .server-os-summary { border-right: 0; border-bottom: 1px solid var(--line); }
   .page-head { align-items: flex-start; }
   .crs-rule-item-head { grid-template-columns: 1fr; gap: 12px; }
   .crs-rule-location { padding: 0; border-left: 0; }
@@ -602,6 +621,7 @@ pre,
   .stats.three,
   .form-grid,
   .check-list,
+  .policy-toggle-list,
   .crs-source-grid,
   .crs-detail .detail-grid,
   .crs-rule-filter-grid,
@@ -613,12 +633,18 @@ pre,
   .crs-rule-list { padding: 0 16px; }
   .crs-setup-grid { padding: 16px; }
   .panel { padding: var(--space-4); }
+  .server-system-summary { padding: 0; }
+  .server-system-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .crs-rule-panel,
   .crs-setup-panel { padding: 0; }
   .table-scroll { margin-right: calc(var(--space-4) * -1); padding-right: var(--space-4); }
   .table-wide { min-width: 760px; }
   .form-actions { justify-content: stretch; }
   .form-actions > * { flex: 1; }
+}
+
+@media (max-width: 520px) {
+  .server-system-facts { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -937,6 +963,12 @@ button.account-menu-item:hover,
 .review-item span { color: var(--muted); font-size: 11px; }
 .review-item strong { display: block; margin-top: 3px; }
 .field-error { margin-top: 6px; color: #ffabad; font-size: 12px; }
+.policy-base-summary { margin-bottom: 16px; }
+.policy-custom-settings { display: grid; gap: 16px; margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: #0c1420; }
+.policy-custom-settings[hidden] { display: none; }
+.policy-custom-settings .alert { margin: 0; }
+.policy-scalar-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.policy-toggle-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 
 .policy-lifecycle { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0 0 20px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--line); }
 .policy-lifecycle > span { position: relative; min-width: 0; padding: 13px 16px; background: #0e1623; }

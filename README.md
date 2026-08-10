@@ -27,7 +27,7 @@ Before the first publication, set **Repository Settings → Pages → Build and 
 |---|---|
 | Manager | Linux amd64 host with Docker Engine and Docker Compose |
 | Database | MariaDB 11.8.6 container |
-| Customer OS | Ubuntu Server 24.04 LTS or Debian 12 Bookworm, amd64 |
+| Customer OS | Ubuntu Server 24.04 LTS or Debian 12 Bookworm, amd64; Ubuntu 18.04 amd64 is Agent discovery only |
 | Web server | Supported Ubuntu/Debian distribution packages, or an operator-managed Apache/Nginx custom build using `external` integration |
 | WAF | Distro connector package, or a compatible ModSecurity connector already built and loaded by the hosting operator |
 | Rules | OWASP CRS v4.28.0 from the repository source lock, with managed sensitivity, threshold, URL/IP exclusions, and restricted custom `SecRule` additions |
@@ -39,7 +39,7 @@ Rocky Linux/RPM, ARM64, OpenResty, automatic connector compilation, HA, and unre
 
 ## Supported customer web servers and versions
 
-The MVP supports two explicit modes on Ubuntu 24.04 LTS and Debian 12 Bookworm, both amd64. `distro` uses the selected distribution's packages. `external` keeps an operator-managed web-server binary and pre-installed ModSecurity connector, then installs only M-WAF CRS/configuration integration and the Agent.
+The full package-based MVP supports Ubuntu 24.04 LTS and Debian 12 Bookworm, both amd64. Ubuntu 18.04 amd64 can install the dependency-free Agent for registration and inventory, but it has no distro module artifact. `distro` uses the selected supported distribution's packages. `external` keeps an operator-managed web-server binary and pre-installed ModSecurity connector, then installs only M-WAF CRS/configuration integration and the Agent.
 
 | Web server | Supported server version | Confirmed Ubuntu package revision | M-WAF package | Open-source WAF components |
 |---|---:|---:|---|---|
@@ -57,7 +57,7 @@ Before downloading a module, Manager requires these inventory fields to match an
 
 | Compatibility field | Required value |
 |---|---|
-| Operating system | `/etc/os-release`: Ubuntu `24.04` or Debian `12` |
+| Operating system | Agent: Ubuntu `18.04`/`24.04` or Debian `12`; module DEB: Ubuntu `24.04` or Debian `12` |
 | Architecture | `amd64` (`x86_64`) |
 | Web-server type | Exactly `apache` or `nginx` |
 | Integration mode | Exactly `distro` or `external`; an empty legacy value means `distro` |
@@ -67,7 +67,7 @@ The distro DEBs depend on the supported distribution's ModSecurity packages. Cus
 
 ### Explicitly unsupported in this MVP
 
-- Ubuntu 22.04, Ubuntu 26.04, Debian releases other than 12, Rocky Linux, AlmaLinux, RHEL, and CentOS
+- Ubuntu 18.04 distro module packages, Ubuntu 22.04, Ubuntu 26.04, Debian releases other than 12, Rocky Linux, AlmaLinux, RHEL, and CentOS
 - ARM64 and other non-amd64 architectures
 - Custom builds where the matching ModSecurity connector is not already compiled and loaded
 - Custom layouts without an absolute control binary and a dedicated included M-WAF configuration file
@@ -118,6 +118,8 @@ make dev-full
 Because `make dev-full` requires the initial `make dev` setup, it starts the replacement Manager with schema migration disabled and keeps the existing local MariaDB volume. It does not reset or recreate the database.
 
 Use `make dev-bundle` when only the local Agent/package bundle should be rebuilt. The current local bundle path is recorded under `.local/mwaf-manager`; neither the bundle nor its development signing key is committed or uploaded. A verified schema-v2 published bundle must have been cached by one successful `make dev` before the first offline `make dev-full` run.
+
+For an Agent-only change, increase `packaging/agent/VERSION`, add the matching `docs/agent-releases/<version>.md`, and use `make agent-check` followed by `make dev-agent-bundle`. The Agent-only bundle preserves the current module and CRS artifacts byte-for-byte. The running local Manager detects the active manifest change and restarts without a database migration. See [Agent continuous connection and update](docs/agent-continuous-update.md).
 
 To reproduce a specific signed release bundle once without editing `.env`, pass its immutable tag through the development-only override:
 
@@ -215,7 +217,7 @@ The quick-install button uses the existing authenticated administrator API to cr
 
 The first-stage installer downloads and installs only the signed Agent DEB. It does not install Apache, Nginx, ModSecurity, logrotate, or a WAF module, and it does not edit or reload a web-server configuration.
 
-The same command supports Ubuntu 24.04 and Debian 12 containers. Hosts and containers use the same `/usr/sbin/mwaf-agent-service` command; it selects the existing systemd unit or the packaged lightweight supervisor automatically. A systemd-free Docker/OCI container does not install systemd or any additional runtime dependency. Check it with:
+The same Agent command supports Ubuntu 18.04/24.04 and Debian 12 containers. Ubuntu 18.04 stops after registration and inventory until an exact compatible custom ZIP module is available. Hosts and containers use the same `/usr/sbin/mwaf-agent-service` command; it selects the existing systemd unit or the packaged lightweight supervisor automatically. A systemd-free Docker/OCI container does not install systemd or any additional runtime dependency. Check it with:
 
 ```sh
 /usr/sbin/mwaf-agent-service status
@@ -245,7 +247,7 @@ dpkg-query -W -f='${binary:Package}\t${db:Status-Abbrev}\t${Version}\n' \
 
 Resolve the reported lock, disk-space, repository, dependency, or interrupted-DPKG problem first, then rerun the same reviewed Agent installer command. After Agent registration, retry module installation from the server detail page. Do not purge Apache/Nginx, delete `/etc/mwaf`, or force-install an incompatible package as a recovery shortcut.
 
-The current MVP has no supported Agent `tar.gz`, manual-copy, or RPM installation path, and a failed Agent APT transaction is not rolled back automatically. Custom builds use a signed exact-match ZIP for the web-server module, but the Agent still requires the signed Ubuntu 24.04 or Debian 12 amd64 DEB. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation](docs/custom-webserver-installation.md#실패-처리).
+The current MVP has no supported Agent `tar.gz`, manual-copy, or RPM installation path. A Manager-triggered Agent-only update keeps a verified previous Agent DEB locally and automatically restores it when the new Agent does not confirm a heartbeat; initial installation and web-server module APT failures still require the documented package-state recovery procedure. Custom builds use a signed exact-match ZIP for the web-server module. The Agent requires a signed Ubuntu 18.04/24.04 or Debian 12 amd64 DEB; Ubuntu 18.04 has no distro module package. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation](docs/custom-webserver-installation.md#실패-처리).
 
 ## Operate the MVP
 
@@ -267,19 +269,19 @@ The current MVP has no supported Agent `tar.gz`, manual-copy, or RPM installatio
 - **보호 정책**은 기업 범위의 서버 그룹 역할을 하며 한 정책에 여러 서버를 연결합니다.
 - **오픈소스 CRS** lets a system administrator verify the pinned LTS line or newest official Stable v4 source from GitHub. Manager verifies the signed annotated tag, exact commit, archive digest, Rule index, and Setup schema before storing an immutable source; synchronization never publishes or deploys a system policy.
 - **시스템 정책** is one immutable `crs-baseline` policy family managed by system administrators. CI supplies verified CRS and package artifacts but never publishes a policy. A clean Manager creates `crs-baseline@1.0.0` only after an administrator selects a verified LTS or Stable source and completes the five-step review; later publications create the next patch. CRS and policy versions cannot be typed manually. Self-contained v3 policies require a reporting Agent, a loaded Connector, a passing web-server configtest, and `policy-bundle-v3` capability. Legacy v2 policies keep package-coverage and rollback-package gates.
-- **기업 정책** adopts one published system-policy version and owns one or more server memberships, detection/blocking mode, Blocking/Executing PL, inbound/outbound thresholds, request/response-body inspection, Rule/Target/Tag exceptions, restricted custom `SecRule` lines, emergency bypasses, and update strategy. Each server belongs to at most one active protection policy. New standalone policies are blocked; untraceable existing revisions remain `LEGACY_LOCKED` until an administrator explicitly converts them.
+- **기업 정책** adopts one published system-policy version and owns one or more server memberships, an explicit choice to inherit system policy scalars or override them, Rule/Target/Tag exceptions, restricted custom `SecRule` lines, emergency bypasses, and update strategy. Manager validates the composed base plus enterprise override before signing a revision. Each server belongs to at most one active protection policy. New standalone policies are blocked; untraceable existing revisions remain `LEGACY_LOCKED` until an administrator explicitly converts them.
 - On a clean installation, enterprise policy creation waits until a system administrator publishes the first canonical `crs-baseline`. A newly enrolled server remains unassigned with a `DetectionOnly` safe placeholder. An enterprise user creates a protection policy by selecting at least one server, and Manager automatically inherits the currently published system policy; it does not create an enterprise-wide default policy automatically.
 - Enterprise users choose `MANUAL` (approve each update), `AUTOMATIC` (start a staged rollout), or `PINNED` (show updates without applying them).
 - The policy controller runs at startup, after enrollment and Agent state changes, and every `MWAF_POLICY_SYNC_INTERVAL` (default `15m`). Updates, rollback, and synchronization target only the servers currently connected to each protection policy.
 - Every update uses one online canary, observes the exact CRS/revision and recent heartbeat for 10 minutes, and then expands in batches of at most 25. Expansion stops when the new block rate exceeds the greater of 5 per minute or three times the previous 60-minute baseline. A failed canary is restored automatically; offline servers remain deferred and an offline pre-apply canary is replaced by another online target.
-- When a self-contained CRS source changes, Manager deploys the signed immutable v3 policy containing the unchanged upstream CRS files and reviewed overlays. Package-managed legacy v2 transitions continue to use the compatible signed Agent/module pair. The migration preserves enterprise settings and validated custom rules.
+- When a self-contained CRS source changes, Manager signs the immutable base containing unchanged upstream CRS files separately from the enterprise override. Agent fetches both from Manager, verifies their pinned composition, and applies them atomically. Package-managed legacy v2 transitions continue to use the compatible signed Agent/module pair. The migration preserves enterprise settings and validated custom rules.
 - Enterprise users can retry a failed rollout or roll back only to the immediately previous successful revision. Rollback restores the compatible Agent/CRS package pair as well as the policy and is blocked when the signed bundle is missing or the target system-policy version is withdrawn.
 - **서버 제어** queues only four fixed polling commands: Agent restart/stop and server restart/poweroff. Arbitrary shell input is not accepted.
 - **패키지 제어** force-installs the current compatible signed bundle or its explicit rollback pair; success is recorded only after the restarted Agent reports matching installed versions.
 - **등록 해제** preserves server/event history but blocks the enrolled Agent certificate immediately.
 - **사용자 관리** is limited to enterprise/system administrators and supports administrator creation, display-name/role/password updates, activation changes, and audit-preserving soft deletion within scope. **내 계정** lets every signed-in user rotate their own password and invalidates existing sessions.
-- Existing `conf-v1` and `policy-bundle-v2` revisions remain supported. New Manager-imported system-policy revisions use signed self-contained `policy-bundle-v3` artifacts with `00-engine.conf`, CRS Setup, before/after exclusions, unchanged upstream CRS files, and service Rules in a fixed order.
-- Agent verifies the Ed25519 signature, whole-artifact SHA-256, tar entry allowlist, and every manifest file hash; stages a revision directory, atomically switches `/etc/mwaf/active`, runs `apachectl configtest` or `nginx -t`, and performs a graceful reload.
+- Existing `conf-v1`, `policy-bundle-v2`, and single-artifact `policy-bundle-v3` revisions remain supported. New structured enterprise revisions derived from a v3 system policy use a signed `policy-base-v1` artifact plus a signed `policy-override-v1` artifact. Manager validates the effective composition and records its digest before delivery.
+- Agent verifies both Ed25519 signatures, whole-artifact SHA-256 values, the pinned base/override/effective hashes, tar entry allowlists, and every manifest file hash; stages the combined revision directory, atomically switches `/etc/mwaf/active`, runs `apachectl configtest` or `nginx -t`, and performs a graceful reload.
 - If validation or reload fails, Agent atomically restores the previous revision and revalidates the web server.
 - Each Agent uses a Manager-issued client certificate so the mTLS API can bind all Agent traffic to one enrolled server. Detection-event batches additionally include the enterprise installation verification token; that token is not sent to heartbeat, policy, package, command, or certificate APIs.
 - Agent renews its 90-day mTLS certificate with the existing private key beginning 30 days before expiration. A renewed certificate replaces the stored serial on its first authenticated request; the prior serial is then rejected.
@@ -390,13 +392,14 @@ Relevant pull requests, manual workflow dispatches, and pushed Git tags run `.gi
 2. builds the Linux amd64 Agent;
 3. builds `mwaf-agent` and four Apache/Nginx distro/external integration DEB packages;
 4. reads the LTS and Stable CRS tag/commit/archive/hash entries from `packaging/sources.lock.yaml`, restores both exact archives, and verifies both locked SHA-256 values;
-5. records Ubuntu 24.04 and Debian 12 compatibility, architecture, and web-server type in the bundle catalog;
-6. installs the Agent and Apache module on clean pinned Ubuntu 24.04 and Debian 12 amd64 containers, runs `apachectl configtest`, verifies a `DetectionOnly` request remains HTTP `200`, then verifies an `On` request is blocked with HTTP `403`;
-7. repeats the same install, detection, blocking, and `nginx -t` checks for Nginx on both operating systems;
-8. verifies all four clean environments load ModSecurity and write distinct detection and blocking markers to the protected audit log;
-9. installs the external packages against pre-installed Apache/Nginx connectors through non-default absolute binary paths and verifies they do not depend on distro web-server packages;
-10. starts both web servers with a deterministic test rule, verifies an HTTP `403` response and a non-empty JSON audit log, and checks the dedicated include, configuration test, CRS, log path, and managed-file guard;
-11. signs a temporary five-file, ten-platform-artifact verification bundle without creating a Manager Docker image.
+5. records Ubuntu 18.04 Agent-only compatibility and Ubuntu 24.04/Debian 12 full package compatibility in the bundle catalog;
+6. installs and executes the dependency-free Agent DEB on a clean pinned Ubuntu 18.04 amd64 container and confirms that it adds no Apache/Nginx files;
+7. installs the Agent and Apache module on clean pinned Ubuntu 24.04 and Debian 12 amd64 containers, runs `apachectl configtest`, verifies a `DetectionOnly` request remains HTTP `200`, then verifies an `On` request is blocked with HTTP `403`;
+8. repeats the same install, detection, blocking, and `nginx -t` checks for Nginx on both operating systems;
+9. verifies all four clean environments load ModSecurity and write distinct detection and blocking markers to the protected audit log;
+10. installs the external packages against pre-installed Apache/Nginx connectors through non-default absolute binary paths and verifies they do not depend on distro web-server packages;
+11. starts both web servers with a deterministic test rule, verifies an HTTP `403` response and a non-empty JSON audit log, and checks the dedicated include, configuration test, CRS, log path, and managed-file guard;
+12. signs a temporary five-file, eleven-platform-artifact verification bundle without creating a Manager Docker image.
 
 The workflow reuses bounded caches for Go modules/build outputs keyed by `go.sum`, CRS archives keyed by their locked SHA-256, pinned Ubuntu 24.04 and Debian 12 Apache/Nginx install-test fixtures, and Manager BuildKit layers. The fixtures are refreshed at least once per UTC week so distribution dependency drift is still detected; within that period they only avoid repeating package downloads. Every verification run still installs the newly built local DEBs and performs the same configuration, module-load, HTTP detection, HTTP blocking, and audit-log checks. Cache misses fall back to normal downloads and builds. Release signing keys, signed bundles, DEBs, workflow artifacts, and GHCR rollback inputs are never restored from these cross-run caches.
 

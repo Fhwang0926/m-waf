@@ -708,12 +708,6 @@ func structuredConfigurationFromPolicy(ownerSystemPolicyID, ownerRevisionID stri
 	for _, value := range template.Defaults.ExcludedPaths {
 		appendBypass(PolicyScopeSystem, "REQUEST_URI", "@beginsWith", value)
 	}
-	for _, value := range settings.ExcludedIPs {
-		appendBypass(PolicyScopeEnterprise, "REMOTE_ADDR", "@ipMatch", value)
-	}
-	for _, value := range settings.ExcludedPaths {
-		appendBypass(PolicyScopeEnterprise, "REQUEST_URI", "@beginsWith", value)
-	}
 	for _, item := range template.Defaults.EngineBypasses {
 		exclusion := PolicyExclusion{
 			ID: randomID(), SourceScope: PolicyScopeSystem, Type: PolicyExclusionEngineBypass, LoadStage: PolicyExclusionBefore,
@@ -724,16 +718,6 @@ func structuredConfigurationFromPolicy(ownerSystemPolicyID, ownerRevisionID stri
 			exclusion.Conditions = append(exclusion.Conditions, PolicyExclusionCondition{Field: condition.Field, Operator: condition.Operator, Value: condition.Value, Order: index})
 		}
 		configuration.Exclusions = append(configuration.Exclusions, exclusion)
-	}
-	for _, item := range settings.Exclusions {
-		item.ID = randomID()
-		item.SourceScope = PolicyScopeEnterprise
-		item.Order = len(configuration.Exclusions)
-		if item.LoadStage == PolicyExclusionBefore && len(item.Conditions) != 0 && item.GeneratedRuleID == 0 {
-			item.GeneratedRuleID = generatedID
-			generatedID++
-		}
-		configuration.Exclusions = append(configuration.Exclusions, item)
 	}
 	appendRuleExclusions := func(scope, stage string, items []systempolicy.RuleExclusion) {
 		for _, item := range items {
@@ -767,6 +751,25 @@ func structuredConfigurationFromPolicy(ownerSystemPolicyID, ownerRevisionID stri
 			}
 		}
 		configuration.Exclusions = append(configuration.Exclusions, exclusion)
+	}
+	// The system layer always owns the first generated-ID range. Enterprise
+	// runtime rules are reassigned after it so separately rendered base and
+	// override artifacts cannot reserve the same ModSecurity Rule ID.
+	for _, value := range settings.ExcludedIPs {
+		appendBypass(PolicyScopeEnterprise, "REMOTE_ADDR", "@ipMatch", value)
+	}
+	for _, value := range settings.ExcludedPaths {
+		appendBypass(PolicyScopeEnterprise, "REQUEST_URI", "@beginsWith", value)
+	}
+	for _, item := range settings.Exclusions {
+		item.ID = randomID()
+		item.SourceScope = PolicyScopeEnterprise
+		item.Order = len(configuration.Exclusions)
+		if item.LoadStage == PolicyExclusionBefore && len(item.Conditions) != 0 {
+			item.GeneratedRuleID = generatedID
+			generatedID++
+		}
+		configuration.Exclusions = append(configuration.Exclusions, item)
 	}
 	appendCustomRules := func(scope, raw string) error {
 		if strings.TrimSpace(raw) == "" {

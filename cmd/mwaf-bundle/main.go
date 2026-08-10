@@ -202,11 +202,13 @@ func stagePolicySources(metadataDir, inputDir, outputDir string, artifacts []mod
 				strings.TrimPrefix(artifact.CRSVersion, "v") == strings.TrimPrefix(item.Version, "v"))
 			if compatibleModule {
 				item.CompatiblePackageIDs = append(item.CompatiblePackageIDs, artifact.ID)
-				for _, candidate := range artifacts {
-					if candidate.Kind == "agent" && candidate.Version == artifact.Version && (item.ArtifactFormat != "policy-bundle-v3" || contains(candidate.PolicyFormats, "policy-bundle-v3")) {
-						item.CompatiblePackageIDs = append(item.CompatiblePackageIDs, candidate.ID)
-					}
-				}
+			}
+		}
+		// Agent and web-server module releases are independent. Compatibility is
+		// determined by the policy wire format, not by equal package versions.
+		for _, artifact := range artifacts {
+			if artifact.Kind == "agent" && contains(artifact.PolicyFormats, item.ArtifactFormat) {
+				item.CompatiblePackageIDs = append(item.CompatiblePackageIDs, artifact.ID)
 			}
 		}
 		item.CompatiblePackageIDs = uniqueSorted(item.CompatiblePackageIDs)

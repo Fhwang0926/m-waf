@@ -36,6 +36,7 @@ type policyValidationRequest struct {
 	Name                   string             `json:"name"`
 	Description            string             `json:"description"`
 	Mode                   string             `json:"mode"`
+	ScalarSource           string             `json:"scalar_source,omitempty"`
 	ParanoiaLevel          int                `json:"paranoia_level"`
 	InboundScore           int                `json:"inbound_score"`
 	RequestBody            bool               `json:"request_body"`
@@ -73,23 +74,28 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 	if request.Name == "" {
 		fieldErrors["name"] = "정책 이름을 입력하세요."
 	}
-	if request.ExecutingParanoiaLevel == 0 {
-		request.ExecutingParanoiaLevel = request.ParanoiaLevel
+	if request.ScalarSource == "" {
+		request.ScalarSource = PolicyScalarSourceInherit
 	}
-	if request.ExecutingParanoiaLevel < request.ParanoiaLevel || request.ExecutingParanoiaLevel > 4 {
-		fieldErrors["executing_paranoia_level"] = "Executing PL은 Blocking PL 이상 4 이하여야 합니다."
-	}
-	if request.OutboundScore == 0 {
-		request.OutboundScore = 4
-	}
-	if request.OutboundScore < 1 || request.OutboundScore > 100 {
-		fieldErrors["outbound_score"] = "Outbound 임계점수는 1..100이어야 합니다."
-	}
-	if request.SamplingPercentage == 0 {
-		request.SamplingPercentage = 100
-	}
-	if request.SamplingPercentage < 1 || request.SamplingPercentage > 100 {
-		fieldErrors["sampling_percentage"] = "Sampling 비율은 1..100이어야 합니다."
+	if request.ScalarSource == PolicyScalarSourceCustom {
+		if request.ExecutingParanoiaLevel == 0 {
+			request.ExecutingParanoiaLevel = request.ParanoiaLevel
+		}
+		if request.ExecutingParanoiaLevel < request.ParanoiaLevel || request.ExecutingParanoiaLevel > 4 {
+			fieldErrors["executing_paranoia_level"] = "Executing PL은 Blocking PL 이상 4 이하여야 합니다."
+		}
+		if request.OutboundScore == 0 {
+			request.OutboundScore = 4
+		}
+		if request.OutboundScore < 1 || request.OutboundScore > 100 {
+			fieldErrors["outbound_score"] = "Outbound 임계점수는 1..100이어야 합니다."
+		}
+		if request.SamplingPercentage == 0 {
+			request.SamplingPercentage = 100
+		}
+		if request.SamplingPercentage < 1 || request.SamplingPercentage > 100 {
+			fieldErrors["sampling_percentage"] = "Sampling 비율은 1..100이어야 합니다."
+		}
 	}
 	customRules, err := mergeGuidedPolicyRules(request.CustomRules, request.GuidedRules)
 	if err != nil {
@@ -133,6 +139,22 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 		CRSTrack: policyTemplate.CRSTrack, CRSVersion: policyTemplate.CRSVersion, Target: "protection-policy",
 		PolicyOrigin: "administrator", MigrationStatus: "CURRENT",
 	}
+	requestedSettings := PolicySettings{
+		ScalarSource: request.ScalarSource, ParanoiaLevel: request.ParanoiaLevel, ExecutingParanoiaLevel: request.ExecutingParanoiaLevel,
+		InboundScore: request.InboundScore, OutboundScore: request.OutboundScore, RequestBody: request.RequestBody,
+		ResponseBody: request.ResponseBody, EarlyBlocking: request.EarlyBlocking, SamplingPercentage: request.SamplingPercentage,
+	}
+	if request.ScalarSource == PolicyScalarSourceCustom {
+		requestedSettings.ScalarOverrides = &PolicyScalarOverrides{
+			Mode: request.Mode, ParanoiaLevel: request.ParanoiaLevel, ExecutingParanoiaLevel: request.ExecutingParanoiaLevel,
+			InboundScore: request.InboundScore, OutboundScore: request.OutboundScore, RequestBody: request.RequestBody,
+			ResponseBody: request.ResponseBody, EarlyBlocking: request.EarlyBlocking, SamplingPercentage: request.SamplingPercentage,
+		}
+	}
+	resolvedMode, resolvedSettings, scalarErr := resolvePolicyScalars(policyTemplate, request.Mode, requestedSettings)
+	if scalarErr != nil {
+		fieldErrors["scalar_source"] = scalarErr.Error()
+	}
 	policyImpact := func() (string, []string, error) {
 		if request.PolicyID != "" {
 			return request.EnterpriseID, request.ServerIDs, nil
@@ -140,17 +162,23 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 		return s.store.ValidatePolicyServerIDs(r.Context(), session.ScopeEnterpriseID(), request.EnterpriseID, request.ServerIDs)
 	}
 	if request.ConfigSchemaVersion == PolicyConfigStorageStructured {
-		configuration := PolicyConfiguration{
-			PolicyRevisionID: "validation", EngineMode: request.Mode, BlockingParanoiaLevel: request.ParanoiaLevel,
-			ExecutingParanoiaLevel: request.ExecutingParanoiaLevel, InboundAnomalyThreshold: request.InboundScore,
-			OutboundAnomalyThreshold: request.OutboundScore, RequestBodyAccess: request.RequestBody, ResponseBodyAccess: request.ResponseBody,
-			EarlyBlocking: request.EarlyBlocking, SamplingPercentage: request.SamplingPercentage, RuleIDNamespaceVersion: 1,
-			Exclusions: request.Exclusions, CustomRules: request.CustomRuleObjects,
+		configuration, _, configurationErr := structuredConfigurationFromPolicy("", "validation", policyTemplate, resolvedMode, resolvedSettings)
+		if configurationErr == nil {
+			for _, exclusion := range request.Exclusions {
+				exclusion.SourceScope = PolicyScopeEnterprise
+				exclusion.Order = len(configuration.Exclusions)
+				configuration.Exclusions = append(configuration.Exclusions, exclusion)
+			}
+			for _, rule := range request.CustomRuleObjects {
+				rule.SourceScope = PolicyScopeEnterprise
+				rule.Order = len(configuration.CustomRules)
+				configuration.CustomRules = append(configuration.CustomRules, rule)
+			}
+			configurationErr = configuration.UpdateDigest()
 		}
-		if policyTemplate.Defaults.CRSSource != nil {
-			configuration.CRSReleaseID = policyTemplate.Defaults.CRSSource.ID
-		}
-		if err := configuration.UpdateDigest(); err != nil {
+		if configurationErr != nil {
+			fieldErrors["configuration"] = configurationErr.Error()
+		} else if err := configuration.UpdateDigest(); err != nil {
 			fieldErrors["configuration"] = err.Error()
 		} else if err := configuration.ValidateAt(time.Now().UTC()); err != nil {
 			fieldErrors["configuration"] = err.Error()
@@ -173,7 +201,7 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "normalized": map[string]any{"name": request.Name, "description": request.Description, "configuration": configuration}, "impact": map[string]any{"enterprise_id": enterpriseID, "server_ids": serverIDs, "server_count": len(serverIDs)}})
 		return
 	}
-	_, settingsJSON, buildErr := buildEnterprisePolicyArtifact(policyTemplate, request.Mode, request.ParanoiaLevel, request.InboundScore, request.RequestBody, request.ExcludedPaths, request.ExcludedIPs, customRules, metadata)
+	_, settingsJSON, buildErr := buildEnterprisePolicyArtifact(policyTemplate, resolvedMode, resolvedSettings.ParanoiaLevel, resolvedSettings.InboundScore, resolvedSettings.RequestBody, request.ExcludedPaths, request.ExcludedIPs, customRules, metadata)
 	if buildErr != nil {
 		fieldErrors[policyErrorField(buildErr)] = buildErr.Error()
 	}
@@ -189,12 +217,14 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	var settings PolicySettings
 	_ = json.Unmarshal([]byte(settingsJSON), &settings)
-	settings.ExecutingParanoiaLevel = request.ExecutingParanoiaLevel
-	settings.OutboundScore = request.OutboundScore
-	settings.ResponseBody = request.ResponseBody
-	settings.EarlyBlocking = request.EarlyBlocking
-	settings.SamplingPercentage = request.SamplingPercentage
-	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "normalized": map[string]any{"name": request.Name, "description": request.Description, "mode": request.Mode, "settings": settings}, "impact": map[string]any{"enterprise_id": enterpriseID, "server_ids": serverIDs, "server_count": len(serverIDs)}})
+	settings.ScalarSource = resolvedSettings.ScalarSource
+	settings.ScalarOverrides = resolvedSettings.ScalarOverrides
+	settings.ExecutingParanoiaLevel = resolvedSettings.ExecutingParanoiaLevel
+	settings.OutboundScore = resolvedSettings.OutboundScore
+	settings.ResponseBody = resolvedSettings.ResponseBody
+	settings.EarlyBlocking = resolvedSettings.EarlyBlocking
+	settings.SamplingPercentage = resolvedSettings.SamplingPercentage
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "normalized": map[string]any{"name": request.Name, "description": request.Description, "mode": resolvedMode, "settings": settings}, "impact": map[string]any{"enterprise_id": enterpriseID, "server_ids": serverIDs, "server_count": len(serverIDs)}})
 }
 
 func policyErrorField(err error) string {
@@ -440,6 +470,10 @@ func (s *Server) editEnterprisePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings := policy.CurrentSettings
+	scalarSource := settings.ScalarSource
+	if scalarSource == "" {
+		scalarSource = PolicyScalarSourceCustom
+	}
 	ruleExclusions, tagExclusions, targetExclusions, conditionalExclusions := enterpriseExclusionFormValues(settings.Exclusions)
 	existingEngineBypasses := 0
 	for _, exclusion := range settings.Exclusions {
@@ -464,7 +498,7 @@ func (s *Server) editEnterprisePolicy(w http.ResponseWriter, r *http.Request) {
 	form := map[string]any{
 		"IsEdit": true, "EditPolicy": policy, "FormEnterpriseID": policy.EnterpriseID, "FormExpectedRevision": policy.CurrentRevisionID,
 		"FormTemplateKey": settings.TemplateKey, "FormName": policy.Name, "FormDescription": policy.Description, "FormTarget": policy.Target,
-		"FormStrategy": policy.UpdateStrategy, "FormMode": policy.CurrentMode, "FormParanoia": strconv.Itoa(settings.ParanoiaLevel),
+		"FormStrategy": policy.UpdateStrategy, "FormScalarSource": scalarSource, "FormMode": policy.CurrentMode, "FormParanoia": strconv.Itoa(settings.ParanoiaLevel),
 		"FormExecutingParanoia": strconv.Itoa(settings.ExecutingParanoiaLevel), "FormScore": strconv.Itoa(settings.InboundScore),
 		"FormOutboundScore": strconv.Itoa(settings.OutboundScore), "FormRequestBody": settings.RequestBody, "FormResponseBody": settings.ResponseBody,
 		"FormEarlyBlocking": settings.EarlyBlocking, "FormSamplingPercentage": strconv.Itoa(settings.SamplingPercentage),
@@ -505,6 +539,12 @@ func (s *Server) createEnterprisePolicyRevision(w http.ResponseWriter, r *http.R
 	name := truncate(strings.TrimSpace(r.FormValue("name")), 255)
 	description := truncate(strings.TrimSpace(r.FormValue("description")), 1024)
 	mode := strings.TrimSpace(r.FormValue("mode"))
+	scalarSource := strings.TrimSpace(r.FormValue("scalar_source"))
+	form["FormScalarSource"] = scalarSource
+	if scalarSource != PolicyScalarSourceInherit && scalarSource != PolicyScalarSourceCustom {
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "기본 정책 사용 또는 직접 설정을 선택하세요.", form)
+		return
+	}
 	paranoiaLevel, paranoiaErr := strconv.Atoi(strings.TrimSpace(r.FormValue("paranoia_level")))
 	executingParanoiaLevel, executingErr := strconv.Atoi(strings.TrimSpace(r.FormValue("executing_paranoia_level")))
 	inboundScore, scoreErr := strconv.Atoi(strings.TrimSpace(r.FormValue("inbound_score")))
@@ -541,6 +581,15 @@ func (s *Server) createEnterprisePolicyRevision(w http.ResponseWriter, r *http.R
 	settings.ResponseBody = r.FormValue("response_body") == "on"
 	settings.EarlyBlocking = r.FormValue("early_blocking") == "on"
 	settings.SamplingPercentage = samplingPercentage
+	settings.ScalarSource = scalarSource
+	settings.ScalarOverrides = nil
+	if scalarSource == PolicyScalarSourceCustom {
+		settings.ScalarOverrides = &PolicyScalarOverrides{
+			Mode: mode, ParanoiaLevel: paranoiaLevel, ExecutingParanoiaLevel: executingParanoiaLevel,
+			InboundScore: inboundScore, OutboundScore: outboundScore, RequestBody: settings.RequestBody,
+			ResponseBody: settings.ResponseBody, EarlyBlocking: settings.EarlyBlocking, SamplingPercentage: samplingPercentage,
+		}
+	}
 	settings.LegacyPolicyConfirmed = r.FormValue("confirm_legacy_policy") == "confirmed"
 	settings.ExcludedPaths = uniqueNonEmptyLines(r.FormValue("excluded_paths"))
 	settings.ExcludedIPs = uniqueNonEmptyLines(r.FormValue("excluded_ips"))

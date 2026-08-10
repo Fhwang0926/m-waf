@@ -19,8 +19,15 @@ import (
 )
 
 func (a *Agent) applyPackageDeployment(parent context.Context, deployment model.PackageDeployment) (bool, error) {
-	if deployment.ID == "" || deployment.Agent.ID == "" || deployment.Module.ID == "" {
+	scope := model.NormalizePackageScope(deployment.Scope)
+	if deployment.ID == "" || deployment.Agent.ID == "" {
 		return false, errors.New("package deployment is incomplete")
+	}
+	if scope == model.PackageScopeAgent {
+		return a.applyAgentPackageDeployment(parent, deployment)
+	}
+	if scope != model.PackageScopeAgentModule || deployment.Module.ID == "" {
+		return false, errors.New("package deployment scope is invalid")
 	}
 	moduleFormat := deployment.Module.Format
 	if moduleFormat == "" {
@@ -105,6 +112,70 @@ func (a *Agent) applyPackageDeployment(parent context.Context, deployment model.
 		return false, err
 	}
 	return agentUpdated, nil
+}
+
+type pendingAgentUpdate struct {
+	DeploymentID  string `json:"deployment_id"`
+	TargetVersion string `json:"target_version"`
+}
+
+func (a *Agent) applyAgentPackageDeployment(parent context.Context, deployment model.PackageDeployment) (bool, error) {
+	if deployment.Agent.Version == "" || deployment.Agent.Format != "" && deployment.Agent.Format != model.PackageFormatDEB {
+		return false, errors.New("Agent update requires a versioned DEB package")
+	}
+	if deployment.Agent.Version == version.Version {
+		return false, nil
+	}
+	if !safeStateID(deployment.ID) {
+		return false, errors.New("Agent update deployment ID is invalid")
+	}
+	cacheDirectory := filepath.Join(a.cfg.StateDirectory, "agent-updates", deployment.ID)
+	if err := os.RemoveAll(cacheDirectory); err != nil {
+		return false, err
+	}
+	if err := os.MkdirAll(cacheDirectory, 0o750); err != nil {
+		return false, err
+	}
+	targetPath := filepath.Join(cacheDirectory, "target.deb")
+	rollbackPath := filepath.Join(cacheDirectory, "rollback.deb")
+	ctx, cancel := context.WithTimeout(parent, 15*time.Minute)
+	defer cancel()
+	if err := a.client.DownloadPackage(ctx, deployment.Agent, targetPath); err != nil {
+		return false, fmt.Errorf("download Agent package: %w", err)
+	}
+	if deployment.RollbackAgent.ID != "" {
+		if deployment.RollbackAgent.Format != "" && deployment.RollbackAgent.Format != model.PackageFormatDEB {
+			return false, errors.New("Agent rollback requires a DEB package")
+		}
+		if err := a.client.DownloadPackage(ctx, deployment.RollbackAgent, rollbackPath); err != nil {
+			return false, fmt.Errorf("download Agent rollback package: %w", err)
+		}
+	} else {
+		rollbackPath = ""
+	}
+	pending, err := json.Marshal(pendingAgentUpdate{DeploymentID: deployment.ID, TargetVersion: deployment.Agent.Version})
+	if err != nil {
+		return false, err
+	}
+	if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "pending-agent-update.json"), append(pending, '\n'), 0o640); err != nil {
+		return false, err
+	}
+	if err := installDEBPackages(ctx, targetPath); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func safeStateID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if char != '-' && char != '_' && (char < '0' || char > '9') && (char < 'A' || char > 'Z') && (char < 'a' || char > 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 func controlHookPath(webServer, action string) string {
@@ -214,7 +285,7 @@ func selectInstallationCandidate(ctx context.Context, item model.PackageDownload
 }
 
 func installDEBPackages(ctx context.Context, paths ...string) error {
-	arguments := []string{"-o", "Dpkg::Options::=--force-confold", "install", "--no-install-recommends", "-y"}
+	arguments := []string{"-o", "Dpkg::Options::=--force-confold", "install", "--allow-downgrades", "--no-install-recommends", "-y"}
 	arguments = append(arguments, paths...)
 	command := exec.CommandContext(ctx, "apt-get", arguments...)
 	command.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
@@ -374,6 +445,38 @@ func restartUpdatedAgent() error {
 		return fmt.Errorf("restart updated agent: %s: %w", truncateOperationOutput(output), err)
 	}
 	return nil
+}
+
+func (a *Agent) startAgentUpdateSupervisor(deployment model.PackageDeployment) error {
+	const updater = "/usr/lib/mwaf/mwaf-agent-updater"
+	info, err := os.Lstat(updater)
+	stat, ownedByRoot := infoSysStat(info)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 || info.Mode().Perm()&0o022 != 0 || !ownedByRoot || stat.Uid != 0 {
+		return errors.New("start updated Agent: trusted updater helper is unavailable")
+	}
+	rollbackPath := filepath.Join(a.cfg.StateDirectory, "agent-updates", deployment.ID, "rollback.deb")
+	if deployment.RollbackAgent.ID == "" {
+		rollbackPath = "-"
+	}
+	logDirectory := filepath.Join(a.cfg.StateDirectory, "agent-updates")
+	if err := os.MkdirAll(logDirectory, 0o750); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(filepath.Join(logDirectory, "updater.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
+	if err != nil {
+		return err
+	}
+	command := exec.Command(updater, a.cfg.StateDirectory, deployment.ID, deployment.Agent.Version, rollbackPath)
+	command.Stdin = nil
+	command.Stdout = logFile
+	command.Stderr = logFile
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := command.Start(); err != nil {
+		_ = logFile.Close()
+		return fmt.Errorf("start Agent update supervisor: %w", err)
+	}
+	_ = logFile.Close()
+	return command.Process.Release()
 }
 
 func (a *Agent) executeNextCommand(ctx context.Context) error {

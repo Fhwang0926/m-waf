@@ -20,6 +20,12 @@ const (
 
 	PackageFormatDEB = "deb"
 	PackageFormatZIP = "zip"
+
+	PackageScopeAgent       = "agent"
+	PackageScopeAgentModule = "agent_module"
+
+	AgentCapabilitySelfUpdate    = "agent-self-update-v1"
+	AgentCapabilityLocalRollback = "agent-local-rollback-v1"
 )
 
 func NormalizeIntegrationMode(mode string) string {
@@ -43,11 +49,29 @@ func NormalizeWebServerControl(mode string) string {
 	return mode
 }
 
+func NormalizePackageScope(scope string) string {
+	if scope == "" {
+		return PackageScopeAgentModule
+	}
+	return scope
+}
+
+func HasCapability(capabilities []string, capability string) bool {
+	for _, item := range capabilities {
+		if item == capability {
+			return true
+		}
+	}
+	return false
+}
+
 type Inventory struct {
 	Hostname            string               `json:"hostname"`
 	OSID                string               `json:"os_id"`
 	OSVersion           string               `json:"os_version"`
 	Architecture        string               `json:"architecture"`
+	CPUCoreCount        int                  `json:"cpu_core_count,omitempty"`
+	MemoryTotalBytes    uint64               `json:"memory_total_bytes,omitempty"`
 	WebServer           string               `json:"web_server"`
 	WebServerVersion    string               `json:"web_server_version"`
 	WebServerBuild      string               `json:"web_server_build_hash"`
@@ -64,6 +88,7 @@ type Inventory struct {
 	WebServerControl    string               `json:"web_server_control,omitempty"`
 	WebServerCandidates []WebServerCandidate `json:"web_server_candidates,omitempty"`
 	PolicyFormats       []string             `json:"policy_formats,omitempty"`
+	Capabilities        []string             `json:"capabilities,omitempty"`
 }
 
 type WebServerCandidate struct {
@@ -198,22 +223,45 @@ type HeartbeatRequest struct {
 }
 
 type DesiredState struct {
-	RevisionID        string             `json:"revision_id"`
-	ArtifactURL       string             `json:"artifact_url,omitempty"`
-	ArtifactFormat    string             `json:"artifact_format,omitempty"`
-	SHA256            string             `json:"sha256,omitempty"`
-	Signature         string             `json:"signature,omitempty"`
-	Mode              string             `json:"mode"`
-	AgentPackageID    string             `json:"agent_package_id,omitempty"`
-	ModulePackageID   string             `json:"module_package_id,omitempty"`
-	PackageDeployment *PackageDeployment `json:"package_deployment,omitempty"`
+	RevisionID        string                   `json:"revision_id"`
+	ArtifactURL       string                   `json:"artifact_url,omitempty"`
+	ArtifactFormat    string                   `json:"artifact_format,omitempty"`
+	SHA256            string                   `json:"sha256,omitempty"`
+	Signature         string                   `json:"signature,omitempty"`
+	Mode              string                   `json:"mode"`
+	AgentPackageID    string                   `json:"agent_package_id,omitempty"`
+	ModulePackageID   string                   `json:"module_package_id,omitempty"`
+	PackageDeployment *PackageDeployment       `json:"package_deployment,omitempty"`
+	BasePolicy        *PolicyArtifactReference `json:"base_policy,omitempty"`
+	OverridePolicy    *PolicyOverrideReference `json:"override_policy,omitempty"`
+}
+
+type PolicyArtifactReference struct {
+	ID        string `json:"id"`
+	URL       string `json:"url"`
+	Format    string `json:"format"`
+	SHA256    string `json:"sha256"`
+	Signature string `json:"signature"`
+}
+
+type PolicyOverrideReference struct {
+	RevisionID            string `json:"revision_id"`
+	URL                   string `json:"url"`
+	Format                string `json:"format"`
+	SHA256                string `json:"sha256"`
+	Signature             string `json:"signature"`
+	OverrideConfigSHA256  string `json:"override_config_sha256"`
+	EffectiveConfigSHA256 string `json:"effective_config_sha256"`
+	ValidationDigest      string `json:"validation_digest"`
 }
 
 type PackageDeployment struct {
 	ID               string          `json:"id"`
+	Scope            string          `json:"scope,omitempty"`
 	WebServerControl string          `json:"web_server_control,omitempty"`
 	Agent            PackageDownload `json:"agent"`
-	Module           PackageDownload `json:"module"`
+	Module           PackageDownload `json:"module,omitempty"`
+	RollbackAgent    PackageDownload `json:"rollback_agent,omitempty"`
 }
 
 type DeploymentResult struct {

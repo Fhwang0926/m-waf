@@ -54,36 +54,31 @@ func (s *Server) prepareConfigurationRevision(ctx context.Context, policy Enterp
 	if err := validateConfigurationRuleIDs(configuration, sourceIndex); err != nil {
 		return PolicyRevisionInput{}, "", err
 	}
-	input := policyBundleInputFromConfiguration(configuration)
+	settings := configuration.ApplyToSettings(policy.CurrentSettings)
+	settings.PolicyOrigin = origin
+	settings.MigratedFrom = policy.CurrentRevisionID
+	settings.Delivery = nil
 	var artifact []byte
+	extension := ".tar.gz"
 	switch templateItem.Defaults.ArtifactFormat {
 	case policybundle.FormatV3:
-		files, filesErr := s.policySourceFiles(templateItem.Defaults.CRSSource.ID)
-		if filesErr != nil {
-			return PolicyRevisionInput{}, "", filesErr
-		}
-		artifact, _, err = policybundle.BuildWithCRS(*templateItem.Defaults.CRSSource, input, files)
+		artifact, settings.Delivery, err = s.prepareSplitPolicyArtifacts(ctx, templateItem, configuration, settings.ScalarSource, settings.ScalarOverrides)
+		settings.ArtifactFormat = policybundle.FormatOverride
+		extension = ".override.tar.gz"
 	case policybundle.Format:
-		artifact, _, err = policybundle.Build(*templateItem.Defaults.CRSSource, input)
+		artifact, _, err = policybundle.Build(*templateItem.Defaults.CRSSource, policyBundleInputFromConfiguration(configuration))
+		settings.ArtifactFormat = policybundle.Format
 	default:
 		return PolicyRevisionInput{}, "", errors.New("event actions require policy-bundle-v2 or policy-bundle-v3")
 	}
 	if err != nil {
 		return PolicyRevisionInput{}, "", err
 	}
-	settings := configuration.ApplyToSettings(policy.CurrentSettings)
-	settings.PolicyOrigin = origin
-	settings.MigratedFrom = policy.CurrentRevisionID
-	settings.ArtifactFormat = templateItem.Defaults.ArtifactFormat
 	settingsRaw, err := json.Marshal(settings)
 	if err != nil {
 		return PolicyRevisionInput{}, "", err
 	}
 	hash, signature := s.policySigner.Sign(artifact)
-	extension := ".tar.gz"
-	if templateItem.Defaults.ArtifactFormat == policybundle.FormatV3 {
-		extension = ".v3.tar.gz"
-	}
 	relativePath := filepath.Join("policies", revisionID+extension)
 	fullPath := filepath.Join(s.cfg.ArtifactRoot, relativePath)
 	if err := writeArtifact(fullPath, artifact); err != nil {

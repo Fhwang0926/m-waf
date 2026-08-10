@@ -269,16 +269,11 @@ func (c *Catalog) ResolveCRS(inventory model.Inventory, crsVersion string) (mode
 		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("expected one preferred %s module package with CRS %s, found %d", inventory.WebServer, crsVersion, len(modules))
 	}
 	module := modules[0]
-	var agents []model.PackageArtifact
-	for _, artifact := range c.manifest.Artifacts {
-		if artifact.Kind == "agent" && matchesBase(artifact, inventory) && artifact.Version == module.Version && rollbackTargets[artifact.ID] == rollbackTargets[module.ID] {
-			agents = append(agents, artifact)
-		}
+	agent, err := c.ResolveAgent(inventory)
+	if err != nil {
+		return model.PackageArtifact{}, model.PackageArtifact{}, err
 	}
-	if len(agents) != 1 {
-		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("expected one agent package for module release %s, found %d", module.Version, len(agents))
-	}
-	return agents[0], module, nil
+	return agent, module, nil
 }
 
 func (c *Catalog) Artifact(id string) (model.PackageArtifact, bool) {
@@ -304,6 +299,18 @@ func (c *Catalog) Rollback(agentID, moduleID string) (model.PackageArtifact, mod
 		return model.PackageArtifact{}, model.PackageArtifact{}, errors.New("module rollback target is invalid")
 	}
 	return agentRollback, moduleRollback, nil
+}
+
+func (c *Catalog) RollbackAgent(agentID string) (model.PackageArtifact, error) {
+	agent, ok := c.byID[agentID]
+	if !ok || agent.Kind != "agent" || agent.RollbackID == "" {
+		return model.PackageArtifact{}, errors.New("agent rollback package is unavailable")
+	}
+	rollback, ok := c.byID[agent.RollbackID]
+	if !ok || rollback.Kind != "agent" {
+		return model.PackageArtifact{}, errors.New("agent rollback target is invalid")
+	}
+	return rollback, nil
 }
 
 func (c *Catalog) Open(id string) (model.PackageArtifact, *os.File, error) {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/Fhwang0926/m-waf/internal/model"
 	"github.com/Fhwang0926/m-waf/internal/packages"
+	"github.com/Fhwang0926/m-waf/internal/policybundle"
 )
 
 var ErrInvalidEnrollmentToken = errors.New("invalid or expired enrollment token")
@@ -330,6 +331,17 @@ WHERE s.id=? AND s.revoked_at IS NULL`, serverID).Scan(&revision, &artifactPath,
 	if settingsJSON.Valid {
 		_ = json.Unmarshal([]byte(settingsJSON.String), &settings)
 	}
+	if settings.Delivery != nil && settings.Delivery.Format == policyDeliveryFormatSplit {
+		state.BasePolicy = &model.PolicyArtifactReference{
+			ID: settings.Delivery.BasePolicyID, Format: policybundle.FormatBase, SHA256: settings.Delivery.BaseArtifactSHA256,
+			Signature: settings.Delivery.BaseArtifactSignature,
+		}
+		state.OverridePolicy = &model.PolicyOverrideReference{
+			RevisionID: revision.String, Format: settings.ArtifactFormat, SHA256: hash.String, Signature: signature.String,
+			OverrideConfigSHA256: settings.Delivery.OverrideConfigSHA256, EffectiveConfigSHA256: settings.Delivery.EffectiveConfigSHA256,
+			ValidationDigest: settings.Delivery.ValidationDigest,
+		}
+	}
 	if settings.ArtifactFormat != "" {
 		state.ArtifactFormat = settings.ArtifactFormat
 	} else if strings.HasSuffix(artifactPath.String, ".tar.gz") {
@@ -347,7 +359,7 @@ WHERE s.id=? AND s.revoked_at IS NULL`, serverID).Scan(&revision, &artifactPath,
 	state.ModulePackageID = modulePackage.String
 	if packageDeployment.Valid {
 		plan := decodePackageDeploymentPlan(packageDeploymentDetail.String)
-		state.PackageDeployment = &model.PackageDeployment{ID: packageDeployment.String, WebServerControl: plan.WebServerControl}
+		state.PackageDeployment = &model.PackageDeployment{ID: packageDeployment.String, Scope: plan.Scope, WebServerControl: plan.WebServerControl}
 	}
 	return state, nil
 }
@@ -358,6 +370,25 @@ func (s *Store) PolicyArtifactForServer(ctx context.Context, serverID, revisionI
 FROM desired_states ds JOIN policy_revisions pr ON pr.id=ds.policy_revision_id
 WHERE ds.server_id=? AND pr.id=?`, serverID, revisionID).Scan(&artifact.RevisionID, &artifact.Path, &artifact.SHA256, &artifact.Signature)
 	return artifact, err
+}
+
+func (s *Store) PolicyBaseArtifactForServer(ctx context.Context, serverID, revisionID string) (PolicyArtifact, error) {
+	var artifact PolicyArtifact
+	var settingsRaw []byte
+	err := s.db.QueryRowContext(ctx, `SELECT pr.id,pr.settings_json
+FROM desired_states ds JOIN policy_revisions pr ON pr.id=ds.policy_revision_id
+WHERE ds.server_id=? AND pr.id=?`, serverID, revisionID).Scan(&artifact.RevisionID, &settingsRaw)
+	if err != nil {
+		return artifact, err
+	}
+	var settings PolicySettings
+	if err := json.Unmarshal(settingsRaw, &settings); err != nil || settings.Delivery == nil || settings.Delivery.Format != policyDeliveryFormatSplit {
+		return PolicyArtifact{}, sql.ErrNoRows
+	}
+	artifact.Path = settings.Delivery.BaseArtifactPath
+	artifact.SHA256 = settings.Delivery.BaseArtifactSHA256
+	artifact.Signature = settings.Delivery.BaseArtifactSignature
+	return artifact, nil
 }
 
 func (s *Store) PackageAllowedForServer(ctx context.Context, serverID, packageID string) (bool, error) {

@@ -11,6 +11,7 @@ install_token_stdin=0
 ca_file=""
 bootstrap_pin=""
 server_name=""
+upgrade_agent=0
 
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null 2>&1 || { echo "run as root or install sudo" >&2; exit 1; }
@@ -28,19 +29,24 @@ while [ "$#" -gt 0 ]; do
     --ca) ca_file=$2; shift 2 ;;
     --bootstrap-pin) bootstrap_pin=$2; shift 2 ;;
     --name) server_name=$2; shift 2 ;;
+    --upgrade-agent) upgrade_agent=1; shift ;;
     *) echo "unknown argument: $1; the first-stage installer accepts Agent registration options only" >&2; exit 2 ;;
   esac
 done
 
 [ -n "$manager" ] || { echo "--manager is required" >&2; exit 2; }
-[ ! -s /var/lib/mwaf-agent/server-id ] || { echo "this server is already enrolled; use the existing M-WAF Agent identity" >&2; exit 1; }
+if [ "$upgrade_agent" -eq 0 ]; then
+  [ ! -s /var/lib/mwaf-agent/server-id ] || { echo "this server is already enrolled; use --upgrade-agent to preserve the existing M-WAF Agent identity" >&2; exit 1; }
+fi
 command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 command -v apt-get >/dev/null 2>&1 || { echo "apt-get is required to install the signed Agent DEB" >&2; exit 1; }
 [ -r /etc/os-release ] || { echo "unsupported OS: /etc/os-release missing" >&2; exit 1; }
 
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
-if [ -n "$ca_file" ]; then
+if [ "$upgrade_agent" -eq 1 ]; then
+  ca_file=/etc/mwaf-agent/manager-ca.crt
+elif [ -n "$ca_file" ]; then
   [ -r "$ca_file" ] || { echo "--ca must reference a readable certificate" >&2; exit 2; }
 else
   case "$bootstrap_pin" in sha256//*) ;; *) echo "--bootstrap-pin is required when --ca is omitted" >&2; exit 2 ;; esac
@@ -63,13 +69,46 @@ fi
 os_id=${ID:-unknown}
 os_version=${VERSION_ID:-unknown}
 case "$os_id:$os_version" in
-  ubuntu:24.04|debian:12) ;;
-  *) echo "unsupported OS: $os_id $os_version; supported: Ubuntu 24.04 LTS or Debian 12" >&2; exit 1 ;;
+  ubuntu:18.04|ubuntu:24.04|debian:12) ;;
+  *) echo "unsupported OS for Agent installation: $os_id $os_version; supported: Ubuntu 18.04/24.04 or Debian 12" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
   x86_64) architecture=amd64 ;;
   *) echo "unsupported architecture: $(uname -m); this release supports x86_64 only" >&2; exit 1 ;;
 esac
+
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+if [ "$upgrade_agent" -eq 1 ]; then
+  [ -s /var/lib/mwaf-agent/server-id ] || { echo "existing M-WAF Agent identity is required" >&2; exit 1; }
+  [ -r /var/lib/mwaf-agent/agent.crt ] && [ -r /var/lib/mwaf-agent/agent.key ] && [ -r /etc/mwaf-agent/manager-ca.crt ] || { echo "existing M-WAF mTLS files are incomplete" >&2; exit 1; }
+  resolution=$(curl --fail --silent --show-error --request POST --cacert /etc/mwaf-agent/manager-ca.crt --cert /var/lib/mwaf-agent/agent.crt --key /var/lib/mwaf-agent/agent.key -H 'Accept: text/plain' "$manager/agent/v1/upgrades")
+  agent_url=$(printf '%s\n' "$resolution" | sed -n '1p')
+  agent_sha=$(printf '%s\n' "$resolution" | sed -n '2p')
+  agent_version=$(printf '%s\n' "$resolution" | sed -n '3p')
+  [ -n "$agent_url" ] && [ -n "$agent_sha" ] && [ -n "$agent_version" ] || { echo "invalid Agent upgrade resolution" >&2; exit 1; }
+  agent_file="$temporary/mwaf-agent.deb"
+  curl --fail --silent --show-error --cacert /etc/mwaf-agent/manager-ca.crt --cert /var/lib/mwaf-agent/agent.crt --key /var/lib/mwaf-agent/agent.key -o "$agent_file" "$manager$agent_url"
+  [ "$(hash_file "$agent_file")" = "$agent_sha" ] || { echo "Agent checksum mismatch" >&2; exit 1; }
+  DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold install --allow-downgrades --no-install-recommends -y "$agent_file"
+  /usr/sbin/mwaf-agent-service restart
+  waited=0
+  while [ "$waited" -lt 90 ]; do
+    if /usr/sbin/mwaf-agent-service status && /usr/bin/mwaf-agent -version 2>&1 | grep -Fq "$agent_version"; then
+      if curl --fail --silent --show-error --request POST --cacert /etc/mwaf-agent/manager-ca.crt --cert /var/lib/mwaf-agent/agent.crt --key /var/lib/mwaf-agent/agent.key "$manager/agent/v1/upgrades/complete" >/dev/null; then
+        echo "M-WAF Agent was upgraded in place to $agent_version. The existing server ID and mTLS identity were preserved."
+        exit 0
+      fi
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  echo "Agent package was installed, but the upgraded service was not confirmed within 90 seconds" >&2
+  exit 1
+fi
 
 if [ -n "$token_file" ]; then
   if [ -n "$token" ] || [ "$token_stdin" -eq 1 ] || [ -n "$install_token_file" ] || [ "$install_token_stdin" -eq 1 ]; then
@@ -115,11 +154,6 @@ if [ -z "$token" ]; then
   fi
 fi
 [ -n "$token$install_token" ] || { echo "installation token is empty" >&2; exit 2; }
-
-json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-hash_file() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
-}
 
 hostname_value=$(hostname 2>/dev/null || printf 'unknown')
 [ -n "$server_name" ] || server_name=$hostname_value

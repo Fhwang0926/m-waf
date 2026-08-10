@@ -27,6 +27,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
+  TEST_UBUNTU_1804_IMAGE: docker.io/library/ubuntu:18.04@sha256:152dc042452c496007f07ca9127571cb9c29697f42acbfad72324b2bb2e43c98
   TEST_UBUNTU_IMAGE: docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
   TEST_DEBIAN_IMAGE: docker.io/library/debian:12-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
   TEST_WEBSERVER_IMAGE: mwaf-ci-webservers:ubuntu-24.04-amd64
@@ -40,6 +41,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
@@ -55,10 +58,17 @@ jobs:
           command -v dpkg-deb
           command -v jq
           command -v sha256sum
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            sh scripts/check-agent-version.sh "${{ github.event.pull_request.base.sha }}"
+          else
+            sh scripts/check-agent-version.sh
+          fi
           go test ./...
           go vet ./...
           sh -n internal/manager/bootstrap-install.sh
           sh -n packaging/agent/deb/build.sh
+          sh -n packaging/agent/mwaf-agent-updater
+          sh -n packaging/agent/container/mwaf-agent-service
           sh -n packaging/module/deb/build.sh
           sh -n packaging/module/external/configure.sh
           sh -n build/containers/ci-webservers/test-distro-smoke.sh
@@ -146,17 +156,19 @@ jobs:
           CRS_LTS_COMMIT: ${{ steps.crs.outputs.lts_commit }}
           CRS_LTS_TAG_OBJECT: ${{ steps.crs.outputs.lts_tag_object }}
           RUN_NUMBER: ${{ github.run_number }}
+          MWAF_AGENT_DEB_TARGETS: ubuntu:18.04 ubuntu:24.04 debian:12
           MWAF_DEB_TARGETS: ubuntu:24.04 debian:12
         run: |
           set -eu
+          agent_base_version=$(sed -n '1p' packaging/agent/VERSION)
           case "$GITHUB_REF" in
-            refs/tags/v*) package_version=${GITHUB_REF_NAME#v} ;;
-            *) package_version="0.1.0~ci.${RUN_NUMBER}" ;;
+            refs/tags/v*) package_version=${GITHUB_REF_NAME#v}; agent_version=$agent_base_version ;;
+            *) package_version="0.1.0~ci.${RUN_NUMBER}"; agent_version="${agent_base_version}~ci.${RUN_NUMBER}" ;;
           esac
           mkdir -p dist/packages dist/metadata dist/policy-sources dist/policy-source-metadata dist/empty
           test "$(sha256sum rules/hot/rules.conf | awk '{print $1}')" = "$(jq -r .sha256 rules/hot/manifest.json)"
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X github.com/Fhwang0926/m-waf/internal/version.Version=${package_version} -X github.com/Fhwang0926/m-waf/internal/version.Commit=${COMMIT}" -o dist/mwaf-agent ./cmd/mwaf-agent
-          VERSION="$package_version" COMMIT="$COMMIT" AGENT_BINARY=dist/mwaf-agent OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/agent/deb/build.sh
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X github.com/Fhwang0926/m-waf/internal/version.Version=${agent_version} -X github.com/Fhwang0926/m-waf/internal/version.Commit=${COMMIT}" -o dist/mwaf-agent ./cmd/mwaf-agent
+          VERSION="$agent_version" COMMIT="$COMMIT" AGENT_BINARY=dist/mwaf-agent OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/agent/deb/build.sh
           if [ -f dist/coreruleset.tar.gz ] && ! echo "$CRS_SHA256  dist/coreruleset.tar.gz" | sha256sum --check >/dev/null 2>&1; then
             rm -f dist/coreruleset.tar.gz
           fi
@@ -189,10 +201,26 @@ jobs:
           WEBSERVER=nginx VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/module/deb/build.sh
           WEBSERVER=apache INTEGRATION_MODE=external VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/module/deb/build.sh
           WEBSERVER=nginx INTEGRATION_MODE=external VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/module/deb/build.sh
+          test -f dist/metadata/agent-ubuntu-18.04.json
+          test "$(find dist/metadata -maxdepth 1 -type f -name 'module-*-ubuntu-18.04.json' | wc -l)" -eq 0
           test "$(find dist/packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 5
           for package in dist/packages/*.deb; do
             dpkg-deb --info "$package"
           done
+
+      - name: Install Agent-only package on Ubuntu 18.04
+        run: |
+          set -eu
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/dist/packages:/packages:ro" \
+            "$TEST_UBUNTU_1804_IMAGE" sh -eu -c '
+              dpkg -i /packages/mwaf-agent_*.deb
+              /usr/bin/mwaf-agent -version
+              test -x /usr/sbin/mwaf-agent-service
+              dpkg-query -W mwaf-agent >/dev/null
+              test ! -e /etc/apache2
+              test ! -e /etc/nginx
+            '
 
       - name: Smoke-test install, detection, and blocking on Ubuntu 24.04 Apache
         run: |
@@ -303,7 +331,9 @@ jobs:
           openssl genpkey -algorithm ED25519 -out dist/test-bundle-signing.key
           go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/test-bundle-signing.key -public-key-output dist/package-signing.pub -version "test-${COMMIT}" -commit "$COMMIT"
           test "$(find dist/bundle/packages -type f | wc -l)" -eq 5
-          test "$(jq '.artifacts | length' dist/bundle/bundle-manifest.json)" -eq 10
+          test "$(jq '.artifacts | length' dist/bundle/bundle-manifest.json)" -eq 11
+          test "$(jq '[.artifacts[] | select(.kind == "agent" and .os_id == "ubuntu" and .os_version == "18.04")] | length' dist/bundle/bundle-manifest.json)" -eq 1
+          test "$(jq '[.artifacts[] | select(.kind == "module" and .os_id == "ubuntu" and .os_version == "18.04")] | length' dist/bundle/bundle-manifest.json)" -eq 0
           test "$(jq '[.artifacts[] | select(.os_id == "debian" and .os_version == "12")] | length' dist/bundle/bundle-manifest.json)" -eq 5
           test "$(find dist/bundle/policy-sources -type f -name '*.json' | wc -l)" -eq 2
           test "$(find dist/bundle/policy-sources -type f -name '*.tar.gz' | wc -l)" -eq 2

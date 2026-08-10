@@ -7,14 +7,20 @@ candidate_binary="$manager_binary.next"
 manager_pid=
 
 source_stamp() {
-  find \
-    "$repository_root/cmd/mwaf-manager" \
-    "$repository_root/internal" \
-    "$repository_root/migrations" \
-    "$repository_root/web" \
-    "$repository_root/go.mod" \
-    "$repository_root/go.sum" \
-    -type f -exec cksum {} \; | cksum | awk '{ print $1 ":" $2 }'
+  {
+    find \
+      "$repository_root/cmd/mwaf-manager" \
+      "$repository_root/internal" \
+      "$repository_root/migrations" \
+      "$repository_root/web" \
+      "$repository_root/go.mod" \
+      "$repository_root/go.sum" \
+      -type f -exec cksum {} \;
+    if [ -n "${MWAF_BUNDLE_ROOT:-}" ] && [ -f "$MWAF_BUNDLE_ROOT/bundle-manifest.json" ]; then
+      printf '%s\n' "$(readlink "${MWAF_BUNDLE_ROOT%/bundle}" 2>/dev/null || true)"
+      cksum "$MWAF_BUNDLE_ROOT/bundle-manifest.json"
+    fi
+  } | cksum | awk '{ print $1 ":" $2 }'
 }
 
 build_manager() {

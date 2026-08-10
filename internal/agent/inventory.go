@@ -70,6 +70,7 @@ func CollectInventory(ctx context.Context, cfg config.Agent) (model.Inventory, e
 		connectorLoaded, configTestOK, integrationReady = connectorStatus(ctx, webServer, webServerBinary, webServerControl, cfg.PolicyPath)
 	}
 	crsVersion := appliedCRSVersion(cfg.PolicyPath)
+	memoryTotalBytes := readMemoryTotalBytes("/proc/meminfo")
 	stage := model.InstallationStagePlanRequired
 	if webServer != "" && moduleVersion != "unknown" {
 		stage = model.InstallationStageIntegrationNeeded
@@ -79,12 +80,35 @@ func CollectInventory(ctx context.Context, cfg config.Agent) (model.Inventory, e
 	}
 	return model.Inventory{
 		Hostname: hostname, OSID: osRelease["ID"], OSVersion: osRelease["VERSION_ID"], Architecture: runtime.GOARCH,
+		CPUCoreCount: runtime.NumCPU(), MemoryTotalBytes: memoryTotalBytes,
 		WebServer: webServer, WebServerVersion: webVersion, WebServerBuild: webBuild, IntegrationMode: integrationMode,
 		InstallationMode: installationMode, AgentVersion: version.Version, ModuleVersion: moduleVersion, CRSVersion: crsVersion,
 		ConnectorVersion: connectorVersion, ConnectorLoaded: connectorLoaded, ConfigTestOK: configTestOK, IntegrationReady: integrationReady,
 		InstallationStage: stage, WebServerControl: webServerControl, WebServerCandidates: candidates,
-		PolicyFormats: []string{"conf-v1", policybundle.Format, policybundle.FormatV3},
+		PolicyFormats: []string{"conf-v1", policybundle.Format, policybundle.FormatV3, policybundle.FormatBase, policybundle.FormatOverride},
+		Capabilities:  []string{model.AgentCapabilitySelfUpdate, model.AgentCapabilityLocalRollback},
 	}, nil
+}
+
+func readMemoryTotalBytes(path string) uint64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 3 || fields[0] != "MemTotal:" || fields[2] != "kB" {
+			continue
+		}
+		kilobytes, parseErr := strconv.ParseUint(fields[1], 10, 64)
+		if parseErr != nil {
+			return 0
+		}
+		return kilobytes * 1024
+	}
+	return 0
 }
 
 type installationSelection struct {

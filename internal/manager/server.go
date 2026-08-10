@@ -25,6 +25,7 @@ import (
 	"github.com/Fhwang0926/m-waf/internal/localtime"
 	"github.com/Fhwang0926/m-waf/internal/model"
 	"github.com/Fhwang0926/m-waf/internal/packages"
+	"github.com/Fhwang0926/m-waf/internal/policybundle"
 	"github.com/Fhwang0926/m-waf/internal/protocol"
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
 	"github.com/Fhwang0926/m-waf/internal/version"
@@ -463,6 +464,7 @@ func policyFormState(r *http.Request) map[string]any {
 		"FormDescription":           truncate(strings.TrimSpace(r.FormValue("description")), 1024),
 		"FormServerIDs":             serverIDs,
 		"FormStrategy":              strings.TrimSpace(r.FormValue("update_strategy")),
+		"FormScalarSource":          strings.TrimSpace(r.FormValue("scalar_source")),
 		"FormMode":                  strings.TrimSpace(r.FormValue("mode")),
 		"FormParanoia":              strings.TrimSpace(r.FormValue("paranoia_level")),
 		"FormExecutingParanoia":     strings.TrimSpace(r.FormValue("executing_paranoia_level")),
@@ -513,7 +515,11 @@ func (s *Server) renderPolicyForm(w http.ResponseWriter, r *http.Request, status
 	if value, ok := form["FormTemplateKey"].(string); ok && isEdit {
 		requestedKey = strings.TrimSpace(value)
 	}
-	if isEdit && requestedKey != "" {
+	if policy, ok := form["EditPolicy"].(EnterprisePolicyRecord); isEdit && ok {
+		if requested, found := s.systemPolicyTemplate(r.Context(), policy.CurrentSystemPolicyID); found {
+			defaultTemplate = requested
+		}
+	} else if isEdit && requestedKey != "" {
 		if requested, ok := s.latestSystemPolicyTemplate(r.Context(), requestedKey); ok {
 			defaultTemplate = requested
 		}
@@ -535,13 +541,25 @@ func (s *Server) renderPolicyForm(w http.ResponseWriter, r *http.Request, status
 			serverChoices = append(serverChoices, policyServerChoice{Server: server, Selected: selected[server.ID]})
 		}
 	}
+	defaultExecutingParanoia := defaultTemplate.Defaults.ExecutingParanoiaLevel
+	if defaultExecutingParanoia == 0 {
+		defaultExecutingParanoia = defaultTemplate.Defaults.ParanoiaLevel
+	}
+	defaultOutboundScore := defaultTemplate.Defaults.OutboundScore
+	if defaultOutboundScore == 0 {
+		defaultOutboundScore = 4
+	}
+	defaultSamplingPercentage := defaultTemplate.Defaults.SamplingPercentage
+	if defaultSamplingPercentage == 0 {
+		defaultSamplingPercentage = 100
+	}
 	data := map[string]any{
 		"Servers": serverChoices, "HasSystemPolicy": defaultTemplate.Reference() != "@", "DefaultTemplate": defaultTemplate,
-		"Error": pageError, "FormTemplateKey": defaultTemplate.Key, "FormStrategy": PolicyStrategyManual, "FormMode": defaultTemplate.Defaults.Mode,
-		"FormParanoia": strconv.Itoa(defaultTemplate.Defaults.ParanoiaLevel), "FormExecutingParanoia": strconv.Itoa(defaultTemplate.Defaults.ExecutingParanoiaLevel),
-		"FormScore": strconv.Itoa(defaultTemplate.Defaults.InboundScore), "FormOutboundScore": strconv.Itoa(defaultTemplate.Defaults.OutboundScore),
+		"Error": pageError, "FormTemplateKey": defaultTemplate.Key, "FormStrategy": PolicyStrategyManual, "FormScalarSource": PolicyScalarSourceInherit, "FormMode": defaultTemplate.Defaults.Mode,
+		"FormParanoia": strconv.Itoa(defaultTemplate.Defaults.ParanoiaLevel), "FormExecutingParanoia": strconv.Itoa(defaultExecutingParanoia),
+		"FormScore": strconv.Itoa(defaultTemplate.Defaults.InboundScore), "FormOutboundScore": strconv.Itoa(defaultOutboundScore),
 		"FormRequestBody": defaultTemplate.Defaults.RequestBody, "FormResponseBody": defaultTemplate.Defaults.ResponseBody,
-		"FormEarlyBlocking": defaultTemplate.Defaults.EarlyBlocking, "FormSamplingPercentage": strconv.Itoa(defaultTemplate.Defaults.SamplingPercentage),
+		"FormEarlyBlocking": defaultTemplate.Defaults.EarlyBlocking, "FormSamplingPercentage": strconv.Itoa(defaultSamplingPercentage),
 		"FormBypassExpiresAt": localtime.FormatKST(time.Now().Add(24*time.Hour), "2006-01-02T15:04"),
 	}
 	for key, value := range form {
@@ -575,6 +593,15 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mode := strings.TrimSpace(r.FormValue("mode"))
+	scalarSource := strings.TrimSpace(r.FormValue("scalar_source"))
+	if scalarSource == "" {
+		scalarSource = PolicyScalarSourceInherit
+	}
+	form["FormScalarSource"] = scalarSource
+	if scalarSource != PolicyScalarSourceInherit && scalarSource != PolicyScalarSourceCustom {
+		s.renderPolicyForm(w, r, http.StatusBadRequest, "기본 정책 사용 또는 직접 설정을 선택하세요.", form)
+		return
+	}
 	paranoiaLevel, paranoiaErr := strconv.Atoi(strings.TrimSpace(r.FormValue("paranoia_level")))
 	executingParanoiaLevel, executingErr := strconv.Atoi(strings.TrimSpace(r.FormValue("executing_paranoia_level")))
 	inboundScore, scoreErr := strconv.Atoi(strings.TrimSpace(r.FormValue("inbound_score")))
@@ -642,15 +669,34 @@ func (s *Server) createPolicy(w http.ResponseWriter, r *http.Request) {
 		s.renderPolicyForm(w, r, http.StatusBadRequest, "선택한 기업에서 적용 가능한 서버를 찾을 수 없습니다.", form)
 		return
 	}
+	if policyTemplate.Defaults.ArtifactFormat == policybundle.FormatV3 {
+		selected := make(map[string]bool, len(serverIDs))
+		for _, serverID := range serverIDs {
+			selected[serverID] = true
+		}
+		for _, server := range servers {
+			if selected[server.ID] && !serverSupportsSplitPolicy(server) {
+				s.renderPolicyForm(w, r, http.StatusConflict, server.Name+" Agent를 업데이트한 뒤 기본 정책과 기업 오버라이드를 배포하세요.", form)
+				return
+			}
+		}
+	}
 	target := "policy:" + policyID
 	settings := PolicySettings{
 		SchemaVersion: policyTemplate.SchemaVersion, TemplateKey: policyTemplate.Key, TemplateVersion: policyTemplate.Version,
 		CRSTrack: policyTemplate.CRSTrack, CRSVersion: policyTemplate.CRSVersion, Target: target, AutoUpdate: strategy == PolicyStrategyAutomatic,
-		PolicyOrigin: "administrator", MigrationStatus: "CURRENT", ParanoiaLevel: paranoiaLevel,
+		PolicyOrigin: "administrator", MigrationStatus: "CURRENT", ScalarSource: scalarSource, ParanoiaLevel: paranoiaLevel,
 		ExecutingParanoiaLevel: executingParanoiaLevel, InboundScore: inboundScore, OutboundScore: outboundScore,
 		RequestBody: r.FormValue("request_body") == "on", ResponseBody: r.FormValue("response_body") == "on",
 		EarlyBlocking: r.FormValue("early_blocking") == "on", SamplingPercentage: samplingPercentage, ExcludedPaths: uniqueNonEmptyLines(r.FormValue("excluded_paths")),
 		ExcludedIPs: uniqueNonEmptyLines(r.FormValue("excluded_ips")), Exclusions: exclusions, CustomRules: customRules,
+	}
+	if scalarSource == PolicyScalarSourceCustom {
+		settings.ScalarOverrides = &PolicyScalarOverrides{
+			Mode: mode, ParanoiaLevel: paranoiaLevel, ExecutingParanoiaLevel: executingParanoiaLevel,
+			InboundScore: inboundScore, OutboundScore: outboundScore, RequestBody: settings.RequestBody,
+			ResponseBody: settings.ResponseBody, EarlyBlocking: settings.EarlyBlocking, SamplingPercentage: samplingPercentage,
+		}
 	}
 	origin := "administrator"
 	if r.FormValue("confirm_legacy_policy") == "confirmed" {
@@ -851,6 +897,59 @@ func (s *Server) resolvePackages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resolution)
 }
 
+func (s *Server) createAgentUpgrade(w http.ResponseWriter, r *http.Request) {
+	if s.catalog == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "package bundle unavailable")
+		return
+	}
+	serverID := agentIDFrom(r)
+	server, err := s.store.ServerByID(r.Context(), "", serverID)
+	if err != nil || server.Revoked {
+		writeProblem(w, http.StatusNotFound, "server is unavailable")
+		return
+	}
+	agentArtifact, err := s.catalog.ResolveAgent(server.Inventory)
+	if err != nil {
+		writeProblem(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	deployment := model.PackageDeployment{Scope: model.PackageScopeAgent, Agent: agentPackageDownload(agentArtifact)}
+	if rollback, rollbackErr := s.catalog.RollbackAgent(agentArtifact.ID); rollbackErr == nil {
+		deployment.RollbackAgent = agentPackageDownload(rollback)
+	}
+	if strings.Contains(r.Header.Get("Accept"), "text/plain") {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		fmt.Fprintf(w, "%s\n%s\n%s\n", deployment.Agent.URL, deployment.Agent.SHA256, deployment.Agent.Version)
+		return
+	}
+	writeJSON(w, http.StatusOK, deployment)
+}
+
+func (s *Server) completeAgentUpgrade(w http.ResponseWriter, r *http.Request) {
+	if s.catalog == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "package bundle unavailable")
+		return
+	}
+	serverID := agentIDFrom(r)
+	server, err := s.store.ServerByID(r.Context(), "", serverID)
+	if err != nil || server.Revoked {
+		writeProblem(w, http.StatusNotFound, "server is unavailable")
+		return
+	}
+	agentArtifact, err := s.catalog.ResolveAgent(server.Inventory)
+	if err != nil || agentArtifact.Version != server.Inventory.AgentVersion {
+		writeProblem(w, http.StatusConflict, "upgraded Agent heartbeat is not confirmed")
+		return
+	}
+	deploymentID, err := s.store.AssignAgentPackage(r.Context(), "", serverID, agentArtifact.ID, "")
+	if err != nil {
+		writeProblem(w, http.StatusConflict, "record Agent upgrade")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"deployment_id": deploymentID, "agent_version": agentArtifact.Version})
+}
+
 func (s *Server) bootstrapPackage(w http.ResponseWriter, r *http.Request) {
 	token := bearerToken(r)
 	if token == "" {
@@ -951,6 +1050,12 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 	}
 	if state.RevisionID != "" {
 		state.ArtifactURL = protocol.PolicyArtifactPath(state.RevisionID)
+		if state.OverridePolicy != nil {
+			state.OverridePolicy.URL = state.ArtifactURL
+		}
+		if state.BasePolicy != nil {
+			state.BasePolicy.URL = protocol.PolicyBaseArtifactPath(state.RevisionID)
+		}
 	}
 	if state.PackageDeployment != nil {
 		if s.catalog == nil {
@@ -958,13 +1063,23 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		agentArtifact, agentOK := s.catalog.Artifact(state.AgentPackageID)
-		moduleArtifact, moduleOK := s.catalog.Artifact(state.ModulePackageID)
-		if !agentOK || !moduleOK {
+		if !agentOK {
 			writeProblem(w, http.StatusServiceUnavailable, "assigned package is unavailable")
 			return
 		}
 		state.PackageDeployment.Agent = agentPackageDownload(agentArtifact)
-		state.PackageDeployment.Module = agentPackageDownload(moduleArtifact)
+		if model.NormalizePackageScope(state.PackageDeployment.Scope) == model.PackageScopeAgent {
+			if rollbackArtifact, rollbackErr := s.catalog.RollbackAgent(agentArtifact.ID); rollbackErr == nil {
+				state.PackageDeployment.RollbackAgent = agentPackageDownload(rollbackArtifact)
+			}
+		} else {
+			moduleArtifact, moduleOK := s.catalog.Artifact(state.ModulePackageID)
+			if !moduleOK {
+				writeProblem(w, http.StatusServiceUnavailable, "assigned package is unavailable")
+				return
+			}
+			state.PackageDeployment.Module = agentPackageDownload(moduleArtifact)
+		}
 	}
 	writeJSON(w, http.StatusOK, state)
 }
@@ -982,6 +1097,20 @@ func (s *Server) policyArtifact(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusNotFound, "policy artifact not assigned")
 		return
 	}
+	s.servePolicyArtifact(w, artifact)
+}
+
+func (s *Server) policyBaseArtifact(w http.ResponseWriter, r *http.Request) {
+	revisionID := r.PathValue("id")
+	artifact, err := s.store.PolicyBaseArtifactForServer(r.Context(), agentIDFrom(r), revisionID)
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "base policy artifact not assigned")
+		return
+	}
+	s.servePolicyArtifact(w, artifact)
+}
+
+func (s *Server) servePolicyArtifact(w http.ResponseWriter, artifact PolicyArtifact) {
 	clean := filepath.Clean(filepath.FromSlash(artifact.Path))
 	if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		writeProblem(w, http.StatusInternalServerError, "invalid policy artifact path")
@@ -993,16 +1122,31 @@ func (s *Server) policyArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Checksum-SHA256", artifact.SHA256)
 	w.Header().Set("X-Artifact-Signature", artifact.Signature)
 	w.Header().Set("Cache-Control", "private, no-store")
-	_, _ = io.Copy(w, io.LimitReader(file, 1<<20))
+	_, _ = io.Copy(w, io.LimitReader(file, protocol.AgentV1.PolicyArtifactLimit))
 }
 
 func (s *Server) agentPackage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	allowed, err := s.store.PackageAllowedForServer(r.Context(), agentIDFrom(r), id)
+	if err == nil && !allowed && s.catalog != nil {
+		agentID, _, currentErr := s.store.CurrentPackageIDs(r.Context(), agentIDFrom(r))
+		if currentErr == nil {
+			if agent, ok := s.catalog.Artifact(agentID); ok && agent.RollbackID == id {
+				allowed = true
+			}
+		}
+	}
+	if err == nil && !allowed && s.catalog != nil {
+		if server, serverErr := s.store.ServerByID(r.Context(), "", agentIDFrom(r)); serverErr == nil {
+			if latest, resolveErr := s.catalog.ResolveAgent(server.Inventory); resolveErr == nil && latest.ID == id {
+				allowed = true
+			}
+		}
+	}
 	if err != nil || !allowed {
 		writeProblem(w, http.StatusForbidden, "package is not assigned to this server")
 		return

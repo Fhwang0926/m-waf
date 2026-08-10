@@ -216,6 +216,24 @@ func TestEnterpriseDetailTabSelection(t *testing.T) {
 	}
 }
 
+func TestServerDetailTabSelection(t *testing.T) {
+	cases := map[string]string{
+		"":              "status",
+		"status":        "status",
+		" ENVIRONMENT ": "environment",
+		"policies":      "policies",
+		"packages":      "packages",
+		"commands":      "commands",
+		"risk":          "risk",
+		"unknown":       "status",
+	}
+	for input, expected := range cases {
+		if actual := serverDetailTab(input); actual != expected {
+			t.Fatalf("serverDetailTab(%q) = %q, want %q", input, actual, expected)
+		}
+	}
+}
+
 func TestEnterpriseDetailRendersOnlySelectedTab(t *testing.T) {
 	templates, err := webassets.ParseTemplates()
 	if err != nil {
@@ -272,7 +290,7 @@ func TestEnrollmentQuickInstallKeepsTokenOutOfCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := output.String()
-	for _, expected := range []string{"Agent 설치와 자동 등록", "Agent 설치 명령 복사", "별도 입력이 필요하지 않습니다", `data-enrollment-command`, `data-enterprise-id="enterprise-1"`, `data-csrf="token"`, `class="install-command-details"`, "__MWAF_ENROLLMENT_TOKEN__", "Debian", "12 Bookworm", "Docker", "환경 자동 감지", "wget --no-check-certificate", "sha256sum -c -", "--bootstrap-pin", "--token-stdin", strings.Repeat("a", 64)} {
+	for _, expected := range []string{"Agent 설치와 자동 등록", "Agent 설치 명령 복사", "별도 입력이 필요하지 않습니다", `data-enrollment-command`, `data-enterprise-id="enterprise-1"`, `data-csrf="token"`, `class="install-command-details"`, "__MWAF_ENROLLMENT_TOKEN__", "Debian 12", "Ubuntu 18.04", "Agent 등록 전용", "Docker", "환경 자동 감지", "wget --no-check-certificate", "sha256sum -c -", "--bootstrap-pin", "--token-stdin", strings.Repeat("a", 64)} {
 		if !strings.Contains(html, expected) {
 			t.Fatalf("quick install content %q is missing: %s", expected, html)
 		}
@@ -326,6 +344,7 @@ func TestBootstrapInstallerInstallsAgentOnlyBeforeManagerPlanning(t *testing.T) 
 		`--pinnedpubkey "$bootstrap_pin"`,
 		`/bootstrap/v1/ca.crt`,
 		`"installation_mode":"discovery"`,
+		`ubuntu:18.04|ubuntu:24.04|debian:12`,
 		"This first stage installs no",
 		`runtime_mode=container`,
 		`/usr/sbin/mwaf-agent-service start`,
@@ -365,6 +384,69 @@ func TestBootstrapInstallerSHA256MatchesServedScript(t *testing.T) {
 	}
 }
 
+func TestBootstrapInstallerSupportsExistingIdentityAgentUpgrade(t *testing.T) {
+	raw, err := bootstrapFiles.ReadFile("bootstrap-install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, expected := range []string{"--upgrade-agent", "/agent/v1/upgrades", "/var/lib/mwaf-agent/agent.crt", "/var/lib/mwaf-agent/agent.key", "existing server ID and mTLS identity were preserved"} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("in-place Agent upgrade is missing %q", expected)
+		}
+	}
+}
+
+func TestServerDetailRendersOnlySelectedTab(t *testing.T) {
+	templates, err := webassets.ParseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionData{DisplayName: "Operator", Role: RoleEnterpriseAdmin, ActualRole: RoleEnterpriseAdmin, EnterpriseID: "enterprise-a", EnterpriseName: "Example"}.asEnterpriseConsole()
+	data := map[string]any{
+		"Active": "servers", "Session": session, "CSRF": "token", "ScopeLabel": "Example", "CanOperate": true, "CanManageUsers": true,
+		"Tab": "environment", "AccountURL": "/account", "Server": ServerRecord{ID: "server-a", EnterpriseName: "Example", Name: "web-a"},
+	}
+	var output bytes.Buffer
+	if err := templates.ExecuteTemplate(&output, "server-detail.html", data); err != nil {
+		t.Fatal(err)
+	}
+	html := output.String()
+	if !strings.Contains(html, `<section id="environment"`) || !strings.Contains(html, `href="/servers/server-a?tab=environment" aria-current="page"`) {
+		t.Fatalf("selected server environment tab is not rendered: %s", html)
+	}
+	for _, hidden := range []string{`<section id="status"`, `<section id="policies"`, `<section id="packages"`, `<section id="commands"`, `<section id="risk"`} {
+		if strings.Contains(html, hidden) {
+			t.Fatalf("unselected server detail section is rendered: %s", hidden)
+		}
+	}
+}
+
+func TestServerDetailStatusShowsSystemSummary(t *testing.T) {
+	templates, err := webassets.ParseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionData{DisplayName: "Operator", Role: RoleEnterpriseAdmin, ActualRole: RoleEnterpriseAdmin, EnterpriseID: "enterprise-a", EnterpriseName: "Example"}.asEnterpriseConsole()
+	data := map[string]any{
+		"Active": "servers", "Session": session, "CSRF": "token", "ScopeLabel": "Example", "CanOperate": true, "CanManageUsers": true,
+		"Tab": "status", "AccountURL": "/account", "Server": ServerRecord{
+			ID: "server-a", EnterpriseName: "Example", Name: "web-a", Status: "ONLINE", EnterprisePolicyID: "policy-a", EnterprisePolicyName: "기본 보호 정책", PolicyDeploymentStatus: "APPLIED",
+			Inventory: model.Inventory{OSID: "ubuntu", OSVersion: "18.04", Architecture: "amd64", CPUCoreCount: 8, MemoryTotalBytes: 8 << 30, AgentVersion: "1.0.0"},
+		},
+	}
+	var output bytes.Buffer
+	if err := templates.ExecuteTemplate(&output, "server-detail.html", data); err != nil {
+		t.Fatal(err)
+	}
+	html := output.String()
+	for _, expected := range []string{"시스템 정보", "/static/brand-ubuntu.png", "Ubuntu 18.04", "amd64", "8 코어", "8.0 GiB", "온라인", "적용 완료", "기본 보호 정책"} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("server system summary is missing %q: %s", expected, html)
+		}
+	}
+}
+
 func TestServerDetailSeparatesPackageAndCustomZIPPlans(t *testing.T) {
 	templates, err := webassets.ParseTemplates()
 	if err != nil {
@@ -373,6 +455,7 @@ func TestServerDetailSeparatesPackageAndCustomZIPPlans(t *testing.T) {
 	session := sessionData{DisplayName: "Operator", Role: RoleEnterpriseAdmin, ActualRole: RoleEnterpriseAdmin, EnterpriseID: "enterprise-a", EnterpriseName: "Example"}.asEnterpriseConsole()
 	data := map[string]any{
 		"Active": "servers", "Session": session, "CSRF": "token", "ScopeLabel": "Example", "CanOperate": true, "CanManageUsers": true,
+		"Tab":        "packages",
 		"AccountURL": "/account", "Server": ServerRecord{ID: "server-a", EnterpriseName: "Example", Name: "web-a", Inventory: model.Inventory{AgentVersion: "1.0.0", InstallationStage: model.InstallationStagePlanRequired}},
 		"InstallationCandidates": []serverInstallationCandidateView{
 			{Kind: "apache", Version: "2.4.58", BuildHash: "apache-build", Binary: "/usr/sbin/apachectl", PackageManaged: true, PackageAvailable: true},
@@ -384,7 +467,7 @@ func TestServerDetailSeparatesPackageAndCustomZIPPlans(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := output.String()
-	for _, expected := range []string{"Agent가 먼저 서버를 점검합니다", "패키지 기반 설치", "커스텀 ZIP 설치", "/opt/m-waf", `action="/servers/server-a/installation"`, "보호 정책 미배정", `name="web_server_control"`, "표준 웹서버 제어", "고객 Hook 사용", "/opt/m-waf/hooks/nginx/configtest", "/opt/m-waf/hooks/nginx/reload"} {
+	for _, expected := range []string{"Agent가 먼저 서버를 점검합니다", "패키지 기반 설치", "커스텀 ZIP 설치", "/opt/m-waf", `action="/servers/server-a/installation"`, `name="web_server_control"`, "표준 웹서버 제어", "고객 Hook 사용", "/opt/m-waf/hooks/nginx/configtest", "/opt/m-waf/hooks/nginx/reload"} {
 		if !strings.Contains(html, expected) {
 			t.Fatalf("server installation plan UI is missing %q: %s", expected, html)
 		}
@@ -408,6 +491,7 @@ func TestServerDetailCanChangeInstalledWebServerControl(t *testing.T) {
 	session := sessionData{DisplayName: "Operator", Role: RoleEnterpriseAdmin, ActualRole: RoleEnterpriseAdmin, EnterpriseID: "enterprise-a", EnterpriseName: "Example"}.asEnterpriseConsole()
 	data := map[string]any{
 		"Active": "servers", "Session": session, "CSRF": "token", "ScopeLabel": "Example", "CanOperate": true, "CanManageUsers": true,
+		"Tab":        "packages",
 		"AccountURL": "/account", "Server": ServerRecord{ID: "server-a", EnterpriseName: "Example", Name: "web-a", Inventory: model.Inventory{AgentVersion: "1.0.0", WebServer: "nginx", WebServerControl: model.WebServerControlHooks, InstallationStage: model.InstallationStageIntegrationNeeded}},
 	}
 	var output bytes.Buffer
@@ -418,6 +502,29 @@ func TestServerDetailCanChangeInstalledWebServerControl(t *testing.T) {
 	for _, expected := range []string{"정책 재적용 방식 변경", `value="web_control_standard"`, `value="web_control_hooks"`, "재설치 없이"} {
 		if !strings.Contains(html, expected) {
 			t.Fatalf("installed control UI is missing %q: %s", expected, html)
+		}
+	}
+}
+
+func TestServerDetailOffersAgentOnlyUpdateWithoutInstalledModule(t *testing.T) {
+	templates, err := webassets.ParseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionData{DisplayName: "Operator", Role: RoleEnterpriseAdmin, ActualRole: RoleEnterpriseAdmin, EnterpriseID: "enterprise-a", EnterpriseName: "Example"}.asEnterpriseConsole()
+	data := map[string]any{
+		"Active": "servers", "Session": session, "CSRF": "token", "ScopeLabel": "Example", "CanOperate": true, "CanManageUsers": true,
+		"Tab": "packages", "AccountURL": "/account", "AgentSelfUpdateReady": true, "AgentPackageAvailable": true, "AgentUpdateAvailable": true, "LatestAgentVersion": "0.2.0",
+		"Server": ServerRecord{ID: "server-a", EnterpriseName: "Example", Name: "web-a", Inventory: model.Inventory{AgentVersion: "0.1.0", InstallationStage: model.InstallationStagePlanRequired, Capabilities: []string{model.AgentCapabilitySelfUpdate, model.AgentCapabilityLocalRollback}}},
+	}
+	var output bytes.Buffer
+	if err := templates.ExecuteTemplate(&output, "server-detail.html", data); err != nil {
+		t.Fatal(err)
+	}
+	html := output.String()
+	for _, expected := range []string{`action="/servers/server-a/agent-package"`, "Agent 업데이트", "웹서버 모듈, 정책, Apache/Nginx 설정은 변경하지 않습니다", "Manager 최신 0.2.0"} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("Agent-only update UI is missing %q: %s", expected, html)
 		}
 	}
 }

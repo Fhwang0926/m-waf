@@ -22,37 +22,43 @@ const (
 	BootstrapPackagePattern   = "GET /bootstrap/v1/packages/{id}"
 	PackageKeyPattern         = "GET /packages/v1/keys"
 
-	EnrollPattern           = "POST /agent/v1/enroll"
-	HeartbeatPattern        = "POST /agent/v1/heartbeat"
-	CertificateRenewPattern = "POST /agent/v1/certificate/renew"
-	DesiredStatePattern     = "GET /agent/v1/desired-state"
-	PolicyKeyPattern        = "GET /agent/v1/policy-key"
-	PolicyArtifactPattern   = "GET /agent/v1/artifacts/{id}"
-	AgentPackagePattern     = "GET /agent/v1/packages/{id}"
-	EventBatchPattern       = "POST /agent/v1/events/batch"
-	UnregisterPattern       = "POST /agent/v1/unregister"
-	PolicyResultPattern     = "POST /agent/v1/policies/{id}/result"
-	PackageResultPattern    = "POST /agent/v1/package-deployments/{id}/result"
-	NextCommandPattern      = "GET /agent/v1/commands/next"
-	CommandResultPattern    = "POST /agent/v1/commands/{id}/result"
+	EnrollPattern               = "POST /agent/v1/enroll"
+	HeartbeatPattern            = "POST /agent/v1/heartbeat"
+	CertificateRenewPattern     = "POST /agent/v1/certificate/renew"
+	DesiredStatePattern         = "GET /agent/v1/desired-state"
+	PolicyKeyPattern            = "GET /agent/v1/policy-key"
+	PolicyArtifactPattern       = "GET /agent/v1/artifacts/{id}"
+	PolicyBaseArtifactPattern   = "GET /agent/v1/base-artifacts/{id}"
+	AgentPackagePattern         = "GET /agent/v1/packages/{id}"
+	AgentUpgradePattern         = "POST /agent/v1/upgrades"
+	AgentUpgradeCompletePattern = "POST /agent/v1/upgrades/complete"
+	EventBatchPattern           = "POST /agent/v1/events/batch"
+	UnregisterPattern           = "POST /agent/v1/unregister"
+	PolicyResultPattern         = "POST /agent/v1/policies/{id}/result"
+	PackageResultPattern        = "POST /agent/v1/package-deployments/{id}/result"
+	NextCommandPattern          = "GET /agent/v1/commands/next"
+	CommandResultPattern        = "POST /agent/v1/commands/{id}/result"
 
-	BootstrapInstallerPath = "/bootstrap/v1/install.sh"
-	BootstrapCAPath        = "/bootstrap/v1/ca.crt"
-	BootstrapSessionPath   = "/bootstrap/v1/sessions"
-	BootstrapResolvePath   = "/bootstrap/v1/packages/resolve"
-	PackageKeyPath         = "/packages/v1/keys"
-	EnrollPath             = "/agent/v1/enroll"
-	HeartbeatPath          = "/agent/v1/heartbeat"
-	CertificateRenewPath   = "/agent/v1/certificate/renew"
-	DesiredStatePath       = "/agent/v1/desired-state"
-	PolicyKeyPath          = "/agent/v1/policy-key"
-	EventBatchPath         = "/agent/v1/events/batch"
-	UnregisterPath         = "/agent/v1/unregister"
-	NextCommandPath        = "/agent/v1/commands/next"
+	BootstrapInstallerPath   = "/bootstrap/v1/install.sh"
+	BootstrapCAPath          = "/bootstrap/v1/ca.crt"
+	BootstrapSessionPath     = "/bootstrap/v1/sessions"
+	BootstrapResolvePath     = "/bootstrap/v1/packages/resolve"
+	PackageKeyPath           = "/packages/v1/keys"
+	EnrollPath               = "/agent/v1/enroll"
+	HeartbeatPath            = "/agent/v1/heartbeat"
+	CertificateRenewPath     = "/agent/v1/certificate/renew"
+	DesiredStatePath         = "/agent/v1/desired-state"
+	PolicyKeyPath            = "/agent/v1/policy-key"
+	EventBatchPath           = "/agent/v1/events/batch"
+	UnregisterPath           = "/agent/v1/unregister"
+	NextCommandPath          = "/agent/v1/commands/next"
+	AgentUpgradePath         = "/agent/v1/upgrades"
+	AgentUpgradeCompletePath = "/agent/v1/upgrades/complete"
 
-	BootstrapPackagePrefix = "/bootstrap/v1/packages/"
-	PolicyArtifactPrefix   = "/agent/v1/artifacts/"
-	AgentPackagePrefix     = "/agent/v1/packages/"
+	BootstrapPackagePrefix   = "/bootstrap/v1/packages/"
+	PolicyArtifactPrefix     = "/agent/v1/artifacts/"
+	PolicyBaseArtifactPrefix = "/agent/v1/base-artifacts/"
+	AgentPackagePrefix       = "/agent/v1/packages/"
 
 	EventVerificationHeader = "X-MWAF-Event-Token"
 )
@@ -98,7 +104,10 @@ var AgentV1 = AgentV1Contract{
 		{Method: "GET", Path: DesiredStatePath, Auth: "mTLS", ResponseType: "DesiredState"},
 		{Method: "GET", Path: PolicyKeyPath, Auth: "mTLS", ResponseType: "PEM"},
 		{Method: "GET", Path: "/agent/v1/artifacts/{id}", Auth: "mTLS", ResponseType: "policy artifact"},
+		{Method: "GET", Path: "/agent/v1/base-artifacts/{id}", Auth: "mTLS", ResponseType: "base policy artifact"},
 		{Method: "GET", Path: "/agent/v1/packages/{id}", Auth: "mTLS", ResponseType: "package artifact"},
+		{Method: "POST", Path: AgentUpgradePath, Auth: "mTLS", ResponseType: "PackageDeployment"},
+		{Method: "POST", Path: AgentUpgradeCompletePath, Auth: "mTLS", ResponseType: "PackageDeployment"},
 		{Method: "POST", Path: EventBatchPath, Auth: "mTLS+install-token", RequestType: "EventBatch"},
 		{Method: "POST", Path: UnregisterPath, Auth: "mTLS"},
 		{Method: "POST", Path: "/agent/v1/policies/{id}/result", Auth: "mTLS", RequestType: "DeploymentResult"},
@@ -130,6 +139,10 @@ func BootstrapPackagePath(id string) string {
 
 func PolicyArtifactPath(id string) string {
 	return PolicyArtifactPrefix + strings.TrimSpace(id)
+}
+
+func PolicyBaseArtifactPath(id string) string {
+	return PolicyBaseArtifactPrefix + strings.TrimSpace(id)
 }
 
 func AgentPackagePath(id string) string {

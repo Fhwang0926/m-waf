@@ -64,6 +64,45 @@ func TestBuildWithCRSCarriesImmutableSourceFiles(t *testing.T) {
 	}
 }
 
+func TestBaseAndEnterpriseOverrideRemainSeparateAndPinned(t *testing.T) {
+	source := systempolicy.PolicySourceRef{ID: "owasp-crs-4.28.0", Repository: "https://github.com/coreruleset/coreruleset", Tag: "v4.28.0", Commit: "0123456789abcdef", ArchiveSHA256: repeatHex("a"), IndexSHA256: repeatHex("b")}
+	baseRaw, _, err := BuildBaseWithCRS("system-policy-4.28.0", source, Input{
+		Mode: "DetectionOnly", RequestBody: true, CRSSetup: map[string]string{"blocking_paranoia_level": "1"},
+	}, map[string][]byte{
+		"crs/crs-setup.conf": []byte("# upstream setup\n"),
+		"crs/rules/a.conf":   []byte("SecAction \"id:900001,phase:1,pass\"\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseHash := repeatHex("c")
+	overrideRaw, _, err := BuildOverride(source, OverrideInput{
+		IncludeScalars: true, Mode: "On", RequestBody: true,
+		CRSSetup:    map[string]string{"blocking_paranoia_level": "2"},
+		CustomRules: []CustomRule{{RuleID: 40000, Scope: "ENTERPRISE", Canonical: `SecRule REQUEST_URI "@streq /private" "id:40000,phase:2,deny"`, Enabled: true}},
+	}, OverrideMetadata{
+		BasePolicyID: "system-policy-4.28.0", BaseArtifactSHA256: baseHash,
+		OverrideConfigSHA256: repeatHex("d"), EffectiveConfigSHA256: repeatHex("e"), ValidationDigest: repeatHex("f"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseManifest, baseFiles, err := Parse(baseRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overrideManifest, overrideFiles, err := Parse(overrideRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseManifest.ArtifactFormat != FormatBase || overrideManifest.ArtifactFormat != FormatOverride || overrideManifest.BaseArtifactSHA256 != baseHash {
+		t.Fatalf("unexpected split manifests: %#v %#v", baseManifest, overrideManifest)
+	}
+	if baseFiles["40-base-crs-rules.conf"] == nil || baseFiles["65-enterprise-service-rules.conf"] != nil || !bytes.Contains(overrideFiles["65-enterprise-service-rules.conf"], []byte("id:40000")) || overrideFiles["crs/rules/a.conf"] != nil {
+		t.Fatalf("base and override contents were not separated: base=%#v override=%#v", baseFiles, overrideFiles)
+	}
+}
+
 func TestStructuredExclusionsRenderBeforeAndAfterCRS(t *testing.T) {
 	source := systempolicy.PolicySourceRef{ID: "owasp-crs-stable", Commit: "0123456789abcdef", IndexSHA256: repeatHex("b")}
 	input := Input{

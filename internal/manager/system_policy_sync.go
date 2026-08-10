@@ -372,6 +372,19 @@ func (s *Server) recoverFailedCanary(ctx context.Context, rollout PolicyRolloutR
 func (s *Server) advanceRolloutTarget(ctx context.Context, rollout PolicyRolloutRecord, targetTemplate systempolicy.Template, transitionRevisionID *string, target PolicyRolloutTargetRecord) error {
 	switch target.Status {
 	case "PENDING", "DEFERRED":
+		finalRevision, err := s.store.PolicyRevisionByID(ctx, rollout.EnterprisePolicyID, target.FinalRevisionID)
+		if err != nil {
+			return err
+		}
+		if finalRevision.Settings.ArtifactFormat == policybundle.FormatOverride {
+			server, err := s.store.ServerByID(ctx, rollout.EnterpriseID, target.ServerID)
+			if err != nil {
+				return err
+			}
+			if !serverSupportsSplitPolicy(server) {
+				return errors.New("Agent 업데이트가 필요합니다. 기본 정책과 기업 오버라이드 분리 형식을 지원하지 않습니다.")
+			}
+		}
 		needsV2Package, err := s.rolloutNeedsV2Package(ctx, rollout, target, targetTemplate)
 		if err != nil {
 			return err
@@ -430,6 +443,10 @@ func (s *Server) advanceRolloutTarget(ctx context.Context, rollout PolicyRollout
 		}
 	}
 	return nil
+}
+
+func serverSupportsSplitPolicy(server ServerRecord) bool {
+	return containsString(server.Inventory.PolicyFormats, policybundle.FormatBase) && containsString(server.Inventory.PolicyFormats, policybundle.FormatOverride)
 }
 
 func (s *Server) rolloutNeedsV2Package(ctx context.Context, rollout PolicyRolloutRecord, rolloutTarget PolicyRolloutTargetRecord, target systempolicy.Template) (bool, error) {
@@ -605,6 +622,11 @@ func rolloutTargetFailed(target PolicyRolloutTargetRecord) bool {
 
 func (s *Server) preparePolicyRevision(policyTemplate systempolicy.Template, name, description, mode string, settings PolicySettings, parentRevisionID, origin string) (PolicyRevisionInput, string, error) {
 	revisionID := randomID()
+	resolvedMode, resolvedSettings, err := resolvePolicyScalars(policyTemplate, mode, settings)
+	if err != nil {
+		return PolicyRevisionInput{}, "", err
+	}
+	mode, settings = resolvedMode, resolvedSettings
 	metadata := ManagedPolicyMetadata{
 		SchemaVersion: settings.SchemaVersion, TemplateKey: settings.TemplateKey, TemplateVersion: settings.TemplateVersion,
 		CRSTrack: settings.CRSTrack, CRSVersion: settings.CRSVersion, Target: settings.Target, AutoUpdate: settings.AutoUpdate,
@@ -624,6 +646,8 @@ func (s *Server) preparePolicyRevision(policyTemplate systempolicy.Template, nam
 	normalized.EarlyBlocking = settings.EarlyBlocking
 	normalized.SamplingPercentage = settings.SamplingPercentage
 	normalized.LegacyPolicyConfirmed = settings.LegacyPolicyConfirmed
+	normalized.ScalarSource = settings.ScalarSource
+	normalized.ScalarOverrides = settings.ScalarOverrides
 	normalized.Exclusions = append([]PolicyExclusion(nil), settings.Exclusions...)
 	configuration, legacy, err := structuredConfigurationFromPolicy("", revisionID, policyTemplate, mode, normalized)
 	if err != nil {
@@ -652,22 +676,11 @@ func (s *Server) preparePolicyRevision(policyTemplate systempolicy.Template, nam
 		// consumed by one migration so a later CRS update requires review again.
 		normalized.LegacyPolicyConfirmed = false
 	}
-	settingsRaw, err := json.Marshal(normalized)
-	if err != nil {
-		return PolicyRevisionInput{}, "", err
-	}
-	settingsJSON = string(settingsRaw)
 	extension := ".conf"
 	if policyTemplate.Defaults.ArtifactFormat == policybundle.Format || policyTemplate.Defaults.ArtifactFormat == policybundle.FormatV3 {
 		if policyTemplate.Defaults.CRSSource == nil {
 			return PolicyRevisionInput{}, "", errors.New("policy bundle requires a verified CRS source")
 		}
-		normalized.ArtifactFormat = policyTemplate.Defaults.ArtifactFormat
-		settingsRaw, err = json.Marshal(normalized)
-		if err != nil {
-			return PolicyRevisionInput{}, "", err
-		}
-		settingsJSON = string(settingsRaw)
 		_, sourceIndex, ok, indexErr := s.indexedPolicySource(context.Background(), configuration.CRSReleaseID)
 		if indexErr != nil {
 			return PolicyRevisionInput{}, "", indexErr
@@ -678,24 +691,24 @@ func (s *Server) preparePolicyRevision(policyTemplate systempolicy.Template, nam
 		if err := validateConfigurationRuleIDs(configuration, sourceIndex); err != nil {
 			return PolicyRevisionInput{}, "", err
 		}
-		bundleInput := policyBundleInputFromConfiguration(configuration)
 		if policyTemplate.Defaults.ArtifactFormat == policybundle.FormatV3 {
-			files, filesErr := s.policySourceFiles(policyTemplate.Defaults.CRSSource.ID)
-			if filesErr != nil {
-				return PolicyRevisionInput{}, "", filesErr
-			}
-			artifact, _, err = policybundle.BuildWithCRS(*policyTemplate.Defaults.CRSSource, bundleInput, files)
+			artifact, normalized.Delivery, err = s.prepareSplitPolicyArtifacts(context.Background(), policyTemplate, configuration, normalized.ScalarSource, normalized.ScalarOverrides)
+			normalized.ArtifactFormat = policybundle.FormatOverride
+			extension = ".override.tar.gz"
 		} else {
-			artifact, _, err = policybundle.Build(*policyTemplate.Defaults.CRSSource, bundleInput)
+			normalized.ArtifactFormat = policybundle.Format
+			artifact, _, err = policybundle.Build(*policyTemplate.Defaults.CRSSource, policyBundleInputFromConfiguration(configuration))
+			extension = ".tar.gz"
 		}
 		if err != nil {
 			return PolicyRevisionInput{}, "", err
 		}
-		extension = ".tar.gz"
-		if policyTemplate.Defaults.ArtifactFormat == policybundle.FormatV3 {
-			extension = ".v3.tar.gz"
-		}
 	}
+	settingsRaw, err := json.Marshal(normalized)
+	if err != nil {
+		return PolicyRevisionInput{}, "", err
+	}
+	settingsJSON = string(settingsRaw)
 	hash, signature := s.policySigner.Sign(artifact)
 	relativePath := filepath.Join("policies", revisionID+extension)
 	fullPath := filepath.Join(s.cfg.ArtifactRoot, relativePath)

@@ -5,6 +5,7 @@ import (
 	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Fhwang0926/m-waf/internal/config"
 	"github.com/Fhwang0926/m-waf/internal/model"
+	"github.com/Fhwang0926/m-waf/internal/policybundle"
 )
 
 type Agent struct {
@@ -132,6 +134,9 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 	if err := a.client.Heartbeat(ctx, heartbeat); err != nil {
 		return err
 	}
+	if err := a.confirmPendingAgentUpdate(inventory.AgentVersion); err != nil {
+		return err
+	}
 	if state.RevisionID != "" {
 		if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-heartbeat-policy"), []byte(state.RevisionID+"\n"), 0o640); err != nil {
 			return err
@@ -150,10 +155,26 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 			persistedDesired.SHA256 = state.SHA256
 			persistedDesired.Signature = state.Signature
 			persistedDesired.Mode = state.Mode
+			persistedDesired.BasePolicy = state.BasePolicy
+			persistedDesired.OverridePolicy = state.OverridePolicy
 		} else {
 			applyErr := func() error {
 				if err := a.client.EnsurePolicyPublicKey(ctx); err != nil {
 					return err
+				}
+				if desired.ArtifactFormat == policybundle.FormatOverride {
+					if desired.BasePolicy == nil || desired.OverridePolicy == nil {
+						return errors.New("split policy references are missing")
+					}
+					baseArtifact, err := a.client.DownloadBasePolicy(ctx, desired.BasePolicy.URL)
+					if err != nil {
+						return err
+					}
+					overrideArtifact, err := a.client.DownloadPolicy(ctx, desired.OverridePolicy.URL)
+					if err != nil {
+						return err
+					}
+					return a.policy.ApplySplit(ctx, inventory.WebServer, desired, baseArtifact, overrideArtifact)
 				}
 				artifact, err := a.client.DownloadPolicy(ctx, desired.ArtifactURL)
 				if err != nil {
@@ -188,21 +209,45 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if installedID == deployment.ID {
-			if reportedID != deployment.ID && a.packageRestartRequested != deployment.ID && inventory.AgentVersion == deployment.Agent.Version && inventory.ModuleVersion == deployment.Module.Version {
-				if err := a.client.SendPackageResult(ctx, deployment.ID, "APPLIED", "모듈 설치 후 Agent가 설치 버전을 확인했습니다. 웹서버 연동은 별도 안내에 따라 활성화해야 합니다."); err != nil {
+		if failedID == deployment.ID {
+			if reportedID != deployment.ID {
+				detail, detailErr := readStateValue(filepath.Join(a.cfg.StateDirectory, "failed-package-deployment-detail"))
+				if detailErr != nil {
+					return detailErr
+				}
+				if detail == "" {
+					detail = "이전 패키지 적용 실패 상태를 유지합니다."
+				}
+				if err := a.client.SendPackageResult(ctx, deployment.ID, "FAILED", detail); err != nil {
 					return err
 				}
 				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "reported-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
 					return err
 				}
-				a.logger.Info("packages_applied", "deployment_id", deployment.ID, "agent_package", deployment.Agent.ID, "module_package", deployment.Module.ID)
+			}
+			return nil
+		}
+		if installedID == deployment.ID {
+			if reportedID != deployment.ID && a.packageRestartRequested != deployment.ID && packageDeploymentMatchesInventory(deployment, inventory) {
+				if err := a.client.SendPackageResult(ctx, deployment.ID, "APPLIED", packageDeploymentAppliedDetail(deployment)); err != nil {
+					return err
+				}
+				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "reported-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
+					return err
+				}
+				a.logger.Info("packages_applied", "deployment_id", deployment.ID, "scope", model.NormalizePackageScope(deployment.Scope), "agent_package", deployment.Agent.ID, "module_package", deployment.Module.ID)
 			} else if reportedID != deployment.ID && failedID != deployment.ID && a.packageRestartRequested == "" {
-				detail := fmt.Sprintf("재시작 후 설치 버전 불일치: agent=%s/%s module=%s/%s", inventory.AgentVersion, deployment.Agent.Version, inventory.ModuleVersion, deployment.Module.Version)
+				detail := packageDeploymentMismatchDetail(deployment, inventory)
 				if err := a.client.SendPackageResult(ctx, deployment.ID, "FAILED", detail); err != nil {
 					return err
 				}
 				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "failed-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
+					return err
+				}
+				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "failed-package-deployment-detail"), []byte(detail+"\n"), 0o640); err != nil {
+					return err
+				}
+				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "reported-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
 					return err
 				}
 			}
@@ -215,6 +260,12 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "failed-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
 					return err
 				}
+				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "failed-package-deployment-detail"), []byte(applyErr.Error()+"\n"), 0o640); err != nil {
+					return err
+				}
+				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "reported-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
+					return err
+				}
 				return applyErr
 			}
 			if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
@@ -222,9 +273,15 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 			}
 			if agentUpdated {
 				a.packageRestartRequested = deployment.ID
-				if err := restartUpdatedAgent(); err != nil {
-					_ = a.client.SendPackageResult(ctx, deployment.ID, "FAILED", err.Error())
-					return err
+				restartErr := error(nil)
+				if model.NormalizePackageScope(deployment.Scope) == model.PackageScopeAgent {
+					restartErr = a.startAgentUpdateSupervisor(deployment)
+				} else {
+					restartErr = restartUpdatedAgent()
+				}
+				if restartErr != nil {
+					_ = a.client.SendPackageResult(ctx, deployment.ID, "FAILED", restartErr.Error())
+					return restartErr
 				}
 			}
 			return nil
@@ -234,6 +291,46 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (a *Agent) confirmPendingAgentUpdate(agentVersion string) error {
+	path := filepath.Join(a.cfg.StateDirectory, "pending-agent-update.json")
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var pending pendingAgentUpdate
+	if json.Unmarshal(raw, &pending) != nil || !safeStateID(pending.DeploymentID) || pending.TargetVersion == "" {
+		return errors.New("pending Agent update state is invalid")
+	}
+	if pending.TargetVersion != agentVersion {
+		return nil
+	}
+	return atomicWrite(filepath.Join(a.cfg.StateDirectory, "agent-update-confirmed-"+pending.DeploymentID), []byte(agentVersion+"\n"), 0o640)
+}
+
+func packageDeploymentMatchesInventory(deployment model.PackageDeployment, inventory model.Inventory) bool {
+	if inventory.AgentVersion != deployment.Agent.Version {
+		return false
+	}
+	return model.NormalizePackageScope(deployment.Scope) == model.PackageScopeAgent || inventory.ModuleVersion == deployment.Module.Version
+}
+
+func packageDeploymentAppliedDetail(deployment model.PackageDeployment) string {
+	if model.NormalizePackageScope(deployment.Scope) == model.PackageScopeAgent {
+		return "Agent가 재시작 후 새 버전으로 mTLS 연결을 확인했습니다. 웹서버 모듈과 정책은 변경하지 않았습니다."
+	}
+	return "모듈 설치 후 Agent가 설치 버전을 확인했습니다. 웹서버 연동은 별도 안내에 따라 활성화해야 합니다."
+}
+
+func packageDeploymentMismatchDetail(deployment model.PackageDeployment, inventory model.Inventory) string {
+	if model.NormalizePackageScope(deployment.Scope) == model.PackageScopeAgent {
+		return fmt.Sprintf("재시작 후 Agent 버전 불일치: actual=%s expected=%s", inventory.AgentVersion, deployment.Agent.Version)
+	}
+	return fmt.Sprintf("재시작 후 설치 버전 불일치: agent=%s/%s module=%s/%s", inventory.AgentVersion, deployment.Agent.Version, inventory.ModuleVersion, deployment.Module.Version)
 }
 
 func (a *Agent) flushAudit(ctx context.Context) error {

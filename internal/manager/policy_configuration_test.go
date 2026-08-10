@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Fhwang0926/m-waf/internal/crsindex"
+	"github.com/Fhwang0926/m-waf/internal/systempolicy"
 )
 
 func validStructuredConfiguration() PolicyConfiguration {
@@ -37,6 +38,46 @@ func TestPolicyConfigurationValidatesParanoiaAndEmergencyBypass(t *testing.T) {
 	configuration.Exclusions[0].ExpiresAt = nil
 	if err := configuration.ValidateAt(time.Now().UTC()); err != nil {
 		t.Fatalf("legacy bypass semantics must remain readable: %v", err)
+	}
+}
+
+func TestResolvePolicyScalarsSeparatesInheritanceFromEnterpriseOverrides(t *testing.T) {
+	template := systempolicy.Template{Defaults: systempolicy.Defaults{
+		Mode: "DetectionOnly", ParanoiaLevel: 1, ExecutingParanoiaLevel: 2, InboundScore: 5, OutboundScore: 4,
+		RequestBody: true, SamplingPercentage: 100,
+	}}
+	mode, inherited, err := resolvePolicyScalars(template, "On", PolicySettings{ScalarSource: PolicyScalarSourceInherit, ParanoiaLevel: 4})
+	if err != nil || mode != "DetectionOnly" || inherited.ParanoiaLevel != 1 || !inherited.RequestBody {
+		t.Fatalf("system defaults were not inherited: mode=%q settings=%#v err=%v", mode, inherited, err)
+	}
+	overrides := &PolicyScalarOverrides{Mode: "On", ParanoiaLevel: 2, ExecutingParanoiaLevel: 3, InboundScore: 7, OutboundScore: 6, SamplingPercentage: 50}
+	mode, custom, err := resolvePolicyScalars(template, "DetectionOnly", PolicySettings{ScalarSource: PolicyScalarSourceCustom, ScalarOverrides: overrides})
+	if err != nil || mode != "On" || custom.ParanoiaLevel != 2 || custom.InboundScore != 7 || custom.SamplingPercentage != 50 {
+		t.Fatalf("enterprise overrides were not resolved: mode=%q settings=%#v err=%v", mode, custom, err)
+	}
+}
+
+func TestStructuredConfigurationReservesGeneratedIDsForSystemBeforeEnterprise(t *testing.T) {
+	template := systempolicy.Template{Defaults: systempolicy.Defaults{
+		Mode: "DetectionOnly", ParanoiaLevel: 1, InboundScore: 5, RequestBody: true,
+		BeforeExclusions: []systempolicy.RuleExclusion{{RuleID: 942100, Conditions: []systempolicy.RuleCondition{{Field: "REQUEST_URI", Operator: "@beginsWith", Value: "/system"}}}},
+	}}
+	base, _, err := structuredConfigurationFromPolicy("system-policy", "", template, "DetectionOnly", PolicySettings{ParanoiaLevel: 1, InboundScore: 5, RequestBody: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective, _, err := structuredConfigurationFromPolicy("", "revision", template, "DetectionOnly", PolicySettings{
+		ParanoiaLevel: 1, InboundScore: 5, RequestBody: true,
+		Exclusions: []PolicyExclusion{{
+			SourceScope: PolicyScopeEnterprise, Type: PolicyExclusionRule, LoadStage: PolicyExclusionBefore, RuleID: 942200,
+			GeneratedRuleID: 5000, Enabled: true, Conditions: []PolicyExclusionCondition{{Field: "REQUEST_URI", Operator: "@beginsWith", Value: "/enterprise"}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(base.Exclusions) != 1 || len(effective.Exclusions) != 2 || base.Exclusions[0].GeneratedRuleID != 5000 || effective.Exclusions[0].GeneratedRuleID != 5000 || effective.Exclusions[1].GeneratedRuleID != 5001 {
+		t.Fatalf("generated IDs are not stable across base and enterprise composition: base=%#v effective=%#v", base.Exclusions, effective.Exclusions)
 	}
 }
 

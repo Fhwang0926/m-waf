@@ -12,32 +12,69 @@ import (
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
 )
 
+const (
+	PolicyScalarSourceInherit = "INHERIT"
+	PolicyScalarSourceCustom  = "CUSTOM"
+)
+
+// PolicyScalarOverrides records author intent separately from the resolved
+// configuration. A nil override with INHERIT follows the selected system
+// policy; legacy revisions with an empty source keep their resolved values.
+type PolicyScalarOverrides struct {
+	Mode                   string `json:"mode"`
+	ParanoiaLevel          int    `json:"paranoia_level"`
+	ExecutingParanoiaLevel int    `json:"executing_paranoia_level"`
+	InboundScore           int    `json:"inbound_anomaly_score"`
+	OutboundScore          int    `json:"outbound_anomaly_score"`
+	RequestBody            bool   `json:"request_body_access"`
+	ResponseBody           bool   `json:"response_body_access"`
+	EarlyBlocking          bool   `json:"early_blocking"`
+	SamplingPercentage     int    `json:"sampling_percentage"`
+}
+
+// PolicyDeliveryMetadata pins the exact base-policy and enterprise-override
+// pair that passed Manager-side composition validation.
+type PolicyDeliveryMetadata struct {
+	Format                string `json:"format"`
+	BasePolicyID          string `json:"base_policy_id"`
+	BasePolicySHA256      string `json:"base_policy_sha256"`
+	BaseArtifactPath      string `json:"base_artifact_path"`
+	BaseArtifactSHA256    string `json:"base_artifact_sha256"`
+	BaseArtifactSignature string `json:"base_artifact_signature"`
+	OverrideConfigSHA256  string `json:"override_config_sha256"`
+	EffectiveConfigSHA256 string `json:"effective_config_sha256"`
+	ValidationDigest      string `json:"validation_digest"`
+}
+
 type PolicySettings struct {
-	SchemaVersion          int               `json:"schema_version,omitempty"`
-	TemplateKey            string            `json:"template_key,omitempty"`
-	TemplateVersion        string            `json:"template_version,omitempty"`
-	CRSTrack               string            `json:"crs_track,omitempty"`
-	CRSVersion             string            `json:"crs_version,omitempty"`
-	Target                 string            `json:"target,omitempty"`
-	AutoUpdate             bool              `json:"auto_update,omitempty"`
-	PolicyOrigin           string            `json:"policy_origin,omitempty"`
-	MigrationStatus        string            `json:"migration_status,omitempty"`
-	MigratedFrom           string            `json:"migrated_from,omitempty"`
-	ArtifactFormat         string            `json:"artifact_format,omitempty"`
-	ParanoiaLevel          int               `json:"paranoia_level"`
-	ExecutingParanoiaLevel int               `json:"executing_paranoia_level,omitempty"`
-	InboundScore           int               `json:"inbound_anomaly_score"`
-	OutboundScore          int               `json:"outbound_anomaly_score,omitempty"`
-	RequestBody            bool              `json:"request_body_access"`
-	ResponseBody           bool              `json:"response_body_access,omitempty"`
-	EarlyBlocking          bool              `json:"early_blocking,omitempty"`
-	SamplingPercentage     int               `json:"sampling_percentage,omitempty"`
-	LegacyPolicyConfirmed  bool              `json:"legacy_policy_confirmed,omitempty"`
-	ExcludedPaths          []string          `json:"excluded_paths,omitempty"`
-	ExcludedIPs            []string          `json:"excluded_ips,omitempty"`
-	Exclusions             []PolicyExclusion `json:"exclusions,omitempty"`
-	CustomRules            string            `json:"custom_rules,omitempty"`
-	CustomRuleCount        int               `json:"custom_rule_count"`
+	SchemaVersion          int                     `json:"schema_version,omitempty"`
+	TemplateKey            string                  `json:"template_key,omitempty"`
+	TemplateVersion        string                  `json:"template_version,omitempty"`
+	CRSTrack               string                  `json:"crs_track,omitempty"`
+	CRSVersion             string                  `json:"crs_version,omitempty"`
+	Target                 string                  `json:"target,omitempty"`
+	AutoUpdate             bool                    `json:"auto_update,omitempty"`
+	PolicyOrigin           string                  `json:"policy_origin,omitempty"`
+	MigrationStatus        string                  `json:"migration_status,omitempty"`
+	MigratedFrom           string                  `json:"migrated_from,omitempty"`
+	ArtifactFormat         string                  `json:"artifact_format,omitempty"`
+	ScalarSource           string                  `json:"scalar_source,omitempty"`
+	ScalarOverrides        *PolicyScalarOverrides  `json:"scalar_overrides,omitempty"`
+	Delivery               *PolicyDeliveryMetadata `json:"delivery,omitempty"`
+	ParanoiaLevel          int                     `json:"paranoia_level"`
+	ExecutingParanoiaLevel int                     `json:"executing_paranoia_level,omitempty"`
+	InboundScore           int                     `json:"inbound_anomaly_score"`
+	OutboundScore          int                     `json:"outbound_anomaly_score,omitempty"`
+	RequestBody            bool                    `json:"request_body_access"`
+	ResponseBody           bool                    `json:"response_body_access,omitempty"`
+	EarlyBlocking          bool                    `json:"early_blocking,omitempty"`
+	SamplingPercentage     int                     `json:"sampling_percentage,omitempty"`
+	LegacyPolicyConfirmed  bool                    `json:"legacy_policy_confirmed,omitempty"`
+	ExcludedPaths          []string                `json:"excluded_paths,omitempty"`
+	ExcludedIPs            []string                `json:"excluded_ips,omitempty"`
+	Exclusions             []PolicyExclusion       `json:"exclusions,omitempty"`
+	CustomRules            string                  `json:"custom_rules,omitempty"`
+	CustomRuleCount        int                     `json:"custom_rule_count"`
 }
 
 type ManagedPolicyMetadata struct {
@@ -51,6 +88,50 @@ type ManagedPolicyMetadata struct {
 	PolicyOrigin    string
 	MigrationStatus string
 	MigratedFrom    string
+}
+
+func resolvePolicyScalars(policyTemplate systempolicy.Template, requestedMode string, settings PolicySettings) (string, PolicySettings, error) {
+	switch settings.ScalarSource {
+	case PolicyScalarSourceInherit:
+		settings.ParanoiaLevel = policyTemplate.Defaults.ParanoiaLevel
+		settings.ExecutingParanoiaLevel = policyTemplate.Defaults.ExecutingParanoiaLevel
+		if settings.ExecutingParanoiaLevel == 0 {
+			settings.ExecutingParanoiaLevel = settings.ParanoiaLevel
+		}
+		settings.InboundScore = policyTemplate.Defaults.InboundScore
+		settings.OutboundScore = policyTemplate.Defaults.OutboundScore
+		if settings.OutboundScore == 0 {
+			settings.OutboundScore = 4
+		}
+		settings.RequestBody = policyTemplate.Defaults.RequestBody
+		settings.ResponseBody = policyTemplate.Defaults.ResponseBody
+		settings.EarlyBlocking = policyTemplate.Defaults.EarlyBlocking
+		settings.SamplingPercentage = policyTemplate.Defaults.SamplingPercentage
+		if settings.SamplingPercentage == 0 {
+			settings.SamplingPercentage = 100
+		}
+		return policyTemplate.Defaults.Mode, settings, nil
+	case PolicyScalarSourceCustom:
+		if settings.ScalarOverrides == nil {
+			return "", settings, errors.New("custom policy settings require explicit overrides")
+		}
+		overrides := settings.ScalarOverrides
+		settings.ParanoiaLevel = overrides.ParanoiaLevel
+		settings.ExecutingParanoiaLevel = overrides.ExecutingParanoiaLevel
+		settings.InboundScore = overrides.InboundScore
+		settings.OutboundScore = overrides.OutboundScore
+		settings.RequestBody = overrides.RequestBody
+		settings.ResponseBody = overrides.ResponseBody
+		settings.EarlyBlocking = overrides.EarlyBlocking
+		settings.SamplingPercentage = overrides.SamplingPercentage
+		return overrides.Mode, settings, nil
+	case "":
+		// Existing revisions predate explicit inheritance metadata. Preserve
+		// their resolved values until an operator saves them in the new UI.
+		return requestedMode, settings, nil
+	default:
+		return "", settings, errors.New("invalid policy scalar source")
+	}
 }
 
 var (

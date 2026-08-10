@@ -758,6 +758,13 @@
     if (!form) return;
     const guidedRoot = $("[data-guided-rule-list]", form);
     const guidedValue = $("[name=guided_rules_json]", form);
+    const customSettings = $("[data-policy-custom-settings]", form);
+    const alignScalarSource = () => {
+      if (!customSettings) return;
+      const selected = $("[name=scalar_source]:checked", form);
+      customSettings.hidden = !selected || selected.value !== "CUSTOM";
+    };
+    alignScalarSource();
     if (guidedRoot && guidedValue && guidedValue.value) {
       try {
         const rules = JSON.parse(guidedValue.value);
@@ -768,6 +775,7 @@
     }
     form.addEventListener("change", (event) => {
       if (event.target.matches("[data-rule-field]")) alignGuidedRuleOperator(event.target.closest("[data-guided-rule-row]"));
+      if (event.target.matches("[name=scalar_source]")) alignScalarSource();
     });
     form.addEventListener("click", (event) => {
       if (event.target.closest("[data-add-guided-rule]")) addGuidedRule(guidedRoot);
@@ -790,6 +798,7 @@
       name: data.get("name") || "",
       description: data.get("description") || "",
       mode: data.get("mode") || "",
+      scalar_source: data.get("scalar_source") || "INHERIT",
       paranoia_level: Number(data.get("paranoia_level")),
       executing_paranoia_level: Number(data.get("executing_paranoia_level")),
       inbound_score: Number(data.get("inbound_score")),

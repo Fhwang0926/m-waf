@@ -47,10 +47,15 @@ func (s *Server) createServerCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, session.Username, "server.command", serverID+":"+commandID+":"+command, "success")
 	redirectPath := "/servers"
-	if command == "web_control_standard" || command == "web_control_hooks" {
-		redirectPath = "/servers/" + serverID
+	separator := "?"
+	if returnTab := strings.TrimSpace(r.FormValue("return_tab")); returnTab != "" {
+		redirectPath = "/servers/" + serverID + "?tab=" + url.QueryEscape(serverDetailTab(returnTab))
+		separator = "&"
+	} else if command == "web_control_standard" || command == "web_control_hooks" {
+		redirectPath = "/servers/" + serverID + "?tab=packages"
+		separator = "&"
 	}
-	http.Redirect(w, r, redirectPath+"?notice="+url.QueryEscape(label+" 명령이 예약되었습니다."), http.StatusSeeOther)
+	http.Redirect(w, r, redirectPath+separator+"notice="+url.QueryEscape(label+" 명령이 예약되었습니다."), http.StatusSeeOther)
 }
 
 func (s *Server) deployServerPackages(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +114,70 @@ func (s *Server) deployServerPackages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "package."+operation, serverID+":"+deploymentID, "success")
-	http.Redirect(w, r, "/servers?notice="+url.QueryEscape("Agent와 WAF 모듈 "+map[string]string{"update": "업데이트", "rollback": "롤백"}[operation]+"가 예약되었습니다."), http.StatusSeeOther)
+	http.Redirect(w, r, "/servers/"+serverID+"?tab=packages&notice="+url.QueryEscape("Agent와 WAF 모듈 "+map[string]string{"update": "업데이트", "rollback": "롤백"}[operation]+"가 예약되었습니다."), http.StatusSeeOther)
+}
+
+func (s *Server) deployServerAgent(w http.ResponseWriter, r *http.Request) {
+	if !s.validCSRF(r) {
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
+		return
+	}
+	if s.catalog == nil {
+		s.renderAdminError(w, r, http.StatusServiceUnavailable, "Agent 설치 파일을 사용할 수 없습니다", "Manager의 서명 bundle을 확인하세요.")
+		return
+	}
+	if r.FormValue("confirm") != "confirmed" {
+		s.renderAdminError(w, r, http.StatusBadRequest, "Agent 업데이트 영향을 확인해야 합니다", "Agent 프로세스가 한 번 재시작됩니다.")
+		return
+	}
+	session := sessionFrom(r)
+	serverID := r.PathValue("id")
+	server, err := s.store.ServerByID(r.Context(), session.ScopeEnterpriseID(), serverID)
+	if err != nil || server.Revoked {
+		s.renderAdminError(w, r, http.StatusNotFound, "서버를 찾을 수 없습니다", "등록 해제되었거나 현재 기업 범위에서 접근할 수 없는 서버입니다.")
+		return
+	}
+	if !model.HasCapability(server.Inventory.Capabilities, model.AgentCapabilitySelfUpdate) || !model.HasCapability(server.Inventory.Capabilities, model.AgentCapabilityLocalRollback) {
+		s.renderAdminError(w, r, http.StatusConflict, "Agent 단독 업데이트 전환이 필요합니다", "패키지 탭의 1회 전환 명령을 서버에서 먼저 실행하세요.")
+		return
+	}
+	operation := strings.TrimSpace(r.FormValue("operation"))
+	var target model.PackageArtifact
+	switch operation {
+	case "update":
+		target, err = s.catalog.ResolveAgent(server.Inventory)
+		if err == nil {
+			if _, rollbackErr := s.catalog.RollbackAgent(target.ID); rollbackErr != nil {
+				err = errors.New("직전 검증 Agent가 bundle에 없어 안전한 업데이트를 예약할 수 없습니다")
+			}
+		}
+	case "rollback":
+		currentAgentID, _, currentErr := s.store.CurrentPackageIDs(r.Context(), serverID)
+		if currentErr == nil {
+			target, err = s.catalog.RollbackAgent(currentAgentID)
+		} else {
+			err = currentErr
+		}
+	default:
+		s.renderAdminError(w, r, http.StatusBadRequest, "지원하지 않는 Agent 작업입니다", "업데이트 또는 롤백을 선택하세요.")
+		return
+	}
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusUnprocessableEntity, "호환 Agent 패키지를 찾을 수 없습니다", err.Error())
+		return
+	}
+	if operation == "update" && target.Version == server.Inventory.AgentVersion {
+		s.renderAdminError(w, r, http.StatusConflict, "이미 최신 Agent를 사용 중입니다", target.Version+" 버전이 현재 서버에서 확인되었습니다.")
+		return
+	}
+	deploymentID, err := s.store.AssignAgentPackage(r.Context(), session.ScopeEnterpriseID(), serverID, target.ID, session.UserID)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusConflict, "Agent 작업을 예약할 수 없습니다", err.Error())
+		return
+	}
+	s.audit(r, session.Username, "agent.package."+operation, serverID+":"+deploymentID+":"+target.ID, "success")
+	action := map[string]string{"update": "업데이트", "rollback": "롤백"}[operation]
+	http.Redirect(w, r, "/servers/"+serverID+"?tab=packages&notice="+url.QueryEscape("Agent "+action+"가 예약되었습니다. 다음 mTLS polling에서 적용하며 웹서버 모듈과 정책은 변경하지 않습니다."), http.StatusSeeOther)
 }
 
 func (s *Server) installServerModule(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +247,7 @@ func (s *Server) installServerModule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "server.install."+installType, serverID+":"+deploymentID+":"+candidate.Kind+":"+controlMode, "success")
-	http.Redirect(w, r, "/servers/"+serverID+"?notice="+url.QueryEscape("Agent가 선택한 설치 파일을 내려받아 검증·설치합니다. 고객 설정 파일은 수정하지 않으며 정책 적용 시 선택한 방식으로 configtest와 reload를 수행합니다."), http.StatusSeeOther)
+	http.Redirect(w, r, "/servers/"+serverID+"?tab=packages&notice="+url.QueryEscape("Agent가 선택한 설치 파일을 내려받아 검증·설치합니다. 고객 설정 파일은 수정하지 않으며 정책 적용 시 선택한 방식으로 configtest와 reload를 수행합니다."), http.StatusSeeOther)
 }
 
 func installationCandidate(inventory model.Inventory, webServer, buildHash string) (model.WebServerCandidate, bool) {

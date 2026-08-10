@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+state_directory=${1:?state directory is required}
+deployment_id=${2:?deployment ID is required}
+target_version=${3:?target version is required}
+rollback_package=${4:--}
+service_command=/usr/sbin/mwaf-agent-service
+timeout_seconds=${MWAF_AGENT_UPDATE_TIMEOUT:-180}
+
+case "$state_directory" in /*) ;; *) echo "state directory must be absolute" >&2; exit 2 ;; esac
+case "$deployment_id" in ''|*[!0-9A-Za-z_-]*) echo "deployment ID is invalid" >&2; exit 2 ;; esac
+case "$timeout_seconds" in ''|*[!0-9]*) echo "update timeout is invalid" >&2; exit 2 ;; esac
+[ "$timeout_seconds" -ge 30 ] && [ "$timeout_seconds" -le 900 ] || { echo "update timeout must be between 30 and 900 seconds" >&2; exit 2; }
+[ -x "$service_command" ] || { echo "M-WAF Agent service command is unavailable" >&2; exit 1; }
+
+confirmation="$state_directory/agent-update-confirmed-$deployment_id"
+pending="$state_directory/pending-agent-update.json"
+failure="$state_directory/failed-package-deployment"
+failure_detail="$state_directory/failed-package-deployment-detail"
+cache_directory="$state_directory/agent-updates/$deployment_id"
+
+"$service_command" restart
+waited=0
+while [ "$waited" -lt "$timeout_seconds" ]; do
+  if [ -s "$confirmation" ] && grep -Fxq "$target_version" "$confirmation"; then
+    rm -f "$pending" "$confirmation"
+    rm -rf "$cache_directory"
+    echo "Agent update $deployment_id confirmed at version $target_version"
+    exit 0
+  fi
+  sleep 2
+  waited=$((waited + 2))
+done
+
+printf '%s\n' "$deployment_id" > "$failure"
+if [ "$rollback_package" = "-" ]; then
+  printf '%s\n' "Agent $target_version did not confirm a Manager heartbeat within ${timeout_seconds}s; no signed rollback package was available." > "$failure_detail"
+  "$service_command" restart || true
+  exit 1
+fi
+[ -f "$rollback_package" ] || {
+  printf '%s\n' "Agent $target_version did not confirm a Manager heartbeat and the cached rollback package is missing." > "$failure_detail"
+  "$service_command" restart || true
+  exit 1
+}
+
+if DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold install --allow-downgrades --no-install-recommends -y "$rollback_package"; then
+  printf '%s\n' "Agent $target_version did not confirm a Manager heartbeat within ${timeout_seconds}s; the previous signed Agent package was restored." > "$failure_detail"
+  rm -f "$pending" "$confirmation"
+  "$service_command" restart
+  exit 0
+fi
+
+printf '%s\n' "Agent $target_version did not confirm a Manager heartbeat and automatic rollback installation failed." > "$failure_detail"
+"$service_command" restart || true
+exit 1

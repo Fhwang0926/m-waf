@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -122,6 +123,62 @@ func statusClass(status string) string {
 
 func (s ServerRecord) StatusLabel() string { return statusLabel(s.Status) }
 func (s ServerRecord) StatusClass() string { return statusClass(s.Status) }
+func (s ServerRecord) OperatingSystemLabel() string {
+	name := strings.ToUpper(strings.TrimSpace(s.Inventory.OSID))
+	switch strings.ToLower(strings.TrimSpace(s.Inventory.OSID)) {
+	case "ubuntu":
+		name = "Ubuntu"
+	case "debian":
+		name = "Debian"
+	}
+	if name == "" {
+		return "수집 대기"
+	}
+	if s.Inventory.OSVersion != "" {
+		return name + " " + s.Inventory.OSVersion
+	}
+	return name
+}
+func (s ServerRecord) OperatingSystemLogoURL() string {
+	if strings.EqualFold(strings.TrimSpace(s.Inventory.OSID), "ubuntu") {
+		return "/static/brand-ubuntu.png"
+	}
+	return ""
+}
+func (s ServerRecord) CPUCoreLabel() string {
+	if s.Inventory.CPUCoreCount <= 0 {
+		return "수집 대기"
+	}
+	return fmt.Sprintf("%d 코어", s.Inventory.CPUCoreCount)
+}
+func (s ServerRecord) MemoryTotalLabel() string {
+	const (
+		mebibyte = 1 << 20
+		gibibyte = 1 << 30
+	)
+	if s.Inventory.MemoryTotalBytes == 0 {
+		return "수집 대기"
+	}
+	if s.Inventory.MemoryTotalBytes < gibibyte {
+		return fmt.Sprintf("%d MiB", s.Inventory.MemoryTotalBytes/mebibyte)
+	}
+	return fmt.Sprintf("%.1f GiB", float64(s.Inventory.MemoryTotalBytes)/gibibyte)
+}
+func (s ServerRecord) ProtectionPolicyStatusLabel() string {
+	if s.EnterprisePolicyID == "" {
+		return "미배정"
+	}
+	if s.PolicyDeploymentStatus != "" {
+		return s.PolicyDeploymentLabel()
+	}
+	return "적용 대기"
+}
+func (s ServerRecord) ProtectionPolicyStatusClass() string {
+	if s.EnterprisePolicyID == "" || s.PolicyDeploymentStatus == "" {
+		return "warn"
+	}
+	return s.PolicyDeploymentClass()
+}
 func (s ServerRecord) LastHeartbeatAge() string {
 	if !s.LastHeartbeatAt.Valid {
 		return "수신 대기"

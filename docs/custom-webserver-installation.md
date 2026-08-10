@@ -20,11 +20,13 @@ Agent와 모듈 설치는 분리된다. 초기 설치 스크립트는 Apache/Ngi
 | 패키지 기반 | Ubuntu 24.04 또는 Debian 12의 배포판 Apache/Nginx | Agent DEB + 웹서버용 모듈 DEB | 모듈 DEB의 APT 의존성이 설치될 수 있다. 고객 웹서버 설정과 reload는 자동 수행하지 않는다. |
 | 커스텀 ZIP | 호스팅사가 직접 빌드한 Apache/Nginx | Agent DEB + 해당 빌드 전용 ZIP | OS 의존성 패키지를 추가하지 않는다. ZIP은 `/opt/m-waf/modules` 아래에만 풀고 고객 설정은 수정하지 않는다. |
 
+Ubuntu 18.04 amd64는 Agent 설치·등록·환경 점검까지만 지원한다. 배포판 모듈 DEB는 제공하지 않으며, 보호를 활성화하려면 해당 웹서버 빌드와 ABI가 정확히 일치하는 서명 커스텀 ZIP을 Manager bundle에 먼저 준비해야 한다.
+
 배포판 패키지 소유로 확인된 웹서버에는 패키지 기반만, 그 외 빌드에는 커스텀 ZIP만 선택할 수 있다. 커스텀 ZIP은 비슷한 버전이 아니라 Agent가 수집한 `web_server_build_hash`와 정확히 일치해야 한다.
 
 ## 지원 조건
 
-- 운영체제: Ubuntu Server 24.04 LTS 또는 Debian 12 Bookworm
+- 운영체제: Agent는 Ubuntu Server 18.04/24.04 LTS 또는 Debian 12 Bookworm, 모듈 패키지는 Ubuntu 24.04 또는 Debian 12
 - 아키텍처: amd64
 - Agent: 서명된 `mwaf-agent` DEB
 - 웹서버: Apache HTTP Server 2.4 또는 Nginx
