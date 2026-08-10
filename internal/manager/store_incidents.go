@@ -308,3 +308,23 @@ WHERE ep.status='ACTIVE' AND ip.enabled=TRUE AND ip.expires_at IS NOT NULL AND i
 	}
 	return items, rows.Err()
 }
+
+func (s *Store) PoliciesWithExpiredExceptions(ctx context.Context, now time.Time, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT ep.id FROM enterprise_policies ep
+JOIN policy_configurations pc ON pc.policy_revision_id=ep.current_revision_id
+JOIN policy_configuration_exclusions pe ON pe.configuration_id=pc.id
+WHERE ep.status='ACTIVE' AND pe.source_scope='ENTERPRISE' AND pe.enabled=TRUE AND pe.expires_at IS NOT NULL AND pe.expires_at<=? ORDER BY ep.id LIMIT ?`, now.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	return items, rows.Err()
+}

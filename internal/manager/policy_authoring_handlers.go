@@ -455,6 +455,21 @@ func enterpriseExclusionFormValues(items []PolicyExclusion) (rules, tags, target
 	return strings.Join(ruleLines, "\n"), strings.Join(tagLines, "\n"), strings.Join(targetLines, "\n"), strings.Join(conditionalLines, "\n")
 }
 
+func preservePolicyExclusionMetadata(next, current []PolicyExclusion) {
+	for index := range next {
+		for _, existing := range current {
+			if !samePolicyException(next[index], existing) {
+				continue
+			}
+			next[index].Reason = existing.Reason
+			next[index].ExpiresAt = existing.ExpiresAt
+			next[index].Enabled = existing.Enabled
+			next[index].Legacy = existing.Legacy
+			break
+		}
+	}
+}
+
 func (s *Server) editEnterprisePolicy(w http.ResponseWriter, r *http.Request) {
 	policy, err := s.store.EnterprisePolicyByID(r.Context(), sessionFrom(r).ScopeEnterpriseID(), r.PathValue("id"))
 	if err != nil {
@@ -566,6 +581,7 @@ func (s *Server) createEnterprisePolicyRevision(w http.ResponseWriter, r *http.R
 		return
 	}
 	settings := policy.CurrentSettings
+	preservePolicyExclusionMetadata(exclusions, settings.Exclusions)
 	if r.FormValue("remove_existing_engine_bypasses") != "confirmed" {
 		for _, exclusion := range settings.Exclusions {
 			if exclusion.Type == PolicyExclusionEngineBypass && !exclusion.Legacy {

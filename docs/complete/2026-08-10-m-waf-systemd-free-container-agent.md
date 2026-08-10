@@ -13,7 +13,7 @@
   - `start`, `status`, `restart`, `stop`만 제공한다.
   - Agent가 비정상 종료하면 5초 후 다시 실행한다.
   - PID 파일이 가리키는 프로세스 명령을 확인해 다른 프로세스를 종료하지 않는다.
-  - 로그는 가능하면 컨테이너 stdout/stderr로 전달하고, 불가능할 때만 `/var/log/mwaf-agent/agent.log`를 사용한다.
+  - 일반 서비스 컨테이너 로그는 stdout/stderr로 전달한다. PID 1의 stdout이 대화형 터미널이면 설치 셸에 로그가 섞이지 않도록 `/var/log/mwaf-agent/agent.log`를 사용한다.
 - Agent 패키지 업데이트와 Manager의 Agent 재시작·중지 명령이 systemd 또는 컨테이너 감독 프로세스를 현재 환경에 맞게 선택한다.
 - systemd 없는 컨테이너에서는 호스트 재부팅·종료 명령을 지원하지 않는 명령으로 처리한다.
 - 제거 시 컨테이너 감독 프로세스도 먼저 중지한다.

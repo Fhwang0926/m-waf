@@ -29,7 +29,7 @@
         {{if .CanOperate}}<section class="nav-group">
           <h2>정책</h2>
           <a class="side-link {{if eq .Active "policies"}}active{{end}}" href="/policies" title="보호 정책" {{if eq .Active "policies"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-policy"}}</span><span>보호 정책</span></a>
-          <a class="side-link {{if eq .Active "ip-rules"}}active{{end}}" href="/ip-rules" title="IP 정책" {{if eq .Active "ip-rules"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-ip"}}</span><span>IP 정책</span></a>
+          <a class="side-link {{if eq .Active "user-policies"}}active{{end}}" href="/user-policies" title="사용자 정책" {{if eq .Active "user-policies"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-ip"}}</span><span>사용자 정책</span></a>
         </section>{{end}}
         <section class="nav-group">
           <h2>서버</h2>

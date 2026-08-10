@@ -28,16 +28,20 @@ concurrency:
 
 env:
   TEST_UBUNTU_1804_IMAGE: docker.io/library/ubuntu:18.04@sha256:152dc042452c496007f07ca9127571cb9c29697f42acbfad72324b2bb2e43c98
+  TEST_UBUNTU_2004_IMAGE: docker.io/library/ubuntu:20.04@sha256:c664f8f86ed5a386b0a340d981b8f81714e21a8b9c73f658c4bea56aa179d54a
+  TEST_UBUNTU_2204_IMAGE: docker.io/library/ubuntu:22.04@sha256:0199853f6d6b20b0424f3c5694a72a62764f01e6a771b1eb48a4197848986c7e
   TEST_UBUNTU_IMAGE: docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+  TEST_UBUNTU_2604_IMAGE: docker.io/library/ubuntu:26.04@sha256:7b202b0e2e0028c6250f5fcf41d04df492d145a1654c6995a6553f0c1f6f1960
   TEST_DEBIAN_IMAGE: docker.io/library/debian:12-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
   TEST_WEBSERVER_IMAGE: mwaf-ci-webservers:ubuntu-24.04-amd64
+  TEST_UBUNTU_2604_WEBSERVER_IMAGE: mwaf-ci-webservers:ubuntu-26.04-amd64
   TEST_DEBIAN_WEBSERVER_IMAGE: mwaf-ci-webservers:debian-12-amd64
 
 jobs:
   verify:
     name: Install, detect, and block on supported OS
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -124,6 +128,22 @@ jobs:
           cache-from: type=gha,scope=mwaf-ci-webservers-amd64
           cache-to: type=gha,scope=mwaf-ci-webservers-amd64,mode=max,ignore-error=true
 
+      - name: Build cached Ubuntu 26.04 web server fixture
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: build/containers/ci-webservers
+          file: build/containers/ci-webservers/Dockerfile
+          load: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          tags: ${{ env.TEST_UBUNTU_2604_WEBSERVER_IMAGE }}
+          build-args: |
+            APT_REFRESH_WEEK=${{ steps.fixture-cache.outputs.apt_refresh_week }}
+            TEST_BASE_IMAGE=${{ env.TEST_UBUNTU_2604_IMAGE }}
+          cache-from: type=gha,scope=mwaf-ci-webservers-ubuntu-26.04-amd64
+          cache-to: type=gha,scope=mwaf-ci-webservers-ubuntu-26.04-amd64,mode=max,ignore-error=true
+
       - name: Build cached Debian web server fixture
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
@@ -156,8 +176,7 @@ jobs:
           CRS_LTS_COMMIT: ${{ steps.crs.outputs.lts_commit }}
           CRS_LTS_TAG_OBJECT: ${{ steps.crs.outputs.lts_tag_object }}
           RUN_NUMBER: ${{ github.run_number }}
-          MWAF_AGENT_DEB_TARGETS: ubuntu:18.04 ubuntu:24.04 debian:12
-          MWAF_DEB_TARGETS: ubuntu:24.04 debian:12
+          MWAF_AGENT_DEB_TARGETS: ubuntu:18.04 ubuntu:20.04 ubuntu:22.04 ubuntu:24.04 ubuntu:26.04 debian:12
         run: |
           set -eu
           agent_base_version=$(sed -n '1p' packaging/agent/VERSION)
@@ -201,26 +220,37 @@ jobs:
           WEBSERVER=nginx VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/module/deb/build.sh
           WEBSERVER=apache INTEGRATION_MODE=external VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/module/deb/build.sh
           WEBSERVER=nginx INTEGRATION_MODE=external VERSION="$package_version" OUTPUT_DIR=dist/packages METADATA_DIR=dist/metadata packaging/module/deb/build.sh
-          test -f dist/metadata/agent-ubuntu-18.04.json
-          test "$(find dist/metadata -maxdepth 1 -type f -name 'module-*-ubuntu-18.04.json' | wc -l)" -eq 0
+          for version in 18.04 20.04 22.04 24.04 26.04; do
+            test -f "dist/metadata/agent-ubuntu-${version}.json"
+          done
+          test -f dist/metadata/agent-debian-12.json
+          for version in 18.04 20.04 22.04; do
+            test "$(find dist/metadata -maxdepth 1 -type f -name "module-*-ubuntu-${version}.json" | wc -l)" -eq 1
+            test -f "dist/metadata/module-apache-distro-ubuntu-${version}.json"
+          done
+          for version in 24.04 26.04; do
+            test "$(find dist/metadata -maxdepth 1 -type f -name "module-*-ubuntu-${version}.json" | wc -l)" -eq 4
+          done
           test "$(find dist/packages -maxdepth 1 -type f -name '*.deb' | wc -l)" -eq 5
           for package in dist/packages/*.deb; do
             dpkg-deb --info "$package"
           done
 
-      - name: Install Agent-only package on Ubuntu 18.04
+      - name: Install Agent-only package on Ubuntu 18.04, 20.04, and 22.04
         run: |
           set -eu
-          docker run --rm --platform linux/amd64 \
-            -v "$PWD/dist/packages:/packages:ro" \
-            "$TEST_UBUNTU_1804_IMAGE" sh -eu -c '
-              dpkg -i /packages/mwaf-agent_*.deb
-              /usr/bin/mwaf-agent -version
-              test -x /usr/sbin/mwaf-agent-service
-              dpkg-query -W mwaf-agent >/dev/null
-              test ! -e /etc/apache2
-              test ! -e /etc/nginx
-            '
+          for image in "$TEST_UBUNTU_1804_IMAGE" "$TEST_UBUNTU_2004_IMAGE" "$TEST_UBUNTU_2204_IMAGE"; do
+            docker run --rm --platform linux/amd64 \
+              -v "$PWD/dist/packages:/packages:ro" \
+              "$image" sh -eu -c '
+                dpkg -i /packages/mwaf-agent_*.deb
+                /usr/bin/mwaf-agent -version
+                test -x /usr/sbin/mwaf-agent-service
+                dpkg-query -W mwaf-agent >/dev/null
+                test ! -e /etc/apache2
+                test ! -e /etc/nginx
+              '
+          done
 
       - name: Smoke-test install, detection, and blocking on Ubuntu 24.04 Apache
         run: |
@@ -237,6 +267,22 @@ jobs:
             -v "$PWD/dist:/dist:ro" \
             -v "$PWD/build/containers/ci-webservers/test-distro-smoke.sh:/test-distro-smoke.sh:ro" \
             "$TEST_WEBSERVER_IMAGE" sh /test-distro-smoke.sh nginx
+
+      - name: Smoke-test install, detection, and blocking on Ubuntu 26.04 Apache
+        run: |
+          set -eu
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/build/containers/ci-webservers/test-distro-smoke.sh:/test-distro-smoke.sh:ro" \
+            "$TEST_UBUNTU_2604_WEBSERVER_IMAGE" sh /test-distro-smoke.sh apache
+
+      - name: Smoke-test install, detection, and blocking on Ubuntu 26.04 Nginx
+        run: |
+          set -eu
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/build/containers/ci-webservers/test-distro-smoke.sh:/test-distro-smoke.sh:ro" \
+            "$TEST_UBUNTU_2604_WEBSERVER_IMAGE" sh /test-distro-smoke.sh nginx
 
       - name: Smoke-test install, detection, and blocking on Debian 12 Apache
         run: |
@@ -331,9 +377,15 @@ jobs:
           openssl genpkey -algorithm ED25519 -out dist/test-bundle-signing.key
           go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/test-bundle-signing.key -public-key-output dist/package-signing.pub -version "test-${COMMIT}" -commit "$COMMIT"
           test "$(find dist/bundle/packages -type f | wc -l)" -eq 5
-          test "$(jq '.artifacts | length' dist/bundle/bundle-manifest.json)" -eq 11
-          test "$(jq '[.artifacts[] | select(.kind == "agent" and .os_id == "ubuntu" and .os_version == "18.04")] | length' dist/bundle/bundle-manifest.json)" -eq 1
-          test "$(jq '[.artifacts[] | select(.kind == "module" and .os_id == "ubuntu" and .os_version == "18.04")] | length' dist/bundle/bundle-manifest.json)" -eq 0
+          test "$(jq '.artifacts | length' dist/bundle/bundle-manifest.json)" -eq 21
+          for version in 18.04 20.04 22.04; do
+            test "$(jq --arg version "$version" '[.artifacts[] | select(.kind == "agent" and .os_id == "ubuntu" and .os_version == $version)] | length' dist/bundle/bundle-manifest.json)" -eq 1
+            test "$(jq --arg version "$version" '[.artifacts[] | select(.kind == "module" and .name == "mwaf-modsecurity-apache" and .os_id == "ubuntu" and .os_version == $version)] | length' dist/bundle/bundle-manifest.json)" -eq 1
+            test "$(jq --arg version "$version" '[.artifacts[] | select(.kind == "module" and .name == "mwaf-modsecurity-nginx" and .os_id == "ubuntu" and .os_version == $version)] | length' dist/bundle/bundle-manifest.json)" -eq 0
+          done
+          for version in 24.04 26.04; do
+            test "$(jq --arg version "$version" '[.artifacts[] | select(.os_id == "ubuntu" and .os_version == $version)] | length' dist/bundle/bundle-manifest.json)" -eq 5
+          done
           test "$(jq '[.artifacts[] | select(.os_id == "debian" and .os_version == "12")] | length' dist/bundle/bundle-manifest.json)" -eq 5
           test "$(find dist/bundle/policy-sources -type f -name '*.json' | wc -l)" -eq 2
           test "$(find dist/bundle/policy-sources -type f -name '*.tar.gz' | wc -l)" -eq 2

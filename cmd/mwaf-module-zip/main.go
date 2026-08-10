@@ -35,12 +35,13 @@ func main() {
 	osID := flag.String("os-id", "", "target OS id")
 	osVersion := flag.String("os-version", "", "target OS version")
 	webServer := flag.String("webserver", "", "apache or nginx")
+	webServerVersion := flag.String("webserver-version", "", "exact Agent inventory web-server version")
 	webServerBuild := flag.String("webserver-build", "", "exact Agent inventory build hash")
 	runtimeABI := flag.String("runtime-abi", "", "connector runtime ABI")
 	flag.Parse()
 	artifact := model.PackageArtifact{
 		ID: *id, Kind: "module", Name: *name, Version: *version, OSID: *osID, OSVersion: *osVersion, Architecture: "amd64",
-		WebServer: *webServer, WebServerBuild: *webServerBuild, IntegrationMode: model.IntegrationModeExternal, RuntimeABI: *runtimeABI,
+		WebServer: *webServer, WebServerVersion: *webServerVersion, WebServerBuild: *webServerBuild, IntegrationMode: model.IntegrationModeExternal, RuntimeABI: *runtimeABI,
 		PolicyDelivery: "bundle", Path: filepath.Base(*output), PackageFormat: model.PackageFormatZIP, InstallRoot: "/opt/m-waf",
 	}
 	if err := build(*input, *output, *metadataOutput, artifact); err != nil {
@@ -50,8 +51,8 @@ func main() {
 }
 
 func build(input, output, metadataOutput string, artifact model.PackageArtifact) error {
-	if input == "" || output == "" || metadataOutput == "" || artifact.ID == "" || artifact.Version == "" || artifact.OSID == "" || artifact.OSVersion == "" || artifact.WebServerBuild == "" || artifact.RuntimeABI == "" {
-		return errors.New("input, output, metadata-output, id, version, OS, build hash, and runtime ABI are required")
+	if input == "" || output == "" || metadataOutput == "" || artifact.ID == "" || artifact.Version == "" || artifact.OSID == "" || artifact.OSVersion == "" || artifact.WebServerVersion == "" || artifact.WebServerBuild == "" || artifact.RuntimeABI == "" {
+		return errors.New("input, output, metadata-output, id, version, OS, web-server version, build hash, and runtime ABI are required")
 	}
 	if artifact.WebServer != "apache" && artifact.WebServer != "nginx" {
 		return errors.New("webserver must be apache or nginx")

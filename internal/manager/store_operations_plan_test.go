@@ -32,6 +32,26 @@ func TestPackageDeploymentPlanKeepsHookModeOutOfDisplayDetail(t *testing.T) {
 	}
 }
 
+func TestAppliedAgentOnlyDeploymentRequiresSuccessfulManagedAgentUpdate(t *testing.T) {
+	agentPlan, err := encodePackageDeploymentPlanWithScope(model.WebServerControlStandard, model.PackageScopeAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isAppliedAgentOnlyDeployment("APPLIED", agentPlan) {
+		t.Fatal("successful Agent-only deployment must be eligible as upgrade evidence")
+	}
+	if isAppliedAgentOnlyDeployment("PENDING", agentPlan) {
+		t.Fatal("pending Agent deployment must not be eligible as upgrade evidence")
+	}
+	modulePlan, err := encodePackageDeploymentPlan(model.WebServerControlStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isAppliedAgentOnlyDeployment("APPLIED", modulePlan) {
+		t.Fatal("combined Agent and module deployment must not be treated as Agent-only upgrade evidence")
+	}
+}
+
 func TestPackageDeploymentPlanDefaultsToStandardControl(t *testing.T) {
 	encoded, err := encodePackageDeploymentPlan("")
 	if err != nil {

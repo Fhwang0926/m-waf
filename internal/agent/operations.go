@@ -285,7 +285,10 @@ func selectInstallationCandidate(ctx context.Context, item model.PackageDownload
 }
 
 func installDEBPackages(ctx context.Context, paths ...string) error {
-	arguments := []string{"-o", "Dpkg::Options::=--force-confold", "install", "--allow-downgrades", "--no-install-recommends", "-y"}
+	// Package downloads are signature and SHA-256 verified before this point.
+	// Keep root-only cache directories private and explicitly disable APT's
+	// acquisition-user fallback for these already-local files.
+	arguments := []string{"-o", "APT::Sandbox::User=root", "-o", "Dpkg::Options::=--force-confold", "install", "--allow-downgrades", "--no-install-recommends", "-y"}
 	arguments = append(arguments, paths...)
 	command := exec.CommandContext(ctx, "apt-get", arguments...)
 	command.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
@@ -531,9 +534,9 @@ func (a *Agent) applyWebServerControlCommand(command string) (bool, string, erro
 	label := ""
 	switch command {
 	case "web_control_standard":
-		controlMode, label = model.WebServerControlStandard, "표준 웹서버 제어를 사용합니다."
+		controlMode, label = model.WebServerControlStandard, "자동 설정 검사·재적용 방식을 사용합니다."
 	case "web_control_hooks":
-		controlMode, label = model.WebServerControlHooks, "검증된 고객 Hook을 사용합니다."
+		controlMode, label = model.WebServerControlHooks, "검증된 사용자 지정 실행 파일을 사용합니다."
 	default:
 		return false, "", nil
 	}

@@ -492,9 +492,9 @@ func (c AgentCommandRecord) CommandLabel() string {
 	case "server_stop":
 		return "서버 종료"
 	case "web_control_standard":
-		return "표준 웹서버 제어 사용"
+		return "자동 설정 검사·재적용 사용"
 	case "web_control_hooks":
-		return "고객 Hook 사용"
+		return "사용자 지정 실행 파일 사용"
 	default:
 		return c.Command
 	}

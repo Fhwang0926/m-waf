@@ -45,7 +45,7 @@ fi
   exit 1
 }
 
-if DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold install --allow-downgrades --no-install-recommends -y "$rollback_package"; then
+if DEBIAN_FRONTEND=noninteractive apt-get -o APT::Sandbox::User=root -o Dpkg::Options::=--force-confold install --allow-downgrades --no-install-recommends -y "$rollback_package"; then
   printf '%s\n' "Agent $target_version did not confirm a Manager heartbeat within ${timeout_seconds}s; the previous signed Agent package was restored." > "$failure_detail"
   rm -f "$pending" "$confirmation"
   "$service_command" restart

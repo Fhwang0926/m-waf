@@ -41,7 +41,7 @@ func TestProtectionPolicyFormUsesServerMembershipAndPublishedSystemPolicy(t *tes
 	if !strings.Contains(html, "현재 게시된 시스템 정책을 자동으로 사용합니다") || !strings.Contains(html, "OWASP CRS LTS 4.28.0") {
 		t.Fatalf("published system policy inheritance is not read-only and visible: %s", html)
 	}
-	if !strings.Contains(html, `name="scalar_source"`) || !strings.Contains(html, "기본 정책 그대로 사용") || !strings.Contains(html, "기업 설정으로 오버라이드") {
+	if !strings.Contains(html, `name="scalar_source"`) || !strings.Contains(html, "시스템 권장 설정 사용") || !strings.Contains(html, "기업 맞춤 설정 사용") {
 		t.Fatalf("base policy and enterprise override choice is missing: %s", html)
 	}
 	if strings.Contains(html, `name="target"`) || strings.Contains(html, `name="group_id"`) {
@@ -80,7 +80,8 @@ func TestEnterprisePolicyDetailTabSelection(t *testing.T) {
 		"":          "overview",
 		"overview":  "overview",
 		" SERVERS ": "servers",
-		"rules":     "rules",
+		"effective": "effective",
+		"rules":     "overview",
 		"rollouts":  "rollouts",
 		"revisions": "revisions",
 		"unknown":   "overview",
@@ -105,7 +106,7 @@ func TestEnterprisePolicyDetailRendersOnlySelectedTab(t *testing.T) {
 		},
 		"PolicyServers": []ServerRecord{}, "PolicyServerChoices": []policyServerChoice{}, "Rollouts": []policyRolloutView{}, "Revisions": []PolicyRevisionRecord{},
 	}
-	tabs := []string{"overview", "servers", "rules", "rollouts", "revisions"}
+	tabs := []string{"overview", "servers", "effective", "rollouts", "revisions"}
 	for _, selected := range tabs {
 		data["Tab"] = selected
 		var output bytes.Buffer

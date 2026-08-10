@@ -27,7 +27,7 @@ Before the first publication, set **Repository Settings → Pages → Build and 
 |---|---|
 | Manager | Linux amd64 host with Docker Engine and Docker Compose |
 | Database | MariaDB 11.8.6 container |
-| Customer OS | Ubuntu Server 24.04 LTS or Debian 12 Bookworm, amd64; Ubuntu 18.04 amd64 is Agent discovery only |
+| Customer OS | Ubuntu Server 18.04, 20.04, 22.04, 24.04 and 26.04 LTS or Debian 12 Bookworm, amd64; Apache module automation supports all listed targets and Nginx module automation supports Ubuntu 24.04/26.04 and Debian 12 |
 | Web server | Supported Ubuntu/Debian distribution packages, or an operator-managed Apache/Nginx custom build using `external` integration |
 | WAF | Distro connector package, or a compatible ModSecurity connector already built and loaded by the hosting operator |
 | Rules | OWASP CRS v4.28.0 from the repository source lock, with managed sensitivity, threshold, URL/IP exclusions, and restricted custom `SecRule` additions |
@@ -39,14 +39,14 @@ Rocky Linux/RPM, ARM64, OpenResty, automatic connector compilation, HA, and unre
 
 ## Supported customer web servers and versions
 
-The full package-based MVP supports Ubuntu 24.04 LTS and Debian 12 Bookworm, both amd64. Ubuntu 18.04 amd64 can install the dependency-free Agent for registration and inventory, but it has no distro module artifact. `distro` uses the selected supported distribution's packages. `external` keeps an operator-managed web-server binary and pre-installed ModSecurity connector, then installs only M-WAF CRS/configuration integration and the Agent.
+The dependency-free Agent supports Ubuntu 18.04, 20.04, 22.04, 24.04 and 26.04 LTS plus Debian 12 Bookworm on amd64. Distro Apache installation is available on every listed target. Distro Nginx installation is available on Ubuntu 24.04/26.04 and Debian 12; older Ubuntu Nginx and operator-built Apache/Nginx use an exact-match signed custom ZIP. `distro` uses the selected supported distribution's packages. `external` keeps an operator-managed web-server binary and pre-installed ModSecurity connector, then installs only M-WAF CRS/configuration integration and the Agent.
 
 | Web server | Supported server version | Confirmed Ubuntu package revision | M-WAF package | Open-source WAF components |
 |---|---:|---:|---|---|
 | Apache HTTP Server | `2.4.58` | `apache2 2.4.58-1ubuntu8.15` | `mwaf-modsecurity-apache` | `libapache2-mod-security2 2.9.7-1build3` + OWASP CRS `4.28.0` |
 | Nginx | `1.24.0` | `nginx 1.24.0-2ubuntu7.15` | `mwaf-modsecurity-nginx` | `libnginx-mod-http-modsecurity 1.0.3-1build3` + libmodsecurity `3.0.12` + OWASP CRS `4.28.0` |
 
-Debian 12 uses the same signed M-WAF DEBs with separate compatibility metadata. Its baseline is Apache 2.4 with `libapache2-mod-security2 >= 2.9.7-1`, or Nginx `>= 1.22.0` with `libnginx-mod-http-modsecurity >= 1.0.3-1`, from the configured Bookworm repositories.
+Ubuntu 26.04 uses the same signed M-WAF DEBs with OS-specific compatibility metadata. Its baseline is `libapache2-mod-security2 >= 2.9.12-2build1` or `libnginx-mod-http-modsecurity >= 1.0.3-2build6`. Debian 12 also uses separate compatibility metadata; its baseline is Apache 2.4 with `libapache2-mod-security2 >= 2.9.7-1`, or Nginx `>= 1.22.0` with `libnginx-mod-http-modsecurity >= 1.0.3-1`.
 
 | Custom ZIP mode | Required customer-side condition | M-WAF artifact |
 |---|---|---|
@@ -57,17 +57,17 @@ Before downloading a module, Manager requires these inventory fields to match an
 
 | Compatibility field | Required value |
 |---|---|
-| Operating system | Agent: Ubuntu `18.04`/`24.04` or Debian `12`; module DEB: Ubuntu `24.04` or Debian `12` |
+| Operating system | Agent: Ubuntu `18.04`/`20.04`/`22.04`/`24.04`/`26.04` or Debian `12`; Apache module DEB: all listed targets; Nginx module DEB: Ubuntu `24.04`/`26.04` or Debian `12` |
 | Architecture | `amd64` (`x86_64`) |
 | Web-server type | Exactly `apache` or `nginx` |
 | Integration mode | Exactly `distro` or `external`; an empty legacy value means `distro` |
-| Server version and build | Distribution packages use package compatibility; custom ZIP requires an exact normalized build-hash match |
+| Server version and build | Distribution packages use package compatibility; custom ZIP requires exact server-version and normalized build-hash matches |
 
 The distro DEBs depend on the supported distribution's ModSecurity packages. Custom ZIP installation never invokes APT/RPM for the module and only writes its payload below `/opt/m-waf/modules`; the hosting provider remains responsible for building the Connector. Compatibility is fail-closed through signed metadata, exact build hash/ABI, safe extraction, include verification, and web-server configuration testing.
 
 ### Explicitly unsupported in this MVP
 
-- Ubuntu 18.04 distro module packages, Ubuntu 22.04, Ubuntu 26.04, Debian releases other than 12, Rocky Linux, AlmaLinux, RHEL, and CentOS
+- Ubuntu 18.04/20.04/22.04 distro Nginx module packages, Ubuntu interim releases, Debian releases other than 12, Rocky Linux, AlmaLinux, RHEL, and CentOS
 - ARM64 and other non-amd64 architectures
 - Custom builds where the matching ModSecurity connector is not already compiled and loaded
 - Custom layouts without an absolute control binary and a dedicated included M-WAF configuration file
@@ -111,13 +111,21 @@ make dev-full
 
 1. verifies a cached schema-v2 release bundle and reuses its immutable CRS source files;
 2. builds the current Linux amd64 Agent;
-3. builds Ubuntu 24.04 and Debian 12 Agent/Apache/Nginx package metadata in a cached Docker builder;
+3. builds Agent and Apache metadata for Ubuntu 18.04 through 26.04 LTS, plus Apache/Nginx metadata for Debian 12 and Nginx metadata for Ubuntu 24.04/26.04, in a cached Docker builder;
 4. signs a development bundle with a local key under the ignored `deploy/compose/secrets` directory;
 5. starts the source Manager with that local bundle.
 
 Because `make dev-full` requires the initial `make dev` setup, it starts the replacement Manager with schema migration disabled and keeps the existing local MariaDB volume. It does not reset or recreate the database.
 
 Use `make dev-bundle` when only the local Agent/package bundle should be rebuilt. The current local bundle path is recorded under `.local/mwaf-manager`; neither the bundle nor its development signing key is committed or uploaded. A verified schema-v2 published bundle must have been cached by one successful `make dev` before the first offline `make dev-full` run.
+
+For exact-build custom Apache/Nginx modules, place one or more target directories containing `spec.json` and `payload/{module,integration}` under a local source directory, then run:
+
+```sh
+make dev-custom-bundle MWAF_DEV_CUSTOM_SOURCE_DIR=/absolute/path/to/custom-modules
+```
+
+This one command creates each ZIP and metadata file, merges them with the local Agent, standard modules and cached CRS sources, signs and verifies the development bundle, switches `dev-bundle-active`, and lets the running Manager reload it. It does not compile a Connector or install build dependencies on a protected server; `payload/module` must contain a Connector produced with the exact customer web-server ABI. See [custom web-server installation](docs/custom-webserver-installation.md#개발-환경-원클릭-bundle-반영).
 
 For an Agent-only change, increase `packaging/agent/VERSION`, add the matching `docs/agent-releases/<version>.md`, and use `make agent-check` followed by `make dev-agent-bundle`. The Agent-only bundle preserves the current module and CRS artifacts byte-for-byte. The running local Manager detects the active manifest change and restarts without a database migration. See [Agent continuous connection and update](docs/agent-continuous-update.md).
 
@@ -217,7 +225,7 @@ The quick-install button uses the existing authenticated administrator API to cr
 
 The first-stage installer downloads and installs only the signed Agent DEB. It does not install Apache, Nginx, ModSecurity, logrotate, or a WAF module, and it does not edit or reload a web-server configuration.
 
-The same Agent command supports Ubuntu 18.04/24.04 and Debian 12 containers. Ubuntu 18.04 stops after registration and inventory until an exact compatible custom ZIP module is available. Hosts and containers use the same `/usr/sbin/mwaf-agent-service` command; it selects the existing systemd unit or the packaged lightweight supervisor automatically. A systemd-free Docker/OCI container does not install systemd or any additional runtime dependency. Check it with:
+The same Agent command supports Ubuntu 18.04/20.04/22.04/24.04/26.04 and Debian 12 containers. Ubuntu 18.04/20.04/22.04 distro Apache servers can continue with the Manager-provided module package; Nginx requires an exact compatible signed module. Hosts and containers use the same `/usr/sbin/mwaf-agent-service` command; it selects the existing systemd unit or the packaged lightweight supervisor automatically. A systemd-free Docker/OCI container does not install systemd or any additional runtime dependency. Check it with:
 
 ```sh
 /usr/sbin/mwaf-agent-service status
@@ -247,7 +255,9 @@ dpkg-query -W -f='${binary:Package}\t${db:Status-Abbrev}\t${Version}\n' \
 
 Resolve the reported lock, disk-space, repository, dependency, or interrupted-DPKG problem first, then rerun the same reviewed Agent installer command. After Agent registration, retry module installation from the server detail page. Do not purge Apache/Nginx, delete `/etc/mwaf`, or force-install an incompatible package as a recovery shortcut.
 
-The current MVP has no supported Agent `tar.gz`, manual-copy, or RPM installation path. A Manager-triggered Agent-only update keeps a verified previous Agent DEB locally and automatically restores it when the new Agent does not confirm a heartbeat; initial installation and web-server module APT failures still require the documented package-state recovery procedure. Custom builds use a signed exact-match ZIP for the web-server module. The Agent requires a signed Ubuntu 18.04/24.04 or Debian 12 amd64 DEB; Ubuntu 18.04 has no distro module package. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation](docs/custom-webserver-installation.md#실패-처리).
+For a legacy Agent, first use the server page's identity-preserving Agent reinstall command; do not remove the old Agent before a compatible signed bundle artifact exists. A full purge and new enrollment is reserved for missing or damaged server-ID/mTLS files and creates a new Manager server identity. See [Agent continuous connection and updates](docs/agent-continuous-update.md#레거시-agent-완전-제거-후-신규-등록).
+
+The current MVP has no supported Agent `tar.gz`, manual-copy, or RPM installation path. A Manager-triggered Agent-only update keeps a verified previous Agent DEB locally and automatically restores it when the new Agent does not confirm a heartbeat; initial installation and web-server module APT failures still require the documented package-state recovery procedure. Custom builds use a signed exact-match ZIP for the web-server module. The Agent requires a signed Ubuntu 18.04/20.04/22.04/24.04/26.04 or Debian 12 amd64 DEB. Distro Apache module installation is available across those Ubuntu LTS targets; distro Nginx module installation requires Ubuntu 24.04/26.04 or Debian 12. Detailed diagnosis and recovery steps are in [Custom Apache/Nginx installation](docs/custom-webserver-installation.md#실패-처리).
 
 ## Operate the MVP
 
@@ -392,16 +402,16 @@ Relevant pull requests, manual workflow dispatches, and pushed Git tags run `.gi
 2. builds the Linux amd64 Agent;
 3. builds `mwaf-agent` and four Apache/Nginx distro/external integration DEB packages;
 4. reads the LTS and Stable CRS tag/commit/archive/hash entries from `packaging/sources.lock.yaml`, restores both exact archives, and verifies both locked SHA-256 values;
-5. records Ubuntu 18.04 Agent-only compatibility and Ubuntu 24.04/Debian 12 full package compatibility in the bundle catalog;
-6. installs and executes the dependency-free Agent DEB on a clean pinned Ubuntu 18.04 amd64 container and confirms that it adds no Apache/Nginx files;
-7. installs the Agent and Apache module on clean pinned Ubuntu 24.04 and Debian 12 amd64 containers, runs `apachectl configtest`, verifies a `DetectionOnly` request remains HTTP `200`, then verifies an `On` request is blocked with HTTP `403`;
-8. repeats the same install, detection, blocking, and `nginx -t` checks for Nginx on both operating systems;
-9. verifies all four clean environments load ModSecurity and write distinct detection and blocking markers to the protected audit log;
+5. records Ubuntu 18.04/20.04/22.04 Agent plus Apache compatibility and Ubuntu 24.04/26.04 plus Debian 12 Apache/Nginx compatibility in the bundle catalog;
+6. installs and executes the dependency-free Agent DEB on clean pinned Ubuntu 18.04, 20.04 and 22.04 amd64 containers and confirms that it adds no Apache/Nginx files;
+7. installs the Agent and Apache module on clean pinned Ubuntu 24.04/26.04 and Debian 12 amd64 containers, runs `apachectl configtest`, verifies a `DetectionOnly` request remains HTTP `200`, then verifies an `On` request is blocked with HTTP `403`;
+8. repeats the same install, detection, blocking, and `nginx -t` checks for Nginx on all three full-package operating systems;
+9. verifies all six clean module environments load ModSecurity and write distinct detection and blocking markers to the protected audit log;
 10. installs the external packages against pre-installed Apache/Nginx connectors through non-default absolute binary paths and verifies they do not depend on distro web-server packages;
 11. starts both web servers with a deterministic test rule, verifies an HTTP `403` response and a non-empty JSON audit log, and checks the dedicated include, configuration test, CRS, log path, and managed-file guard;
-12. signs a temporary five-file, eleven-platform-artifact verification bundle without creating a Manager Docker image.
+12. signs a temporary five-file, eighteen-platform-artifact verification bundle without creating a Manager Docker image.
 
-The workflow reuses bounded caches for Go modules/build outputs keyed by `go.sum`, CRS archives keyed by their locked SHA-256, pinned Ubuntu 24.04 and Debian 12 Apache/Nginx install-test fixtures, and Manager BuildKit layers. The fixtures are refreshed at least once per UTC week so distribution dependency drift is still detected; within that period they only avoid repeating package downloads. Every verification run still installs the newly built local DEBs and performs the same configuration, module-load, HTTP detection, HTTP blocking, and audit-log checks. Cache misses fall back to normal downloads and builds. Release signing keys, signed bundles, DEBs, workflow artifacts, and GHCR rollback inputs are never restored from these cross-run caches.
+The workflow reuses bounded caches for Go modules/build outputs keyed by `go.sum`, CRS archives keyed by their locked SHA-256, pinned Ubuntu 24.04/26.04 and Debian 12 Apache/Nginx install-test fixtures, and Manager BuildKit layers. The fixtures are refreshed at least once per UTC week so distribution dependency drift is still detected; within that period they only avoid repeating package downloads. Every verification run still installs the newly built local DEBs and performs the same configuration, module-load, HTTP detection, HTTP blocking, and audit-log checks. Cache misses fall back to normal downloads and builds. Release signing keys, signed bundles, DEBs, workflow artifacts, and GHCR rollback inputs are never restored from these cross-run caches.
 
 Pull requests and manual workflow runs stop after verification. A validated semantic tag such as `v0.1.0` publishes the version tags, `latest`, and `sha-<full-commit-sha>`, then fast-forwards `main` to that exact tagged commit and creates a GitHub Release. The tagged path downloads the exact tested DEBs through a workflow artifact, requires `RELEASE_BUNDLE_SIGNING_KEY_B64`, signs the bundle, and embeds it in the Manager image.
 
@@ -430,7 +440,7 @@ go test ./...
 docker compose --env-file deploy/compose/.env.example -f deploy/compose/compose.yaml config --quiet
 ```
 
-These checks do not start MariaDB or modify a database. A full integration test additionally needs a representative hosting-provider custom build, an Ubuntu 24.04 or Debian 12 amd64 VM, and a published Manager image.
+These checks do not start MariaDB or modify a database. A full integration test additionally needs a representative hosting-provider custom build, an Ubuntu 24.04/26.04 or Debian 12 amd64 VM, and a published Manager image.
 
 ## Repository layout
 

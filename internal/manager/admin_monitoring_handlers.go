@@ -48,6 +48,8 @@ type serverInstallationCandidateView struct {
 	ConfigTestOK       bool
 	PackageAvailable   bool
 	CustomZIPAvailable bool
+	UpgradeRecommended bool
+	RequiredArtifact   string
 }
 
 func (c serverInstallationCandidateView) Label() string {
@@ -58,6 +60,30 @@ func (c serverInstallationCandidateView) Label() string {
 		return "Nginx"
 	}
 	return c.Kind
+}
+
+const (
+	packageStatusAgentReady              = "AGENT_READY"
+	packageStatusAgentTransitionNeeded   = "AGENT_TRANSITION_REQUIRED"
+	packageStatusAgentArtifactMissing    = "AGENT_ARTIFACT_MISSING"
+	packageStatusAgentUpdatePending      = "AGENT_UPDATE_PENDING"
+	packageStatusAgentUpdateFailed       = "AGENT_UPDATE_FAILED"
+	packageStatusModuleDiscoveryPending  = "MODULE_DISCOVERY_PENDING"
+	packageStatusModulePackageReady      = "MODULE_PACKAGE_READY"
+	packageStatusModuleCustomZIPReady    = "MODULE_CUSTOM_ZIP_READY"
+	packageStatusModuleDistroUnsupported = "MODULE_DISTRO_UNSUPPORTED"
+	packageStatusModuleCustomZIPMissing  = "MODULE_CUSTOM_ZIP_MISSING"
+	packageStatusModuleInstalling        = "MODULE_INSTALLING"
+	packageStatusModuleIntegration       = "MODULE_INTEGRATION_REQUIRED"
+	packageStatusModuleProtected         = "MODULE_PROTECTED"
+)
+
+type serverPackageActionView struct {
+	Code   string
+	Class  string
+	Title  string
+	Detail string
+	Steps  []string
 }
 
 type filterChip struct {
@@ -413,7 +439,7 @@ func (s *Server) serverDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	tab := serverDetailTab(r.URL.Query().Get("tab"))
-	if tab == "risk" && (server.Revoked || !session.CanOperate()) {
+	if tab == "risk" && !session.CanOperate() {
 		tab = "status"
 	}
 	var commands []AgentCommandRecord
@@ -424,8 +450,27 @@ func (s *Server) serverDetail(w http.ResponseWriter, r *http.Request) {
 	agentUpdateAvailable := false
 	agentUpdateBlockedReason := ""
 	canRollbackAgent := false
+	rollbackAgentVersion := ""
 	latestAgentVersion := ""
 	installerSHA256 := ""
+	agentCompatibilityStatus := packageStatusAgentArtifactMissing
+	moduleCompatibilityStatus := packageStatusModuleDiscoveryPending
+	currentPackageAction := serverPackageActionView{Code: packageStatusModuleDiscoveryPending, Class: "info", Title: "Agent 점검을 기다리고 있습니다", Detail: "Agent가 웹서버와 설치 환경을 보고하면 다음 설치 단계를 안내합니다."}
+	requiredAgentTarget := "agent / " + server.Inventory.OSID + " / " + server.Inventory.OSVersion + " / " + server.Inventory.Architecture
+	packageDiagnostic := strings.Join([]string{
+		"server=" + server.Name,
+		"os=" + server.Inventory.OSID + " " + server.Inventory.OSVersion,
+		"architecture=" + server.Inventory.Architecture,
+		"agent=" + server.Inventory.AgentVersion,
+		"web_server=" + server.Inventory.WebServer + " " + server.Inventory.WebServerVersion,
+		"web_server_build=" + server.Inventory.WebServerBuild,
+		"required=" + requiredAgentTarget,
+	}, "\n")
+	moduleVersion := strings.TrimSpace(server.Inventory.ModuleVersion)
+	moduleInstalled := moduleVersion != "" && !strings.EqualFold(moduleVersion, "unknown")
+	if !moduleInstalled {
+		moduleVersion = "미설치"
+	}
 	switch tab {
 	case "commands":
 		commands, err = s.store.ListServerCommands(r.Context(), session.ScopeEnterpriseID(), server.ID, 50)
@@ -449,7 +494,7 @@ func (s *Server) serverDetail(w http.ResponseWriter, r *http.Request) {
 		if s.catalog != nil {
 			_, _, rollbackErr := s.catalog.Rollback(server.AgentPackageID, server.ModulePackageID)
 			server.CanRollbackPackages = rollbackErr == nil
-			agentSelfUpdateReady = model.HasCapability(server.Inventory.Capabilities, model.AgentCapabilitySelfUpdate) && model.HasCapability(server.Inventory.Capabilities, model.AgentCapabilityLocalRollback)
+			agentSelfUpdateReady = agentPackageManagementReady(server.Inventory)
 			if latestAgent, resolveErr := s.catalog.ResolveAgent(server.Inventory); resolveErr == nil {
 				agentPackageAvailable = true
 				latestAgentVersion = latestAgent.Version
@@ -461,8 +506,10 @@ func (s *Server) serverDetail(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			_, rollbackErr = s.catalog.RollbackAgent(server.AgentPackageID)
-			canRollbackAgent = rollbackErr == nil
+			if rollbackTarget, rollbackReady, rollbackErr := s.agentRollbackTarget(r.Context(), server, server.AgentPackageID); rollbackErr == nil && rollbackReady {
+				canRollbackAgent = true
+				rollbackAgentVersion = rollbackTarget.Version
+			}
 		}
 		installerSHA256, _ = bootstrapInstallerSHA256()
 		candidates := server.Inventory.WebServerCandidates
@@ -471,28 +518,102 @@ func (s *Server) serverDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		installationCandidates = make([]serverInstallationCandidateView, 0, len(candidates))
 		for _, candidate := range candidates {
-			view := serverInstallationCandidateView{Kind: candidate.Kind, Version: candidate.Version, BuildHash: candidate.BuildHash, Binary: candidate.Binary, PackageManaged: candidate.PackageManaged, ConfigTestOK: candidate.ConfigTestOK}
+			view := serverInstallationCandidateView{
+				Kind: candidate.Kind, Version: candidate.Version, BuildHash: candidate.BuildHash, Binary: candidate.Binary,
+				PackageManaged: candidate.PackageManaged, ConfigTestOK: candidate.ConfigTestOK,
+				RequiredArtifact: "module / " + candidate.Kind + " " + candidate.Version + " / " + server.Inventory.OSID + " " + server.Inventory.OSVersion + " / " + server.Inventory.Architecture + " / build " + candidate.BuildHash,
+			}
 			if s.catalog != nil {
 				inventory := server.Inventory
 				inventory.WebServer, inventory.WebServerVersion, inventory.WebServerBuild = candidate.Kind, candidate.Version, candidate.BuildHash
 				if candidate.PackageManaged {
 					inventory.IntegrationMode, inventory.InstallationMode = model.IntegrationModeDistro, model.InstallationModePackage
-					_, _, resolveErr := s.catalog.Resolve(inventory)
+					_, resolveErr := s.catalog.ResolveModule(inventory)
 					view.PackageAvailable = resolveErr == nil
-				} else {
+				}
+				if candidate.BuildHash != "" {
 					inventory.IntegrationMode, inventory.InstallationMode = model.IntegrationModeExternal, model.InstallationModeCustomZIP
-					_, _, resolveErr := s.catalog.Resolve(inventory)
+					_, resolveErr := s.catalog.ResolveModule(inventory)
 					view.CustomZIPAvailable = resolveErr == nil
 				}
 			}
+			view.UpgradeRecommended = candidate.PackageManaged && !view.PackageAvailable
 			installationCandidates = append(installationCandidates, view)
+		}
+		if agentSelfUpdateReady {
+			agentCompatibilityStatus = packageStatusAgentReady
+		} else if agentPackageAvailable {
+			agentCompatibilityStatus = packageStatusAgentTransitionNeeded
+		} else {
+			agentCompatibilityStatus = packageStatusAgentArtifactMissing
+		}
+		packageModuleReady := false
+		customZIPModuleReady := false
+		distroModuleUnsupported := false
+		for _, candidate := range installationCandidates {
+			packageModuleReady = packageModuleReady || candidate.PackageAvailable
+			customZIPModuleReady = customZIPModuleReady || candidate.CustomZIPAvailable
+			distroModuleUnsupported = distroModuleUnsupported || candidate.UpgradeRecommended
+		}
+		switch {
+		case agentCompatibilityStatus == packageStatusAgentArtifactMissing:
+			currentPackageAction = serverPackageActionView{
+				Code: packageStatusAgentArtifactMissing, Class: "warn", Title: "Agent 패키지 준비가 필요합니다",
+				Detail: "지금 Agent를 제거해도 해결되지 않습니다. 먼저 활성 Manager bundle에 이 서버용 서명 Agent를 준비해야 합니다.",
+				Steps: []string{
+					"시스템 관리자에게 지원 요청 정보를 전달해 대상 Agent 패키지 반영을 요청합니다.",
+					"패키지 반영과 Manager 재시작이 끝나면 이 화면을 새로고침합니다.",
+					"등록 유지 Agent 재설치 버튼이 나타나면 서버에서 명령을 실행합니다.",
+				},
+			}
+		case agentCompatibilityStatus == packageStatusAgentTransitionNeeded:
+			currentPackageAction = serverPackageActionView{
+				Code: packageStatusAgentTransitionNeeded, Class: "warn", Title: "등록을 유지하고 Agent를 재설치하세요",
+				Detail: "기존 서버 ID와 mTLS 인증서를 유지한 채 서명된 자기 업데이트 지원 Agent로 교체합니다.",
+				Steps: []string{
+					"아래 등록 유지 Agent 재설치 명령을 복사합니다.",
+					"대상 서버에서 root 권한으로 한 번 실행합니다.",
+					"완료 메시지를 확인하고 최대 90초 뒤 이 화면을 새로고침합니다.",
+				},
+			}
+		case server.PackageDeploymentStatus == "FAILED":
+			currentPackageAction = serverPackageActionView{Code: packageStatusAgentUpdateFailed, Class: "danger", Title: "최근 패키지 작업이 실패했습니다", Detail: "실패 원인을 확인한 뒤 같은 작업을 다시 예약하세요. 기존 Agent와 웹서버 설정은 유지됩니다.", Steps: []string{"제어 이력에서 실패 원인을 확인합니다.", "잠금·디스크·패키지 상태를 해결한 뒤 같은 작업을 다시 실행합니다."}}
+		case server.PackageDeploymentStatus == "PENDING":
+			currentPackageAction = serverPackageActionView{Code: packageStatusAgentUpdatePending, Class: "info", Title: "패키지 작업이 예약되었습니다", Detail: "Agent가 다시 연결되는 다음 polling에서 작업을 적용합니다.", Steps: []string{"Agent 프로세스를 중지하거나 다시 설치하지 말고 다음 연결을 기다립니다.", "작업 완료 후 화면을 새로고침해 버전과 상태를 확인합니다."}}
+		case server.InstallationStage() == model.InstallationStageInstalling:
+			moduleCompatibilityStatus = packageStatusModuleInstalling
+			currentPackageAction = serverPackageActionView{Code: packageStatusModuleInstalling, Class: "info", Title: "모듈 설치를 진행하고 있습니다", Detail: "Agent가 서명 파일을 검증하고 설치 결과를 보고할 때까지 기다리세요."}
+		case server.InstallationStage() == model.InstallationStageIntegrationNeeded:
+			moduleCompatibilityStatus = packageStatusModuleIntegration
+			currentPackageAction = serverPackageActionView{Code: packageStatusModuleIntegration, Class: "warn", Title: "웹서버 설정에 M-WAF include가 필요합니다", Detail: "안내된 전용 설정을 기존 운영 절차로 포함한 뒤 configtest 결과를 확인하세요.", Steps: []string{"아래 M-WAF 전용 설정 경로를 확인합니다.", "기존 Apache/Nginx 운영 절차로 include합니다.", "configtest 성공 후 reload하고 다음 Agent 점검을 기다립니다."}}
+		case server.InstallationStage() == model.InstallationStageProtected:
+			moduleCompatibilityStatus = packageStatusModuleProtected
+			currentPackageAction = serverPackageActionView{Code: packageStatusModuleProtected, Class: "ok", Title: "보호 동작을 확인했습니다", Detail: "Agent, 웹서버 모듈과 정책 적용 상태가 정상입니다."}
+		case len(installationCandidates) == 0:
+			moduleCompatibilityStatus = packageStatusModuleDiscoveryPending
+			currentPackageAction = serverPackageActionView{Code: packageStatusModuleDiscoveryPending, Class: "info", Title: "웹서버 점검을 기다리고 있습니다", Detail: "Agent가 Apache 또는 Nginx 실행 환경을 보고하면 설치 경로를 안내합니다."}
+		case packageModuleReady:
+			moduleCompatibilityStatus = packageStatusModulePackageReady
+			currentPackageAction = serverPackageActionView{Code: packageStatusModulePackageReady, Class: "info", Title: "배포판 모듈 설치 방식을 선택하세요", Detail: "감지된 웹서버에 사용할 수 있는 검증된 모듈 패키지가 준비되어 있습니다.", Steps: []string{"정책 적용 방식을 선택합니다.", "설치 영향을 확인하고 패키지 기반 설치를 예약합니다.", "설치 완료 후 안내되는 M-WAF 설정을 기존 웹서버 설정에 포함합니다."}}
+		case customZIPModuleReady:
+			moduleCompatibilityStatus = packageStatusModuleCustomZIPReady
+			currentPackageAction = serverPackageActionView{Code: packageStatusModuleCustomZIPReady, Class: "info", Title: "커스텀 ZIP 설치 방식을 선택하세요", Detail: "현재 웹서버 빌드와 정확히 일치하는 서명 ZIP이 준비되어 있습니다.", Steps: []string{"표시된 웹서버 버전과 빌드 정보를 확인합니다.", "정책 적용 방식을 선택하고 ZIP 설치를 예약합니다.", "설치 완료 후 안내되는 /opt/m-waf 전용 설정을 기존 웹서버 설정에 포함합니다."}}
+		case distroModuleUnsupported:
+			moduleCompatibilityStatus = packageStatusModuleDistroUnsupported
+			currentPackageAction = serverPackageActionView{Code: packageStatusModuleDistroUnsupported, Class: "warn", Title: "현재 서버용 자동 설치 파일이 없습니다", Detail: "감지된 운영체제와 웹서버에 맞는 서명 모듈이 활성 Manager bundle에 없어 설치를 시작할 수 없습니다.", Steps: []string{"아래 필요 정보를 복사해 Manager 운영자에게 전달합니다.", "운영자가 호환 모듈을 서명 bundle에 추가합니다.", "bundle 반영 후 이 화면에서 설치 버튼을 확인합니다."}}
+		default:
+			moduleCompatibilityStatus = packageStatusModuleCustomZIPMissing
+			currentPackageAction = serverPackageActionView{Code: packageStatusModuleCustomZIPMissing, Class: "warn", Title: "현재 빌드용 커스텀 ZIP이 필요합니다", Detail: "웹서버 빌드와 정확히 일치하는 서명 ZIP을 Manager bundle에 준비하세요."}
 		}
 	}
 	data := map[string]any{
 		"Server": server, "Tab": tab, "Commands": commands, "Policies": assigned, "InstallationCandidates": installationCandidates,
 		"AgentSelfUpdateReady": agentSelfUpdateReady, "AgentPackageAvailable": agentPackageAvailable, "AgentUpdateAvailable": agentUpdateAvailable,
-		"AgentUpdateBlockedReason": agentUpdateBlockedReason, "CanRollbackAgent": canRollbackAgent, "LatestAgentVersion": latestAgentVersion, "AgentURL": s.cfg.PublicURL,
-		"BootstrapInstallerSHA256": installerSHA256, "Notice": r.URL.Query().Get("notice"), "ScopeLabel": server.EnterpriseName,
+		"AgentUpdateBlockedReason": agentUpdateBlockedReason, "CanRollbackAgent": canRollbackAgent, "RollbackAgentVersion": rollbackAgentVersion, "LatestAgentVersion": latestAgentVersion, "AgentURL": s.cfg.PublicURL,
+		"BootstrapInstallerSHA256": installerSHA256, "ModuleInstalled": moduleInstalled, "ModuleVersionLabel": moduleVersion,
+		"AgentCompatibilityStatus": agentCompatibilityStatus, "ModuleCompatibilityStatus": moduleCompatibilityStatus,
+		"CurrentPackageAction": currentPackageAction, "RequiredAgentTarget": requiredAgentTarget, "PackageDiagnostic": packageDiagnostic,
+		"Notice": r.URL.Query().Get("notice"), "ScopeLabel": server.EnterpriseName,
 	}
 	_ = s.templates.ExecuteTemplate(w, "server-detail.html", s.viewData(r, "servers", data))
 }

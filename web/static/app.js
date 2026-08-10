@@ -555,7 +555,7 @@
         links.append(link);
       });
       const actionHeading = document.createElement("h3");
-      actionHeading.textContent = "바로 조치";
+      actionHeading.textContent = "정책 조치";
       const actionPanel = document.createElement("div");
       actionPanel.className = "drawer-actions";
       const csrf = document.body.dataset.csrf || "";
@@ -577,30 +577,157 @@
         form.append(button);
         return form;
       };
-      const confirmedActionForm = (action, fields, label, confirmation) => {
-        const form = actionForm(action, fields, label, true);
-        const button = $("button[type=submit]", form);
-        const confirmLabel = document.createElement("label");
-        confirmLabel.className = "check-row danger-check";
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.name = "confirm";
-        checkbox.value = "confirmed";
-        checkbox.required = true;
-        const text = document.createElement("span");
-        text.textContent = confirmation;
-        confirmLabel.append(checkbox, text);
-        form.insertBefore(confirmLabel, button);
-        return form;
-      };
       if (event.policy_id && data.can_create_exception) {
-        if (event.matched_variable) actionPanel.append(actionForm(`/policies/${encodeURIComponent(event.policy_id)}/exceptions/from-incident`, { incident_id: event.id, scope: "input" }, "이 입력 항목에서만 예외"));
-        actionPanel.append(actionForm(`/policies/${encodeURIComponent(event.policy_id)}/exceptions/from-incident`, { incident_id: event.id, scope: "url" }, "이 URL에서만 예외"));
-        const global = document.createElement("details");
+        const options = data.exception_options || {};
+        const review = document.createElement("details");
         const summary = document.createElement("summary");
-        summary.textContent = "모든 요청에서 이 Rule 제외";
-        global.append(summary, confirmedActionForm(`/policies/${encodeURIComponent(event.policy_id)}/exceptions/from-incident`, { incident_id: event.id, scope: "global" }, "전체 범위 예외 적용", "모든 URL에서 이 Rule이 더 이상 검사되지 않음을 확인합니다."));
-        actionPanel.append(global);
+        summary.textContent = "예외 정책 검토";
+        const form = document.createElement("form");
+        form.method = "post";
+        form.action = `/policies/${encodeURIComponent(event.policy_id)}/exceptions`;
+        form.dataset.exceptionReviewForm = "";
+        Object.entries({ csrf, incident_id: event.id, expected_revision_id: options.current_revision_id || event.policy_revision }).forEach(([name, value]) => {
+          const input = document.createElement("input");
+          input.type = "hidden";
+          input.name = name;
+          input.value = value || "";
+          form.append(input);
+        });
+        const impact = document.createElement("div");
+        impact.className = "alert info";
+        const impactTitle = document.createElement("strong");
+        impactTitle.textContent = `연결 서버 ${options.affected_server_count || 0}대에 적용`;
+        const impactText = document.createElement("div");
+        impactText.textContent = `Rule ${event.primary_rule_id || "-"} · 예외는 이벤트가 발생한 서버 한 대가 아니라 현재 보호 정책 전체에 적용됩니다.`;
+        impact.append(impactTitle, impactText);
+        const affectedServers = options.affected_servers || [];
+        if (affectedServers.length) {
+          const serverDetails = document.createElement("details");
+          const serverSummary = document.createElement("summary");
+          serverSummary.textContent = `영향 서버 ${affectedServers.length}대 확인`;
+          const serverList = document.createElement("ul");
+          affectedServers.forEach((server) => {
+            const item = document.createElement("li");
+            const link = document.createElement("a");
+            link.href = `/servers/${encodeURIComponent(server.id)}`;
+            link.textContent = server.name || server.id;
+            item.append(link);
+            serverList.append(item);
+          });
+          serverDetails.append(serverSummary, serverList);
+          impact.append(serverDetails);
+        }
+        const scopeFieldset = document.createElement("fieldset");
+        const legend = document.createElement("legend");
+        legend.textContent = "예외 범위";
+        const scopeChoices = document.createElement("div");
+        scopeChoices.className = "choice-grid two";
+        const availableScopes = options.available_scopes || [];
+        const scopeDefinitions = [
+          ["input", "입력 항목만", "현재 URL에서 탐지된 입력 변수만 검사에서 제외합니다."],
+          ["url", "현재 URL", "현재 URL에서 해당 Rule 전체를 제외합니다."],
+          ["global", "모든 요청", "모든 URL에서 해당 Rule을 제외합니다."],
+        ];
+        scopeDefinitions.forEach(([value, label, help], index) => {
+          if (!availableScopes.includes(value)) return;
+          const choice = document.createElement("label");
+          choice.className = `choice-card${value === "global" ? " danger-zone" : ""}`;
+          const radio = document.createElement("input");
+          radio.type = "radio";
+          radio.name = "scope";
+          radio.value = value;
+          radio.required = true;
+          radio.checked = index === 0 || value === "url" && !availableScopes.includes("input");
+          const strong = document.createElement("strong");
+          strong.textContent = label;
+          const small = document.createElement("small");
+          small.textContent = help;
+          choice.append(radio, strong, small);
+          scopeChoices.append(choice);
+        });
+        scopeFieldset.append(legend, scopeChoices);
+        const reasonLabel = document.createElement("label");
+        reasonLabel.textContent = "운영 사유";
+        const reason = document.createElement("textarea");
+        reason.name = "reason";
+        reason.rows = 3;
+        reason.maxLength = 512;
+        reason.required = true;
+        reason.placeholder = "정상 요청임을 확인한 근거와 예외가 필요한 이유";
+        reasonLabel.append(reason);
+        const expiryLabel = document.createElement("label");
+        expiryLabel.textContent = "유지 기간";
+        const expiry = document.createElement("select");
+        expiry.name = "expires_in";
+        expiry.required = true;
+        const setExpiryOptions = () => {
+          const selectedScope = $("[name=scope]:checked", form);
+          const globalScope = selectedScope && selectedScope.value === "global";
+          const values = globalScope ? [["24h", "24시간"], ["7d", "7일"]] : [["24h", "24시간"], ["7d", "7일"], ["30d", "30일"], ["90d", "90일"]];
+          if (!globalScope && options.can_permanent) values.push(["permanent", "만료 없음"]);
+          expiry.replaceChildren();
+          values.forEach(([value, label]) => {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = label;
+            option.selected = globalScope ? value === "24h" : value === "30d";
+            expiry.append(option);
+          });
+        };
+        expiryLabel.append(expiry);
+        const confirmLabel = document.createElement("label");
+        confirmLabel.className = "check-row";
+        const confirm = document.createElement("input");
+        confirm.type = "checkbox";
+        confirm.name = "publish_confirm";
+        confirm.value = "confirmed";
+        confirm.required = true;
+        const confirmText = document.createElement("span");
+        confirmText.textContent = "예외 범위와 연결 서버 전체에 단계 배포되는 것을 확인했습니다.";
+        confirmLabel.append(confirm, confirmText);
+        const status = document.createElement("p");
+        status.className = "muted";
+        status.setAttribute("role", "status");
+        const submit = document.createElement("button");
+        submit.type = "submit";
+        submit.textContent = "검증 후 단계 배포";
+        form.append(impact, scopeFieldset, reasonLabel, expiryLabel, confirmLabel, status, submit);
+        form.addEventListener("change", (changeEvent) => {
+          if (changeEvent.target.name === "scope") setExpiryOptions();
+        });
+        form.addEventListener("submit", async (submitEvent) => {
+          submitEvent.preventDefault();
+          if (form.dataset.validating === "true") return;
+          form.dataset.validating = "true";
+          submit.disabled = true;
+          status.textContent = "현재 정책과 중복 예외를 확인하는 중입니다.";
+          try {
+            const validationResponse = await fetch(`/api/v1/policies/${encodeURIComponent(event.policy_id)}/exceptions/validate`, {
+              method: "POST", body: new FormData(form), headers: { Accept: "application/json" },
+            });
+            const validation = await validationResponse.json();
+            if (!validationResponse.ok || !validation.valid) throw new Error(validation.error || "예외를 검증할 수 없습니다.");
+            status.textContent = `검증 완료 · ${validation.affected_server_count}대에 단계 배포합니다.`;
+            showGlobalBusy("예외 정책을 단계 배포하는 중입니다.");
+            HTMLFormElement.prototype.submit.call(form);
+          } catch (validationError) {
+            status.textContent = validationError.message || "예외를 검증할 수 없습니다.";
+            submit.disabled = false;
+            delete form.dataset.validating;
+          }
+        });
+        setExpiryOptions();
+        review.append(summary, form);
+        actionPanel.append(review);
+      } else if (data.exception_options && data.exception_options.block_reason) {
+        const unavailable = document.createElement("div");
+        unavailable.className = "alert warn";
+        const unavailableTitle = document.createElement("strong");
+        unavailableTitle.textContent = "예외 정책 검토 불가";
+        const unavailableText = document.createElement("div");
+        unavailableText.textContent = data.exception_options.block_reason;
+        unavailable.append(unavailableTitle, unavailableText);
+        actionPanel.append(unavailable);
       }
       if (event.policy_id && event.client_ip) actionPanel.append(actionForm(`/policies/${encodeURIComponent(event.policy_id)}/ip-rules`, { action: "BLOCK", network: event.client_ip, reason: `보안 이벤트 ${event.id} 출발지 차단` }, "이 IP 차단", true));
       body.append(result, details, actionHeading, actionPanel, heading, tableWrap, links);
@@ -759,10 +886,12 @@
     const guidedRoot = $("[data-guided-rule-list]", form);
     const guidedValue = $("[name=guided_rules_json]", form);
     const customSettings = $("[data-policy-custom-settings]", form);
+    const sourceSummary = $("[data-policy-source-summary]", form);
     const alignScalarSource = () => {
-      if (!customSettings) return;
       const selected = $("[name=scalar_source]:checked", form);
-      customSettings.hidden = !selected || selected.value !== "CUSTOM";
+      const usesCustomSettings = selected && selected.value === "CUSTOM";
+      if (customSettings) customSettings.hidden = !usesCustomSettings;
+      if (sourceSummary) sourceSummary.textContent = usesCustomSettings ? "기업 맞춤 설정" : "시스템 권장 설정";
     };
     alignScalarSource();
     if (guidedRoot && guidedValue && guidedValue.value) {
@@ -783,7 +912,7 @@
       if (remove) remove.closest("[data-guided-rule-row]").remove();
     });
     form.addEventListener("submit", () => {
-      serializeGuidedRules(form);
+      if (guidedRoot) serializeGuidedRules(form);
     });
   }
 
@@ -1427,6 +1556,41 @@
     });
   }
 
+  function initializeServerRiskActions() {
+    const form = $("[data-server-risk-command-form]");
+    if (!form) return;
+    const stopConfirmation = $("[data-server-stop-confirm]", form);
+    const stopCheckbox = $("[name=recovery_confirm]", stopConfirmation);
+    const alignConfirmation = () => {
+      const selected = $("[name=command]:checked", form);
+      const needsExternalRecovery = selected && (selected.value === "agent_stop" || selected.value === "server_stop");
+      if (stopConfirmation) stopConfirmation.hidden = !needsExternalRecovery;
+      if (stopCheckbox) {
+        stopCheckbox.required = Boolean(needsExternalRecovery);
+        if (!needsExternalRecovery) stopCheckbox.checked = false;
+      }
+    };
+    form.addEventListener("change", (event) => {
+      if (event.target.matches("[name=command]")) alignConfirmation();
+    });
+    alignConfirmation();
+  }
+
+  function initializeWebServerControlModes() {
+    $$("[data-web-control-form]").forEach((form) => {
+      const select = $("[data-web-control-mode]", form);
+      const customFiles = $("[data-web-control-hooks]", form);
+      if (!select || !customFiles) return;
+      const alignCustomFiles = () => {
+        const usesCustomFiles = select.value === "hooks";
+        customFiles.hidden = !usesCustomFiles;
+        customFiles.open = usesCustomFiles;
+      };
+      select.addEventListener("change", alignCustomFiles);
+      alignCustomFiles();
+    });
+  }
+
   document.addEventListener("click", async (event) => {
     const accountMenu = $("[data-account-menu]");
     if (accountMenu && accountMenu.open && !event.target.closest("[data-account-menu]")) accountMenu.removeAttribute("open");
@@ -1529,6 +1693,8 @@
   initializePolicyWizard();
   initializeSimplePolicyForm();
   initializeSystemPolicyWizard();
+  initializeServerRiskActions();
+  initializeWebServerControlModes();
   initializeDesktopSidebar();
   initializeTaskDialogs();
   initializeLiveReload();

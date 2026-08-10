@@ -29,7 +29,7 @@ func TestBuildCreatesSelfDescribingCustomModuleZIP(t *testing.T) {
 	metadataOutput := filepath.Join(root, "metadata", "custom.json")
 	artifact := model.PackageArtifact{
 		ID: "custom", Kind: "module", Name: "custom", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64",
-		WebServer: "nginx", WebServerBuild: "build-a", IntegrationMode: model.IntegrationModeExternal, RuntimeABI: "modsecurity-v3",
+		WebServer: "nginx", WebServerVersion: "1.24.0", WebServerBuild: "build-a", IntegrationMode: model.IntegrationModeExternal, RuntimeABI: "modsecurity-v3",
 		PolicyDelivery: "bundle", Path: "custom.zip", PackageFormat: model.PackageFormatZIP, InstallRoot: "/opt/m-waf",
 	}
 	if err := build(input, output, metadataOutput, artifact); err != nil {
@@ -57,7 +57,7 @@ func TestBuildCreatesSelfDescribingCustomModuleZIP(t *testing.T) {
 	if err := json.Unmarshal(raw, &actual); err != nil {
 		t.Fatal(err)
 	}
-	if actual.PackageFormat != model.PackageFormatZIP || actual.InstallRoot != "/opt/m-waf" || actual.WebServerBuild != "build-a" {
+	if actual.PackageFormat != model.PackageFormatZIP || actual.InstallRoot != "/opt/m-waf" || actual.WebServerVersion != "1.24.0" || actual.WebServerBuild != "build-a" {
 		t.Fatalf("unexpected custom package metadata: %+v", actual)
 	}
 }

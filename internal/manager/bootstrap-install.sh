@@ -69,8 +69,8 @@ fi
 os_id=${ID:-unknown}
 os_version=${VERSION_ID:-unknown}
 case "$os_id:$os_version" in
-  ubuntu:18.04|ubuntu:24.04|debian:12) ;;
-  *) echo "unsupported OS for Agent installation: $os_id $os_version; supported: Ubuntu 18.04/24.04 or Debian 12" >&2; exit 1 ;;
+  ubuntu:18.04|ubuntu:20.04|ubuntu:22.04|ubuntu:24.04|ubuntu:26.04|debian:12) ;;
+  *) echo "unsupported OS for Agent installation: $os_id $os_version; supported: Ubuntu 18.04/20.04/22.04/24.04/26.04 LTS or Debian 12" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
   x86_64) architecture=amd64 ;;
@@ -93,12 +93,16 @@ if [ "$upgrade_agent" -eq 1 ]; then
   agent_file="$temporary/mwaf-agent.deb"
   curl --fail --silent --show-error --cacert /etc/mwaf-agent/manager-ca.crt --cert /var/lib/mwaf-agent/agent.crt --key /var/lib/mwaf-agent/agent.key -o "$agent_file" "$manager$agent_url"
   [ "$(hash_file "$agent_file")" = "$agent_sha" ] || { echo "Agent checksum mismatch" >&2; exit 1; }
-  DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold install --allow-downgrades --no-install-recommends -y "$agent_file"
+  # The local DEB was verified above. Avoid an expected _apt warning for the
+  # root-only temporary directory without changing its protective mode.
+  DEBIAN_FRONTEND=noninteractive apt-get -o APT::Sandbox::User=root -o Dpkg::Options::=--force-confold install --allow-downgrades --no-install-recommends -y "$agent_file"
   /usr/sbin/mwaf-agent-service restart
   waited=0
+  completion_status=not-attempted
   while [ "$waited" -lt 90 ]; do
     if /usr/sbin/mwaf-agent-service status && /usr/bin/mwaf-agent -version 2>&1 | grep -Fq "$agent_version"; then
-      if curl --fail --silent --show-error --request POST --cacert /etc/mwaf-agent/manager-ca.crt --cert /var/lib/mwaf-agent/agent.crt --key /var/lib/mwaf-agent/agent.key "$manager/agent/v1/upgrades/complete" >/dev/null; then
+      completion_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --request POST --cacert /etc/mwaf-agent/manager-ca.crt --cert /var/lib/mwaf-agent/agent.crt --key /var/lib/mwaf-agent/agent.key "$manager/agent/v1/upgrades/complete" || true)
+      if [ "$completion_status" = "201" ] || [ "$completion_status" = "200" ]; then
         echo "M-WAF Agent was upgraded in place to $agent_version. The existing server ID and mTLS identity were preserved."
         exit 0
       fi
@@ -106,7 +110,7 @@ if [ "$upgrade_agent" -eq 1 ]; then
     sleep 2
     waited=$((waited + 2))
   done
-  echo "Agent package was installed, but the upgraded service was not confirmed within 90 seconds" >&2
+  echo "Agent package was installed, but the upgraded service was not confirmed within 90 seconds (last Manager response: $completion_status)" >&2
   exit 1
 fi
 
@@ -183,7 +187,7 @@ curl --fail --silent --show-error --cacert "$ca_file" -H "Authorization: Bearer 
 
 # mwaf-agent has no runtime package dependencies. This first stage installs no
 # Apache, Nginx, ModSecurity Connector, CRS module, or log package.
-DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold install --no-install-recommends -y "$agent_file"
+DEBIAN_FRONTEND=noninteractive apt-get -o APT::Sandbox::User=root -o Dpkg::Options::=--force-confold install --no-install-recommends -y "$agent_file"
 
 install -d -m 0750 /etc/mwaf-agent /var/lib/mwaf-agent /var/lib/mwaf-agent/spool /etc/mwaf/active
 if [ ! -e /etc/mwaf/active/main.conf ]; then

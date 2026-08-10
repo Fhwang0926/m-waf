@@ -156,6 +156,46 @@ func (s *Store) RevokeServer(ctx context.Context, enterpriseID, serverID, userID
 	return tx.Commit()
 }
 
+func (s *Store) DeleteRevokedServer(ctx context.Context, enterpriseID, serverID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var lockedID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM servers WHERE id=? AND revoked_at IS NOT NULL AND (?='' OR enterprise_id=?) FOR UPDATE`, serverID, enterpriseID, enterpriseID).Scan(&lockedID); err != nil {
+		return err
+	}
+	for _, query := range []string{
+		`DELETE FROM enterprise_policy_servers WHERE server_id=?`,
+		`DELETE FROM policy_rollout_targets WHERE server_id=?`,
+		`DELETE FROM desired_states WHERE server_id=?`,
+		`DELETE FROM policy_deployments WHERE server_id=?`,
+		`DELETE FROM package_deployments WHERE server_id=?`,
+		`DELETE FROM server_group_members WHERE server_id=?`,
+		`DELETE FROM agent_commands WHERE server_id=?`,
+		`DELETE FROM security_events WHERE agent_id=?`,
+		`DELETE FROM security_incidents WHERE agent_id=?`,
+		`DELETE FROM event_ingest_batches WHERE agent_id=?`,
+	} {
+		if _, err := tx.ExecContext(ctx, query, serverID); err != nil {
+			return err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM servers WHERE id=? AND revoked_at IS NOT NULL`, lockedID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
+}
+
 func (s *Store) UnregisterAgent(ctx context.Context, serverID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -299,6 +339,34 @@ func (s *Store) CurrentPackageIDs(ctx context.Context, serverID string) (string,
 	var agentID, moduleID sql.NullString
 	err := s.db.QueryRowContext(ctx, `SELECT agent_package_id,module_package_id FROM desired_states WHERE server_id=?`, serverID).Scan(&agentID, &moduleID)
 	return agentID.String, moduleID.String, err
+}
+
+func isAppliedAgentOnlyDeployment(status, detail string) bool {
+	if status != "APPLIED" {
+		return false
+	}
+	return model.NormalizePackageScope(decodePackageDeploymentPlan(detail).Scope) == model.PackageScopeAgent
+}
+
+// AppliedAgentUpgradeConfirmed reports whether the current desired Agent was
+// successfully applied through the managed Agent-only update path. Catalog
+// rollback metadata alone is not proof that this server was upgraded.
+func (s *Store) AppliedAgentUpgradeConfirmed(ctx context.Context, serverID, agentID string) (bool, error) {
+	if serverID == "" || agentID == "" {
+		return false, nil
+	}
+	var status, detail string
+	err := s.db.QueryRowContext(ctx, `SELECT pkg.status,pkg.detail
+FROM desired_states ds
+JOIN package_deployments pkg ON pkg.id=ds.package_deployment_id
+WHERE ds.server_id=? AND ds.agent_package_id=? AND pkg.agent_package_id=?`, serverID, agentID, agentID).Scan(&status, &detail)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return isAppliedAgentOnlyDeployment(status, detail), nil
 }
 
 func (s *Store) AssignPackages(ctx context.Context, enterpriseID, serverID, agentID, moduleID, userID string) (string, error) {

@@ -272,6 +272,22 @@ func (p PolicyRevisionRecord) OriginLabel() string {
 		return "기존 정책 전환"
 	case "system-transition":
 		return "CRS 전환 보호"
+	case "incident-exception":
+		return "탐지 이벤트 예외 추가"
+	case "incident-exception-delete":
+		return "기업 예외 해제"
+	case "incident-exception-expiry":
+		return "만료 예외 자동 해제"
+	case "ip-rule":
+		return "IP·CIDR 정책 추가"
+	case "ip-rule-delete":
+		return "IP·CIDR 정책 제거"
+	case "ip-rule-expiry":
+		return "만료 IP 정책 자동 제거"
+	case "user-rule":
+		return "사용자 Rule 추가"
+	case "user-rule-delete":
+		return "사용자 Rule 제거"
 	default:
 		return p.PolicyOrigin
 	}

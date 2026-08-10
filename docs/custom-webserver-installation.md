@@ -17,16 +17,16 @@ Agent와 모듈 설치는 분리된다. 초기 설치 스크립트는 Apache/Ngi
 
 | 유형 | 대상 | Manager가 제공하는 파일 | 고객 서버 영향 |
 |---|---|---|---|
-| 패키지 기반 | Ubuntu 24.04 또는 Debian 12의 배포판 Apache/Nginx | Agent DEB + 웹서버용 모듈 DEB | 모듈 DEB의 APT 의존성이 설치될 수 있다. 고객 웹서버 설정과 reload는 자동 수행하지 않는다. |
+| 패키지 기반 | Ubuntu 18.04~26.04의 배포판 Apache, Ubuntu 24.04·26.04 또는 Debian 12의 배포판 Apache/Nginx | Agent DEB + 웹서버용 모듈 DEB | 모듈 DEB의 APT 의존성이 설치될 수 있다. 고객 웹서버 설정과 reload는 자동 수행하지 않는다. |
 | 커스텀 ZIP | 호스팅사가 직접 빌드한 Apache/Nginx | Agent DEB + 해당 빌드 전용 ZIP | OS 의존성 패키지를 추가하지 않는다. ZIP은 `/opt/m-waf/modules` 아래에만 풀고 고객 설정은 수정하지 않는다. |
 
-Ubuntu 18.04 amd64는 Agent 설치·등록·환경 점검까지만 지원한다. 배포판 모듈 DEB는 제공하지 않으며, 보호를 활성화하려면 해당 웹서버 빌드와 ABI가 정확히 일치하는 서명 커스텀 ZIP을 Manager bundle에 먼저 준비해야 한다.
+Ubuntu 18.04·20.04·22.04 amd64는 Agent 설치·등록·환경 점검과 자기 업데이트를 지원한다. 배포판 Apache는 공식 저장소의 ModSecurity 2.9.x를 사용하는 Manager 서명 모듈 DEB로 설치할 수 있다. 해당 Ubuntu 버전의 배포판 Nginx는 공식 ModSecurity Connector 패키지가 없으므로 웹서버 빌드와 ABI가 정확히 일치하는 서명 모듈을 Manager bundle에 먼저 준비해야 한다.
 
-배포판 패키지 소유로 확인된 웹서버에는 패키지 기반만, 그 외 빌드에는 커스텀 ZIP만 선택할 수 있다. 커스텀 ZIP은 비슷한 버전이 아니라 Agent가 수집한 `web_server_build_hash`와 정확히 일치해야 한다.
+호환 모듈 DEB가 있으면 패키지 기반 설치를 사용한다. 배포판 패키지 소유 웹서버라도 호환 DEB가 없으면 커스텀 ZIP을 대체 경로로 사용할 수 있다. 이 경우 ZIP metadata의 웹서버 버전과 `web_server_build_hash`가 Agent 점검 결과와 모두 정확히 일치해야 한다.
 
 ## 지원 조건
 
-- 운영체제: Agent는 Ubuntu Server 18.04/24.04 LTS 또는 Debian 12 Bookworm, 모듈 패키지는 Ubuntu 24.04 또는 Debian 12
+- 운영체제: Agent와 Apache 모듈은 Ubuntu Server 18.04/20.04/22.04/24.04/26.04 LTS 또는 Debian 12 Bookworm, Nginx 모듈은 Ubuntu 24.04/26.04 또는 Debian 12
 - 아키텍처: amd64
 - Agent: 서명된 `mwaf-agent` DEB
 - 웹서버: Apache HTTP Server 2.4 또는 Nginx
@@ -99,11 +99,62 @@ go run ./cmd/mwaf-module-zip \
   -os-id ubuntu \
   -os-version 24.04 \
   -webserver nginx \
+  -webserver-version 1.24.0 \
   -webserver-build AGENT_SCREEN_BUILD_HASH \
   -runtime-abi modsecurity-v3
 ```
 
-생성된 ZIP과 metadata를 기존 `mwaf-bundle` 입력에 추가하고 호스팅사 Manager 이미지를 빌드한다. bundle 서명 후 Manager가 ZIP을 제공한다. 정확히 일치하는 ZIP이 없으면 서버 상세의 **커스텀 ZIP 설치** 버튼은 비활성화된다.
+생성된 ZIP과 metadata를 기존 `mwaf-bundle` 입력에 추가하고 호스팅사 Manager 이미지를 빌드한다. bundle 서명 후 Manager가 ZIP을 제공한다. 정확히 일치하는 ZIP이 없으면 서버 상세에는 설치 버튼 대신 현재 환경키와 Manager에 호환 서명 모듈이 필요하다는 안내가 표시된다.
+
+### 개발 환경 원클릭 bundle 반영
+
+개발 환경에서는 대상별 `spec.json`과 이미 빌드된 Connector payload만 준비하면 ZIP 생성부터 로컬 bundle 활성화까지 한 명령으로 처리한다.
+
+```text
+/absolute/path/to/custom-modules/
+└── apache-ubuntu1804/
+    ├── spec.json
+    └── payload/
+        ├── module/
+        │   └── mod_security2.so
+        └── integration/
+            └── mwaf.conf
+```
+
+`spec.json`은 Agent가 화면에 보고한 값을 그대로 사용한다.
+
+```json
+{
+  "id": "mwaf-apache-ubuntu1804-2.4.29-c6188262",
+  "version": "1.0.0",
+  "os_id": "ubuntu",
+  "os_version": "18.04",
+  "web_server": "apache",
+  "web_server_version": "2.4.29",
+  "web_server_build_hash": "c618826274ff69225a97db12e3f28823a50a0393785d3fedda3f4d065c5708a9",
+  "runtime_abi": "modsecurity-v2"
+}
+```
+
+다음 명령을 실행한다.
+
+```sh
+make dev-custom-bundle MWAF_DEV_CUSTOM_SOURCE_DIR=/absolute/path/to/custom-modules
+```
+
+명령은 모든 `*/spec.json`을 읽어 개발 빌드마다 고유한 artifact ID와 버전을 만들고 다음 작업을 순서대로 수행한다.
+
+1. `mwaf-module-zip`으로 ZIP과 metadata 생성
+2. 현재 Agent와 표준 Apache/Nginx 모듈 생성
+3. 캐시된 검증 CRS source 재사용
+4. 커스텀 ZIP을 bundle에 병합
+5. 로컬 ED25519 키로 서명하고 전체 bundle 재검증
+6. `.local/mwaf-manager/dev-bundle-active` 원자적 전환
+7. 실행 중인 Manager의 bundle 변경 감지·재시작
+
+완료 후 서버의 **패키지** 화면을 새로고침하면 `커스텀 ZIP으로 설치` 버튼이 활성화된다. 버튼을 누르면 Agent가 다운로드, SHA-256·manifest·빌드 해시 검증과 `/opt/m-waf` 설치를 수행한다. 고객 Apache/Nginx 설정 include는 자동 수정하지 않는다.
+
+이 자동화는 Connector 컴파일을 대신하지 않는다. 커스텀 웹서버의 소스, configure 옵션, APXS/APR 헤더가 Manager에 없으므로 Agent가 보고한 버전과 빌드 해시만으로 안전한 Connector 바이너리를 재현할 수 없다. 보호 서버에 컴파일러나 개발 패키지를 설치하는 기능도 제공하지 않는다.
 
 Agent는 ZIP 설치 시 다음을 강제한다.
 
@@ -224,9 +275,13 @@ systemd가 없는 Docker/OCI 컨테이너에서는 아래 상태 명령을 사�
 /usr/sbin/mwaf-agent-service status
 ```
 
+PID 1이 대화형 셸인 컨테이너에서는 설치 터미널과 Agent 출력을 분리하며, 로그는 `/var/log/mwaf-agent/agent.log`에서 확인한다. 일반 서비스 컨테이너는 기존처럼 컨테이너 stdout/stderr를 사용한다.
+
 호스트와 컨테이너는 모두 `/usr/sbin/mwaf-agent-service` 명령을 사용한다. 컨테이너 재시작 시에는 기존 Apache/Nginx 시작 전에 `/usr/sbin/mwaf-agent-service start`를 실행한다. Agent 설정·인증서·상태·정책·커스텀 모듈은 각각 `/etc/mwaf-agent`, `/var/lib/mwaf-agent`, `/etc/mwaf`, `/opt/m-waf` 볼륨으로 보존한다. 원본 이미지로 컨테이너를 재생성하면 설치된 Agent 바이너리는 사라지므로 동일한 검증 DEB를 포함한 파생 이미지를 사용해야 한다. 등록 토큰과 Agent 개인키는 이미지에 포함하지 않는다.
 
 잠금, 공간, 저장소, 중단된 DPKG 원인을 먼저 해결한다. Agent DEB를 수동 복사하거나 서명 검증을 우회하지 않는다.
+
+구형 Agent는 서버 상세의 **등록 유지 Agent 재설치 명령**을 먼저 사용한다. 이 경로는 기존 서버 ID와 mTLS 인증서를 보존하므로 Agent를 미리 제거하지 않는다. 신원 파일이 손상된 경우에만 서버 등록 해제 후 `mwaf-uninstall --dry-run`, `mwaf-uninstall --purge`, 신규 설치 순서로 진행한다. 자세한 기준은 [Agent 지속 연결과 업데이트](agent-continuous-update.md#레거시-agent-완전-제거-후-신규-등록)를 참고한다.
 
 ### 패키지 기반 모듈 실패
 

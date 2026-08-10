@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/Fhwang0926/m-waf/internal/policybundle"
@@ -165,6 +166,46 @@ func (s *Server) ExpireIPRules(ctx context.Context) error {
 			continue
 		}
 		_ = s.store.Audit(ctx, randomID(), "system:ip-expiry", "enterprise_policy.ip_rule_expiry", policy.ID+":"+rolloutID, "success", "internal")
+		s.TriggerPolicySync()
+	}
+	return nil
+}
+
+func (s *Server) ExpirePolicyExceptions(ctx context.Context) error {
+	now := time.Now().UTC()
+	policyIDs, err := s.store.PoliciesWithExpiredExceptions(ctx, now, 100)
+	if err != nil {
+		return err
+	}
+	for _, policyID := range policyIDs {
+		policy, err := s.store.EnterprisePolicyByID(ctx, "", policyID)
+		if err != nil || policy.HasActiveRollout {
+			continue
+		}
+		configuration, err := currentPolicyConfiguration(ctx, s.store, policy)
+		if err != nil {
+			continue
+		}
+		removed := 0
+		next := make([]PolicyExclusion, 0, len(configuration.Exclusions))
+		for _, exclusion := range configuration.Exclusions {
+			if exclusion.SourceScope == PolicyScopeEnterprise && exclusion.Enabled && exclusion.ExpiresAt != nil && !exclusion.ExpiresAt.After(now) {
+				removed++
+				continue
+			}
+			exclusion.Order = len(next)
+			next = append(next, exclusion)
+		}
+		if removed == 0 {
+			continue
+		}
+		configuration.Exclusions = next
+		rolloutID, err := s.createConfigurationRollout(ctx, policy, policy.CurrentRevisionID, "", "incident-exception-expiry", configuration)
+		if err != nil {
+			_ = s.store.Audit(ctx, randomID(), "system:exception-expiry", "enterprise_policy.exception_expire", policy.ID+":"+err.Error(), "failed", "internal")
+			continue
+		}
+		_ = s.store.Audit(ctx, randomID(), "system:exception-expiry", "enterprise_policy.exception_expire", policy.ID+":"+rolloutID+":"+strconv.Itoa(removed), "success", "internal")
 		s.TriggerPolicySync()
 	}
 	return nil

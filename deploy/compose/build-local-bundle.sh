@@ -8,7 +8,13 @@ runtime_root=${MWAF_DEV_RUNTIME_DIR:-$repository_root/.local/mwaf-manager}
 secrets_dir="$script_dir/secrets"
 builder_image=${MWAF_DEV_PACKAGE_BUILDER_IMAGE:-mwaf-local-package-builder:ubuntu-24.04}
 agent_only=${MWAF_DEV_AGENT_ONLY:-false}
+custom_packages_dir=${MWAF_DEV_CUSTOM_PACKAGES_DIR:-}
 case "$agent_only" in true|false) ;; *) echo "MWAF_DEV_AGENT_ONLY must be true or false" >&2; exit 1 ;; esac
+if [ -n "$custom_packages_dir" ]; then
+  [ "$agent_only" = false ] || { echo "custom module ZIPs require a full development bundle" >&2; exit 1; }
+  case "$custom_packages_dir" in /*) ;; *) custom_packages_dir="$repository_root/$custom_packages_dir" ;; esac
+  [ -d "$custom_packages_dir/packages" ] && [ -d "$custom_packages_dir/metadata" ] || { echo "MWAF_DEV_CUSTOM_PACKAGES_DIR requires packages/ and metadata/" >&2; exit 1; }
+fi
 
 for required in docker go git jq openssl
 do
@@ -80,8 +86,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 docker build --platform linux/amd64 -t "$builder_image" -f build/containers/local-package-builder/Dockerfile build/containers/local-package-builder
 docker run --rm --platform linux/amd64 \
   -e AGENT_VERSION="$agent_version" -e MODULE_VERSION="$module_version" -e COMMIT="$commit" -e AGENT_ONLY="$agent_only" \
-  -e MWAF_AGENT_DEB_TARGETS="ubuntu:18.04 ubuntu:24.04 debian:12" \
-  -e MWAF_DEB_TARGETS="ubuntu:24.04 debian:12" \
+  -e MWAF_AGENT_DEB_TARGETS="ubuntu:18.04 ubuntu:20.04 ubuntu:22.04 ubuntu:24.04 ubuntu:26.04 debian:12" \
   -v "$repository_root:/src:ro" -v "$staging:/work" -w /src "$builder_image" sh -eu -c '
     VERSION="$AGENT_VERSION" AGENT_BINARY=/work/mwaf-agent OUTPUT_DIR=/work/packages METADATA_DIR=/work/metadata packaging/agent/deb/build.sh
     if [ "$AGENT_ONLY" = false ]; then
@@ -91,6 +96,39 @@ docker run --rm --platform linux/amd64 \
       WEBSERVER=nginx INTEGRATION_MODE=external VERSION="$MODULE_VERSION" OUTPUT_DIR=/work/packages METADATA_DIR=/work/metadata packaging/module/deb/build.sh
     fi
   '
+
+if [ -n "$custom_packages_dir" ]; then
+  custom_count=0
+  for metadata in "$custom_packages_dir"/metadata/*.json
+  do
+    [ -f "$metadata" ] || continue
+    jq -e '
+      .kind == "module" and
+      .package_format == "zip" and
+      .integration_mode == "external" and
+      .install_root == "/opt/m-waf" and
+      .policy_delivery == "bundle" and
+      (.id | type == "string" and length > 0) and
+      (.version | type == "string" and length > 0) and
+      (.web_server == "apache" or .web_server == "nginx") and
+      (.web_server_version | type == "string" and length > 0) and
+      (.web_server_build_hash | type == "string" and length == 64) and
+      (.runtime_abi | type == "string" and length > 0)
+    ' "$metadata" >/dev/null || { echo "invalid custom module metadata: $metadata" >&2; exit 1; }
+    package_name=$(jq -r '.path // empty' "$metadata")
+    case "$package_name" in ''|.|..|*/*) echo "custom module metadata path must be a package filename: $metadata" >&2; exit 1 ;; esac
+    package="$custom_packages_dir/packages/$package_name"
+    [ -f "$package" ] || { echo "custom module package is missing: $package" >&2; exit 1; }
+    metadata_name=${metadata##*/}
+    [ ! -e "$staging/metadata/$metadata_name" ] || { echo "custom metadata filename conflicts with the development bundle: $metadata_name" >&2; exit 1; }
+    [ ! -e "$staging/packages/$package_name" ] || { echo "custom package filename conflicts with the development bundle: $package_name" >&2; exit 1; }
+    cp "$metadata" "$staging/metadata/$metadata_name"
+    cp "$package" "$staging/packages/$package_name"
+    custom_count=$((custom_count + 1))
+  done
+  [ "$custom_count" -gt 0 ] || { echo "no custom module metadata was found in $custom_packages_dir/metadata" >&2; exit 1; }
+  echo "Imported $custom_count exact-build custom module ZIP artifact(s)"
+fi
 
 if [ "$agent_only" = true ]; then
   artifact_index=0

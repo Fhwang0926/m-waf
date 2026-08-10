@@ -148,13 +148,27 @@ func (c *Catalog) ManifestSHA256() string {
 }
 
 func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, model.PackageArtifact, error) {
+	agent, err := c.ResolveAgent(inventory)
+	if err != nil {
+		return model.PackageArtifact{}, model.PackageArtifact{}, err
+	}
+	module, err := c.ResolveModule(inventory)
+	if err != nil {
+		return model.PackageArtifact{}, model.PackageArtifact{}, err
+	}
+	return agent, module, nil
+}
+
+// ResolveModule resolves the web-server integration independently from the
+// Agent. This keeps UI compatibility diagnostics accurate when only one of the
+// two artifacts is present in the active bundle.
+func (c *Catalog) ResolveModule(inventory model.Inventory) (model.PackageArtifact, error) {
 	rollbackTargets := make(map[string]bool)
 	for _, artifact := range c.manifest.Artifacts {
 		if artifact.RollbackID != "" {
 			rollbackTargets[artifact.RollbackID] = true
 		}
 	}
-	var agent *model.PackageArtifact
 	var module *model.PackageArtifact
 	desiredModuleFormat := model.PackageFormatDEB
 	if inventory.InstallationMode == model.InstallationModeCustomZIP {
@@ -165,13 +179,7 @@ func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, mod
 		if rollbackTargets[artifact.ID] || !matchesBase(artifact, inventory) {
 			continue
 		}
-		switch artifact.Kind {
-		case "agent":
-			if agent != nil {
-				return model.PackageArtifact{}, model.PackageArtifact{}, errors.New("package catalog has multiple matching agent packages")
-			}
-			agent = &artifact
-		case "module":
+		if artifact.Kind == "module" {
 			if model.NormalizePackageFormat(artifact.PackageFormat) != desiredModuleFormat {
 				continue
 			}
@@ -181,25 +189,28 @@ func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, mod
 			if model.NormalizeIntegrationMode(artifact.IntegrationMode) != model.NormalizeIntegrationMode(inventory.IntegrationMode) {
 				continue
 			}
-			if artifact.WebServerVersion != "" && artifact.WebServerVersion != inventory.WebServerVersion {
-				continue
-			}
-			if artifact.WebServerBuild != "" && artifact.WebServerBuild != inventory.WebServerBuild {
-				continue
+			if desiredModuleFormat == model.PackageFormatZIP {
+				if inventory.WebServerVersion == "" || artifact.WebServerVersion == "" || artifact.WebServerVersion != inventory.WebServerVersion || inventory.WebServerBuild == "" || artifact.WebServerBuild == "" || artifact.WebServerBuild != inventory.WebServerBuild || artifact.InstallRoot != "/opt/m-waf" {
+					continue
+				}
+			} else {
+				if artifact.WebServerVersion != "" && artifact.WebServerVersion != inventory.WebServerVersion {
+					continue
+				}
+				if artifact.WebServerBuild != "" && artifact.WebServerBuild != inventory.WebServerBuild {
+					continue
+				}
 			}
 			if module != nil {
-				return model.PackageArtifact{}, model.PackageArtifact{}, errors.New("package catalog has multiple matching module packages")
+				return model.PackageArtifact{}, errors.New("package catalog has multiple matching module packages")
 			}
 			module = &artifact
 		}
 	}
-	if agent == nil {
-		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("no agent package for %s %s %s", inventory.OSID, inventory.OSVersion, inventory.Architecture)
-	}
 	if module == nil {
-		return model.PackageArtifact{}, model.PackageArtifact{}, fmt.Errorf("no %s module package for %s %s %s", inventory.WebServer, inventory.OSID, inventory.OSVersion, inventory.Architecture)
+		return model.PackageArtifact{}, fmt.Errorf("no %s module package for %s %s %s", inventory.WebServer, inventory.OSID, inventory.OSVersion, inventory.Architecture)
 	}
-	return *agent, *module, nil
+	return *module, nil
 }
 
 func (c *Catalog) ResolveAgent(inventory model.Inventory) (model.PackageArtifact, error) {
@@ -339,8 +350,8 @@ func (c *Catalog) validateArtifact(artifact model.PackageArtifact) error {
 	if artifact.Kind == "agent" && format != model.PackageFormatDEB {
 		return fmt.Errorf("Agent artifact %q must use deb format", artifact.ID)
 	}
-	if format == model.PackageFormatZIP && (artifact.Kind != "module" || artifact.IntegrationMode != model.IntegrationModeExternal || artifact.WebServerBuild == "" || artifact.RuntimeABI == "" || artifact.InstallRoot != "/opt/m-waf") {
-		return fmt.Errorf("custom module artifact %q requires external integration, exact build hash, runtime ABI, and /opt/m-waf install root", artifact.ID)
+	if format == model.PackageFormatZIP && (artifact.Kind != "module" || artifact.IntegrationMode != model.IntegrationModeExternal || artifact.WebServer == "" || artifact.WebServerVersion == "" || artifact.WebServerBuild == "" || artifact.RuntimeABI == "" || artifact.InstallRoot != "/opt/m-waf") {
+		return fmt.Errorf("custom module artifact %q requires external integration, exact web-server version and build hash, runtime ABI, and /opt/m-waf install root", artifact.ID)
 	}
 	if artifact.Kind == "module" {
 		mode := model.NormalizeIntegrationMode(artifact.IntegrationMode)

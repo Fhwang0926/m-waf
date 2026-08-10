@@ -21,9 +21,26 @@ Manager는 Agent 서버로 접속하거나 inbound 포트를 열지 않습니다
 
 ## 구형 Agent 1회 전환
 
-`agent-self-update-v1` capability가 없는 기존 Agent에는 화면에 **전환 명령 복사**가 표시됩니다. 이 명령은 새 등록 토큰이나 새 서버 등록을 만들지 않습니다. 기존 `/var/lib/mwaf-agent`의 서버 ID와 mTLS 인증서를 사용해 최신 Agent만 설치합니다.
+`agent-self-update-v1` capability가 없는 기존 Agent에는 호환 패키지가 준비된 경우 **등록 유지 Agent 재설치 명령 복사**가 표시됩니다. 이 명령은 새 등록 토큰이나 새 서버 등록을 만들지 않습니다. 기존 `/var/lib/mwaf-agent`의 서버 ID와 mTLS 인증서를 사용해 서명된 최신 Agent DEB로 패키지 파일만 교체합니다. 기존 Agent를 먼저 제거하지 않습니다.
 
 전환 완료 후의 모든 업데이트와 롤백은 Manager 버튼으로 수행합니다.
+
+호환 Agent가 활성 Manager bundle에 없으면 먼저 시스템 관리자에게 화면의 지원 요청 정보를 전달합니다. 패키지가 없는 상태에서 기존 Agent를 제거해도 재설치할 파일이 없어 복구되지 않습니다.
+
+### 레거시 Agent 완전 제거 후 신규 등록
+
+다음 신원 파일이 없거나 손상되어 등록 유지 재설치를 할 수 없을 때만 사용합니다.
+
+- `/var/lib/mwaf-agent/server-id`
+- `/var/lib/mwaf-agent/agent.crt`
+- `/var/lib/mwaf-agent/agent.key`
+
+1. Manager의 서버 상세 **위험 작업**에서 기존 서버 등록을 해제합니다.
+2. 서버에서 `sudo /usr/sbin/mwaf-uninstall --dry-run`으로 제거 대상을 확인합니다.
+3. M-WAF 보호 중단과 상태 삭제를 승인한 경우에만 `sudo /usr/sbin/mwaf-uninstall --purge`를 실행합니다.
+4. Manager의 **서버 설치**에서 새 설치 명령을 복사해 신규 등록합니다.
+
+신규 등록은 새 서버 ID를 생성합니다. 기존 서버의 이력은 등록 해제된 서버에 유지되며 새 서버와 자동 병합되지 않습니다. 제거 도구가 없는 더 오래된 Agent에서는 설정·인증서 파일을 임의로 삭제하지 말고 시스템 관리자에게 복구를 요청합니다. Apache/Nginx 자체는 제거 대상이 아닙니다.
 
 ## 개발 중 Agent 버전 올리기
 
@@ -44,13 +61,22 @@ make agent-check
 make dev-agent-bundle
 ```
 
-로컬 Agent 버전은 `0.2.0~dev.YYYYMMDDHHMMSS.commit` 형식입니다. `make dev-agent-bundle`은 현재 활성 bundle의 CRS와 모듈 파일을 그대로 복사하고 Agent artifact만 교체합니다. 검증과 서명이 끝나면 `.local/mwaf-manager/dev-bundle-active`가 새 bundle을 가리키며, 로컬 Manager watcher가 manifest 변경을 감지해 DB migration 없이 Manager 프로세스만 다시 시작합니다.
+로컬 Agent 버전은 `<packaging/agent/VERSION>~dev.YYYYMMDDHHMMSS.commit` 형식입니다. `make dev-agent-bundle`은 현재 활성 bundle의 CRS와 모듈 파일을 그대로 복사하고 Agent artifact만 교체합니다. 검증과 서명이 끝나면 `.local/mwaf-manager/dev-bundle-active`가 새 bundle을 가리키며, 로컬 Manager watcher가 manifest 변경을 감지해 DB migration 없이 Manager 프로세스만 다시 시작합니다.
 
 Pull request에서는 Agent 영향 경로가 변경됐는데 `packaging/agent/VERSION`이 기준 브랜치보다 증가하지 않으면 검증이 실패합니다. 동일한 정식 Agent 버전에 다른 바이너리를 다시 게시하지 않습니다.
 
 ## 컨테이너 주의사항
 
 실행 중인 컨테이너와 일반 restart에서는 `/usr/sbin/mwaf-agent-service` supervisor가 Agent를 다시 실행합니다. 컨테이너 recreate까지 유지하려면 다음 경로를 volume으로 보존하고 Agent DEB가 포함된 파생 이미지를 사용합니다.
+
+0.2.0 개발 패키지에서 파일 교체 후 Manager 화면이 계속 이전 버전으로 표시되는 경우에만 다음 명령으로 기존 supervisor를 완전히 다시 시작합니다.
+
+```sh
+/usr/sbin/mwaf-agent-service stop
+/usr/sbin/mwaf-agent-service start
+```
+
+0.2.1부터 컨테이너의 `restart`가 이 동작을 자체 수행합니다.
 
 - `/etc/mwaf-agent`
 - `/var/lib/mwaf-agent`

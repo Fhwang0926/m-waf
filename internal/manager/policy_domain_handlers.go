@@ -239,13 +239,17 @@ func buildSystemPolicyLifecycle(items []SystemPolicyVersionRecord, sources []mod
 }
 
 func (s *Server) enterprisePolicyDetail(w http.ResponseWriter, r *http.Request) {
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("tab")), "rules") {
+		http.Redirect(w, r, userPoliciesRedirectURL(r.PathValue("id"), "all", ""), http.StatusSeeOther)
+		return
+	}
 	s.renderEnterprisePolicyDetail(w, r, http.StatusOK, "")
 }
 
 func enterprisePolicyDetailTab(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
-	case "servers", "rules", "rollouts", "revisions":
+	case "servers", "effective", "rollouts", "revisions":
 		return value
 	default:
 		return "overview"

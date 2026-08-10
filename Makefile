@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: fmt build-manager build-agent agent-check dev dev-full dev-bundle dev-agent-bundle dev-down dev-db-logs prepare deploy pull prepare-dev deploy-dev pull-dev down logs e2e e2e-debian12 e2e-up e2e-verify e2e-status e2e-logs e2e-down e2e-remote e2e-remote-verify e2e-remote-down
+.PHONY: fmt build-manager build-agent agent-check dev dev-full dev-bundle dev-custom-bundle dev-agent-bundle dev-down dev-db-logs prepare deploy pull prepare-dev deploy-dev pull-dev down logs e2e e2e-debian12 e2e-up e2e-verify e2e-status e2e-logs e2e-down e2e-remote e2e-remote-verify e2e-remote-down
 
 MWAF_E2E_REMOTE_ADMIN_URL ?= https://192.168.7.200:18443
 MWAF_E2E_REMOTE_CA_CERT ?= deploy/compose/secrets/mwaf_ca_cert.pem
@@ -30,6 +30,9 @@ dev:
 
 dev-bundle:
 	sh ./deploy/compose/build-local-bundle.sh
+
+dev-custom-bundle:
+	MWAF_DEV_CUSTOM_SOURCE_DIR="$(MWAF_DEV_CUSTOM_SOURCE_DIR)" sh ./deploy/compose/build-local-custom-bundle.sh
 
 dev-agent-bundle:
 	MWAF_DEV_AGENT_ONLY=true sh ./deploy/compose/build-local-bundle.sh

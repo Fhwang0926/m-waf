@@ -74,7 +74,7 @@ func main() {
 	go runSystemPolicySync(cleanupCtx, cfg.PolicySyncInterval, app, logger)
 	go runCRSSourceSync(cleanupCtx, cfg.CRSSyncInterval, !cfg.DevLiveReload, app, logger)
 	go runIncidentBackfill(cleanupCtx, store, logger)
-	go runIPRuleExpiry(cleanupCtx, app, logger)
+	go runPolicyExpiry(cleanupCtx, app, logger)
 	tlsConfig, err := app.TLSConfig()
 	if err != nil {
 		logger.Error("manager_tls_config", "error", err)
@@ -225,15 +225,21 @@ func runIncidentBackfill(ctx context.Context, store *manager.Store, logger *slog
 	}
 }
 
-func runIPRuleExpiry(ctx context.Context, app *manager.Server, logger *slog.Logger) {
+func runPolicyExpiry(ctx context.Context, app *manager.Server, logger *slog.Logger) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
-		expireCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		err := app.ExpireIPRules(expireCtx)
-		cancel()
-		if err != nil {
-			logger.Warn("ip_rule_expiry_failed", "error", err)
+		ipCtx, cancelIP := context.WithTimeout(ctx, 5*time.Minute)
+		ipErr := app.ExpireIPRules(ipCtx)
+		cancelIP()
+		exceptionCtx, cancelExceptions := context.WithTimeout(ctx, 5*time.Minute)
+		exceptionErr := app.ExpirePolicyExceptions(exceptionCtx)
+		cancelExceptions()
+		if ipErr != nil {
+			logger.Warn("ip_rule_expiry_failed", "error", ipErr)
+		}
+		if exceptionErr != nil {
+			logger.Warn("policy_exception_expiry_failed", "error", exceptionErr)
 		}
 		select {
 		case <-ctx.Done():

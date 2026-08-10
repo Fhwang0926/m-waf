@@ -1,0 +1,61 @@
+{{define "user-policies.html"}}
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 사용자 정책</title><link rel="stylesheet" href="/static/app.css"></head>
+<body>{{template "navigation" .}}<main class="container">
+  <div class="page-head"><div><p class="eyebrow">기업 운영 · 정책</p><h1>사용자 정책</h1><p class="muted">보호 정책에 추가되는 탐지 예외, IP·CIDR 정책과 사용자 Rule을 관리합니다.</p></div></div>
+  {{if .Notice}}<div class="alert success" role="status"><strong>처리 완료</strong><div>{{.Notice}}</div></div>{{end}}
+
+  <section class="panel"><div class="review-grid">
+    <div class="review-item"><span>적용 보호 정책</span><strong>{{.Summary.PolicyCount}}개</strong><small>현재 조회 범위</small></div>
+    <div class="review-item"><span>탐지 예외</span><strong>{{.Summary.ExceptionCount}}개</strong><small>Rule·입력 항목 제외</small></div>
+    <div class="review-item"><span>IP·CIDR</span><strong>{{.Summary.IPRuleCount}}개</strong><small>차단·신뢰</small></div>
+    <div class="review-item"><span>사용자 Rule</span><strong>{{.Summary.CustomRuleCount}}개</strong><small>탐지·차단</small></div>
+  </div></section>
+
+  <section class="panel"><form method="get" class="filter-grid">
+    <label>보호 정책<select name="policy_id"><option value="">전체 보호 정책</option>{{range .PolicyOptions}}<option value="{{.ID}}" {{if eq $.FilterPolicyID .ID}}selected{{end}}>{{.Name}}{{if $.IsSystemAdmin}} · {{.EnterpriseName}}{{end}}</option>{{end}}</select></label>
+    <label>종류<select name="type"><option value="all" {{if eq .FilterType "all"}}selected{{end}}>전체</option><option value="exception" {{if eq .FilterType "exception"}}selected{{end}}>탐지 예외</option><option value="ip" {{if eq .FilterType "ip"}}selected{{end}}>IP·CIDR</option><option value="rule" {{if eq .FilterType "rule"}}selected{{end}}>사용자 Rule</option></select></label>
+    <label>검색<input name="q" value="{{.FilterQuery}}" maxlength="255" placeholder="정책명, Rule ID, URL, IP"></label>
+    <div class="actions"><button type="submit">조회</button><a class="button secondary" href="/user-policies">초기화</a></div>
+  </form></section>
+
+  {{if .Policies}}<section class="panel"><div class="panel-head"><div><h2>사용자 정책 추가</h2><small>선택한 보호 정책의 새 불변 개정본을 만들고 연결 서버에 단계 배포합니다.</small></div></div>
+    <div class="operations-grid two">
+      <details class="operation-details"><summary><span><strong>IP·CIDR 정책</strong><small>출발지 주소를 차단하거나 제한된 기간 동안 신뢰합니다.</small></span></summary>
+        <div class="stack">{{range .Policies}}<form method="post" action="/policies/{{.ID}}/ip-rules" class="form-stack panel panel-subtle"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="expected_revision_id" value="{{.CurrentRevisionID}}">
+          <div class="panel-head"><div><h3>{{.Name}}</h3><small>{{.EnterpriseName}} · {{.TargetLabel}}</small></div>{{if .HasActiveRollout}}<span class="badge warn">배포 진행 중</span>{{end}}</div>
+          <div class="form-grid"><label>동작<select name="action" required><option value="BLOCK">차단 · HTTP 403</option><option value="TRUST">신뢰 · WAF 검사 제외</option></select></label><label>IP 또는 CIDR<input name="network" maxlength="64" placeholder="203.0.113.10 또는 203.0.113.0/24" required></label></div>
+          <div class="form-grid"><label>변경 사유<input name="reason" maxlength="1024" placeholder="정책이 필요한 운영 사유" required></label><label>신뢰 만료 시각<input type="datetime-local" name="expires_at"><small>KST 기준 · 비워두면 24시간</small></label></div>
+          <button type="submit" {{if .HasActiveRollout}}disabled{{end}}>IP·CIDR 저장 및 배포</button>
+        </form>{{end}}</div>
+      </details>
+      <details class="operation-details"><summary><span><strong>사용자 Rule</strong><small>안전한 입력 항목과 조건으로 탐지 또는 차단 Rule을 추가합니다.</small></span></summary>
+        <div class="stack">{{range .Policies}}<form method="post" action="/policies/{{.ID}}/user-rules" class="form-stack panel panel-subtle"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="expected_revision_id" value="{{.CurrentRevisionID}}">
+          <div class="panel-head"><div><h3>{{.Name}}</h3><small>{{.EnterpriseName}} · {{.TargetLabel}}</small></div>{{if .HasActiveRollout}}<span class="badge warn">배포 진행 중</span>{{end}}</div>
+          <div class="form-grid"><label>Rule 이름<input name="name" maxlength="255" placeholder="관리자 경로 접근 차단" required></label><label>대상<select name="field" required><option value="REQUEST_URI">요청 URL</option><option value="REQUEST_METHOD">HTTP 메서드</option><option value="REQUEST_HEADERS:Host">Host</option><option value="REQUEST_HEADERS:User-Agent">User-Agent</option><option value="ARGS">요청 인자</option></select></label></div>
+          <div class="form-grid"><label>요청 인자 이름<input name="argument" maxlength="128" placeholder="ARGS 선택 시 입력"></label><label>조건<select name="operator" required><option value="@streq">일치</option><option value="@beginsWith">시작</option><option value="@contains">포함</option></select></label><label>값<input name="value" maxlength="512" placeholder="검사할 값" required></label><label>동작<select name="action" required><option value="detect">탐지</option><option value="block">차단</option></select></label></div>
+          <button type="submit" {{if .HasActiveRollout}}disabled{{end}}>사용자 Rule 저장 및 배포</button>
+        </form>{{end}}</div>
+      </details>
+    </div>
+    <p class="muted">탐지 결과에 대한 예외는 원본 Rule과 요청 범위를 확인해야 하므로 <a href="/events">보안 이벤트</a>에서 생성합니다.</p>
+  </section>{{else}}<section class="panel"><div class="empty-state"><div class="empty-state-content"><h2>사용 가능한 보호 정책이 없습니다</h2><p>보호 정책을 생성하고 서버를 연결한 뒤 사용자 정책을 추가하세요.</p><a class="button" href="/policies">보호 정책 확인</a></div></div></section>{{end}}
+
+  {{if or (eq .FilterType "all") (eq .FilterType "exception")}}<section class="panel resource-panel"><div class="resource-panel-head"><div><h2>탐지 예외</h2><small>보안 이벤트에서 생성된 Rule·입력 항목 예외입니다.</small></div><span class="badge">{{len .PolicyExceptions}}개</span></div>
+    {{if .PolicyExceptions}}<div class="table-scroll"><table class="table-wide"><thead><tr><th>보호 정책</th><th>상태</th><th>범위</th><th>Rule</th><th>조건·근거</th><th>만료</th><th>관리</th></tr></thead><tbody>{{range .PolicyExceptions}}<tr>
+      <td><a href="/policies/{{.Policy.ID}}"><strong>{{.Policy.Name}}</strong></a><small>{{.Policy.EnterpriseName}} · {{.Policy.TargetLabel}}</small></td>
+      <td><span class="badge {{.Exception.StatusClass}}"><span class="status-dot {{.Exception.StatusClass}}"></span>{{.Exception.StatusLabel}}</span></td><td>{{.Exception.ScopeLabel}}</td>
+      <td><span class="mono">{{.Exception.Exclusion.RuleID}}</span>{{if .Exception.Exclusion.Target}}<small class="mono">{{.Exception.Exclusion.Target}}</small>{{end}}</td>
+      <td><span class="mono cell-truncate" title="{{.Exception.ConditionLabel}}">{{if .Exception.ConditionLabel}}{{.Exception.ConditionLabel}}{{else}}-{{end}}</span>{{if .Exception.IncidentID}}<small><a href="/events?incident={{.Exception.IncidentID}}">보안 이벤트 {{.Exception.IncidentID}}</a> · {{.Exception.Reason}}</small>{{else}}<small>{{.Exception.Reason}}</small>{{end}}</td>
+      <td>{{.Exception.ExpiresLabel}}</td><td>{{if .Policy.HasActiveRollout}}<button type="button" disabled>배포 후 해제</button>{{else}}<details class="danger-disclosure row-danger"><summary>해제</summary><form method="post" action="/policies/{{.Policy.ID}}/exceptions/{{.Exception.Exclusion.ID}}/delete"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="expected_revision_id" value="{{.Policy.CurrentRevisionID}}"><label class="check-row"><input type="checkbox" name="confirm" value="confirmed" required> 연결 서버에 새 정책이 배포됨을 확인합니다.</label><button class="danger" type="submit">해제 및 배포</button></form></details>{{end}}</td>
+    </tr>{{end}}</tbody></table></div>{{else}}<div class="empty">조건에 맞는 탐지 예외가 없습니다.</div>{{end}}
+  </section>{{end}}
+
+  {{if or (eq .FilterType "all") (eq .FilterType "ip")}}<section class="panel resource-panel"><div class="resource-panel-head"><div><h2>IP·CIDR 정책</h2><small>현재 개정본에 포함된 기업 범위 차단·신뢰 정책입니다.</small></div><span class="badge">{{len .IPRules}}개</span></div>
+    {{if .IPRules}}<div class="table-scroll"><table class="table-wide"><thead><tr><th>보호 정책</th><th>동작</th><th>IP·CIDR</th><th>사유</th><th>만료·상태</th><th>관리</th></tr></thead><tbody>{{range .IPRules}}<tr><td><a href="/policies/{{.Policy.ID}}"><strong>{{.Policy.Name}}</strong></a><small>{{.Policy.EnterpriseName}} · {{.Policy.TargetLabel}}</small></td><td><span class="badge {{if eq .Rule.Action "BLOCK"}}danger{{else}}warn{{end}}">{{.ActionLabel}}</span></td><td class="mono">{{.Rule.Network}}</td><td>{{.Rule.Reason}}<small>{{.Rule.CreatedBy}}</small></td><td>{{.StatusLabel $.Now}}{{if .Rule.ExpiresAt}}<small>{{formatKST .Rule.ExpiresAt "2006-01-02 15:04"}} KST</small>{{end}}</td><td><form method="post" action="/policies/{{.Policy.ID}}/ip-rules/{{.Rule.ID}}/delete"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="expected_revision_id" value="{{.Policy.CurrentRevisionID}}"><button class="secondary compact" type="submit" {{if .Policy.HasActiveRollout}}disabled{{end}}>제거</button></form></td></tr>{{end}}</tbody></table></div>{{else}}<div class="empty">조건에 맞는 IP·CIDR 정책이 없습니다.</div>{{end}}
+  </section>{{end}}
+
+  {{if or (eq .FilterType "all") (eq .FilterType "rule")}}<section class="panel resource-panel"><div class="resource-panel-head"><div><h2>사용자 Rule</h2><small>기업 요청 조건에 추가한 탐지·차단 Rule입니다.</small></div><span class="badge">{{len .CustomRules}}개</span></div>
+    {{if .CustomRules}}<div class="table-scroll"><table class="table-wide"><thead><tr><th>보호 정책</th><th>Rule</th><th>대상·조건</th><th>동작</th><th>원문</th><th>관리</th></tr></thead><tbody>{{range .CustomRules}}<tr><td><a href="/policies/{{.Policy.ID}}"><strong>{{.Policy.Name}}</strong></a><small>{{.Policy.EnterpriseName}} · {{.Policy.TargetLabel}}</small></td><td><strong>{{.NameLabel}}</strong><small class="mono">Rule {{.Rule.RuleID}}</small></td><td>{{.TargetLabel}}<small class="mono cell-truncate" title="{{.ConditionLabel}}">{{.ConditionLabel}}</small></td><td><span class="badge {{.ActionClass}}">{{.ActionLabel}}</span></td><td><details><summary>SecRule 보기</summary><pre class="mono">{{.Rule.CanonicalSecRule}}</pre></details></td><td>{{if .Policy.HasActiveRollout}}<button type="button" disabled>배포 후 제거</button>{{else}}<details class="danger-disclosure row-danger"><summary>제거</summary><form method="post" action="/policies/{{.Policy.ID}}/user-rules/{{.Rule.ID}}/delete"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="expected_revision_id" value="{{.Policy.CurrentRevisionID}}"><label class="check-row"><input type="checkbox" name="confirm" value="confirmed" required> 연결 서버에 새 정책이 배포됨을 확인합니다.</label><button class="danger" type="submit">제거 및 배포</button></form></details>{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<div class="empty">조건에 맞는 사용자 Rule이 없습니다.</div>{{end}}
+  </section>{{end}}
+</main></body></html>
+{{end}}

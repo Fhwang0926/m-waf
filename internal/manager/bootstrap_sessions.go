@@ -41,7 +41,9 @@ func (s *Server) createBootstrapSession(w http.ResponseWriter, r *http.Request) 
 		writeProblem(w, http.StatusServiceUnavailable, "package bundle unavailable")
 		return
 	}
-	if _, _, err := s.catalog.Resolve(request.Inventory); err != nil {
+	// Bootstrap installs the Agent first. Web-server module compatibility is
+	// evaluated after the registered Agent reports its full inventory.
+	if _, err := s.catalog.ResolveAgent(request.Inventory); err != nil {
 		writeProblem(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}

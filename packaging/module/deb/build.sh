@@ -6,8 +6,6 @@ set -eu
 : "${OUTPUT_DIR:?OUTPUT_DIR is required}"
 : "${METADATA_DIR:?METADATA_DIR is required}"
 INTEGRATION_MODE=${INTEGRATION_MODE:-distro}
-RUNTIME_ABI=${RUNTIME_ABI:-modsecurity-v3}
-MWAF_DEB_TARGETS=${MWAF_DEB_TARGETS:-ubuntu:24.04 debian:12}
 command -v dpkg-deb >/dev/null 2>&1 || { echo "dpkg-deb is required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 case "$INTEGRATION_MODE" in distro|external) ;; *) echo "unsupported integration mode: $INTEGRATION_MODE" >&2; exit 1 ;; esac
@@ -16,6 +14,18 @@ root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT INT TERM
 mkdir -p "$OUTPUT_DIR" "$METADATA_DIR" "$root/DEBIAN" "$root/usr/share/mwaf/integration" "$root/usr/share/doc/mwaf-modsecurity-$WEBSERVER"
 case "$WEBSERVER" in apache|nginx) ;; *) echo "unsupported webserver: $WEBSERVER" >&2; exit 1 ;; esac
+if [ "$WEBSERVER" = apache ]; then
+  RUNTIME_ABI=${RUNTIME_ABI:-modsecurity-v2}
+else
+  RUNTIME_ABI=${RUNTIME_ABI:-modsecurity-v3}
+fi
+if [ -z "${MWAF_DEB_TARGETS:-}" ]; then
+  if [ "$WEBSERVER" = apache ] && [ "$INTEGRATION_MODE" = distro ]; then
+    MWAF_DEB_TARGETS='ubuntu:18.04 ubuntu:20.04 ubuntu:22.04 ubuntu:24.04 ubuntu:26.04 debian:12'
+  else
+    MWAF_DEB_TARGETS='ubuntu:24.04 ubuntu:26.04 debian:12'
+  fi
+fi
 
 if [ "$INTEGRATION_MODE" = external ]; then
   package_name="mwaf-modsecurity-$WEBSERVER-external"
@@ -42,7 +52,7 @@ EOF
   case "$WEBSERVER" in
     apache)
       package_name=mwaf-modsecurity-apache
-      dependency='apache2, libapache2-mod-security2 (>= 2.9.7), logrotate'
+      dependency='apache2, libapache2-mod-security2 (>= 2.9.2), logrotate'
       mkdir -p "$root/etc/apache2/conf-available"
       install -m 0644 packaging/module/deb/mwaf-apache.conf "$root/etc/apache2/conf-available/mwaf.conf"
       postinst_body=':'
@@ -102,7 +112,13 @@ filename="${package_name}_${VERSION}_amd64.deb"
 dpkg-deb --build --root-owner-group "$root" "$OUTPUT_DIR/$filename"
 for target in $MWAF_DEB_TARGETS; do
   case "$target" in
-    ubuntu:24.04|debian:12) ;;
+    ubuntu:18.04|ubuntu:20.04|ubuntu:22.04)
+      if [ "$WEBSERVER" != apache ] || [ "$INTEGRATION_MODE" != distro ]; then
+        echo "unsupported DEB target for $WEBSERVER $INTEGRATION_MODE: $target" >&2
+        exit 1
+      fi
+      ;;
+    ubuntu:24.04|ubuntu:26.04|debian:12) ;;
     *) echo "unsupported DEB target: $target" >&2; exit 1 ;;
   esac
   target_os=${target%%:*}

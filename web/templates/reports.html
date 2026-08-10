@@ -2,33 +2,17 @@
 <!doctype html>
 <html lang="ko">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>M-WAF 관제 보고서</title><link rel="stylesheet" href="/static/app.css"></head>
-<body data-report-page>
+<body>
   {{template "navigation" .}}
   <main class="container">
-    <div class="page-head"><div><p class="eyebrow">관제</p><h1>보고서</h1><p class="muted">선택한 기간의 보호 상태와 보안 이벤트를 한 화면에서 확인합니다.</p></div><div class="actions report-actions"><button class="secondary" type="button" data-print-report>인쇄</button></div></div>
-
-    <section class="panel search-panel compact report-filter" aria-labelledby="report-filter-heading"><div class="search-panel-head"><div><h2 id="report-filter-heading">보고 범위</h2><small>기간과 서버를 선택하고 필요하면 기업·보호 정책 범위를 지정합니다.</small></div><span class="badge">{{.Overview.RangeLabel}}</span></div><form class="search-form" method="get" action="/reports"><div class="search-primary two"><label>시간 범위<select name="range"><option value="1h" {{if eq .Overview.Range "1h"}}selected{{end}}>최근 1시간</option><option value="24h" {{if eq .Overview.Range "24h"}}selected{{end}}>최근 24시간</option><option value="7d" {{if eq .Overview.Range "7d"}}selected{{end}}>최근 7일</option></select></label><label>서버<select name="server_id"><option value="">전체 서버</option>{{range .Servers}}<option value="{{.ID}}" {{if eq $.FilterServer .ID}}selected{{end}}>{{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}}</option>{{end}}</select></label></div>{{if or .IsSystemAdmin .Policies}}<details class="search-advanced" {{if or .FilterEnterprise .FilterPolicy}}open{{end}}><summary><span>상세 범위</span><small>{{if .IsSystemAdmin}}기업과 {{end}}보호 정책</small></summary><div class="search-advanced-grid two">{{if .IsSystemAdmin}}<label>기업<select name="enterprise_id"><option value="">전체 기업</option>{{range .Enterprises}}<option value="{{.ID}}" {{if eq $.FilterEnterprise .ID}}selected{{end}}>{{.Name}}</option>{{end}}</select></label>{{end}}<label>보호 정책<select name="policy_id"><option value="">전체 정책</option>{{range .Policies}}<option value="{{.ID}}" {{if eq $.FilterPolicy .ID}}selected{{end}}>{{if $.IsSystemAdmin}}{{.EnterpriseName}} · {{end}}{{.Name}}</option>{{end}}</select></label></div></details>{{end}}<div class="search-footer"><div></div><div class="actions">{{if or .FilterEnterprise .FilterPolicy .FilterServer (ne .Overview.Range "24h")}}<a class="search-reset" href="/reports">조건 지우기</a>{{end}}<button type="submit">보고서 조회</button></div></div></form></section>
-
-    <section class="panel report-summary" aria-labelledby="report-summary-heading"><div class="panel-head"><div><h2 id="report-summary-heading">보고서 기준</h2><small>모든 시간은 KST 기준으로 표시합니다.</small></div><span class="badge info">조회 시점 보고서</span></div><div class="review-grid"><div class="review-item"><span>기업 범위</span><strong>{{.ScopeLabel}}</strong></div><div class="review-item"><span>보호 정책</span><strong>{{.SelectedPolicyName}}</strong></div><div class="review-item"><span>서버</span><strong>{{.SelectedServerName}}</strong></div><div class="review-item"><span>조회 기간</span><strong>{{formatKST .Overview.RangeStart "2006-01-02 15:04"}} ~ {{formatKST .Overview.RangeEnd "2006-01-02 15:04"}} KST</strong><small>생성 {{formatKST .Overview.GeneratedAt "2006-01-02 15:04:05"}} KST</small></div></div></section>
-
-    <section class="stats" aria-label="보고서 핵심 지표">
-      <article><span>탐지 요청</span><strong class="metric-value">{{.Overview.Summary.EventCount}}</strong><small>중복 Rule을 합친 요청 수</small></article>
-      <article><span>차단 요청</span><strong class="metric-value">{{.Overview.Summary.BlockedCount}}</strong><small>차단률 {{printf "%.1f" .Overview.Summary.BlockRate}}%</small></article>
-      <article><span>공격 출발지 IP</span><strong class="metric-value">{{.Overview.Summary.UniqueSourceIPs}}</strong><small>중복을 제외한 식별 가능 IP</small></article>
-      <article><span>온라인 보호 서버</span><strong class="metric-value">{{.Overview.Summary.OnlineServers}} / {{.Overview.Summary.ActiveServers}}</strong><small>2분 이내 Agent 수신</small></article>
+    <div class="page-head"><div><p class="eyebrow">관제</p><h1>보고서</h1><p class="muted">관제 데이터를 활용한 운영 보고서를 제공할 예정입니다.</p></div></div>
+    <section class="panel empty-state" aria-labelledby="reports-coming-soon-heading">
+      <div class="empty-state-content">
+        <span class="badge info">준비 중</span>
+        <h2 id="reports-coming-soon-heading">보고서 기능을 준비하고 있습니다</h2>
+        <p>보고서 구성과 제공 범위를 정리한 뒤 이 메뉴에서 안내하겠습니다.</p>
+      </div>
     </section>
-
-    <section class="panel"><div class="panel-head"><div><h2>시간대별 이벤트</h2><small>탐지 요청과 실제 차단 요청의 변화를 보여줍니다.</small></div><span class="badge info">{{.Overview.RangeLabel}}</span></div>{{if .Overview.Series}}<div class="table-scroll"><table class="table-wide"><thead><tr><th>시간</th><th>탐지 요청</th><th>차단 요청</th><th>차단률</th></tr></thead><tbody>{{range .Overview.Series}}<tr><td>{{formatKST .At "2006-01-02 15:04"}}<small>KST</small></td><td>{{.Events}}건</td><td>{{.Blocked}}건</td><td>{{if .Events}}{{printf "%.1f" .BlockRate}}%{{else}}0.0%{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<div class="empty">선택한 범위에 집계된 이벤트가 없습니다.</div>{{end}}</section>
-
-    <section class="rank-grid" aria-label="주요 탐지 순위">
-      <article class="panel"><div class="panel-head"><h2>공격 유형</h2><a class="report-link" href="/events">이벤트 보기</a></div><ol class="rank-list">{{range .Overview.TopCategories}}<li><span class="rank-number"></span><a class="rank-label" href="{{.URL}}">{{.Label}}</a><span class="rank-value">{{.Count}}건</span></li>{{else}}<li class="muted">분류된 공격 요청이 없습니다.</li>{{end}}</ol></article>
-      <article class="panel"><div class="panel-head"><h2>탐지 Rule</h2><a class="report-link" href="/events">이벤트 보기</a></div><ol class="rank-list">{{range .Overview.TopRules}}<li><span class="rank-number"></span><a class="rank-label mono" href="{{.URL}}">{{.Label}}</a><span class="rank-value">{{.Count}}건</span></li>{{else}}<li class="muted">집계된 Rule이 없습니다.</li>{{end}}</ol></article>
-      <article class="panel"><div class="panel-head"><h2>상위 서버</h2><a class="report-link" href="/servers">서버 보기</a></div><ol class="rank-list">{{range .Overview.TopServers}}<li><span class="rank-number"></span><a class="rank-label" href="{{.URL}}">{{.Label}}</a><span class="rank-value">{{.Count}}건</span></li>{{else}}<li class="muted">수집된 서버 이벤트가 없습니다.</li>{{end}}</ol></article>
-    </section>
-
-    <section class="panel"><div class="panel-head"><div><h2>상위 요청 URL</h2><small>선택한 기간에 가장 많이 탐지된 요청 경로입니다.</small></div></div>{{if .Overview.TopURIs}}<div class="table-scroll"><table class="table-wide"><thead><tr><th>요청 URL</th><th>탐지</th><th>차단</th></tr></thead><tbody>{{range .Overview.TopURIs}}<tr><td><a class="mono" href="{{.URL}}">{{.Label}}</a></td><td>{{.Count}}건</td><td>{{.Blocked}}건</td></tr>{{end}}</tbody></table></div>{{else}}<div class="empty">수집된 요청 URL이 없습니다.</div>{{end}}</section>
-
-    <section class="panel"><div class="panel-head"><div><h2>최근 중요 이벤트</h2><small>상세 정보는 보안 이벤트 화면에서 확인합니다.</small></div><a class="report-link" href="/events">전체 보기</a></div>{{if .Overview.Recent}}<div class="table-scroll"><table class="table-wide"><thead><tr><th>시간</th>{{if .IsSystemAdmin}}<th>기업</th>{{end}}<th>공격 유형</th><th>요청</th><th>출발지</th><th>처리</th></tr></thead><tbody>{{range .Overview.Recent}}<tr><td>{{formatKST .OccurredAt "01-02 15:04:05"}}<small>KST</small></td>{{if $.IsSystemAdmin}}<td>{{.EnterpriseName}}</td>{{end}}<td><a href="/events?incident={{.ID}}">{{.CategoryLabel}}</a></td><td><a class="mono cell-truncate" href="/events?incident={{.ID}}">{{.Method}} {{.URI}}</a><small>{{.ServerName}}</small></td><td><span class="mono">{{if .ClientIP}}{{.ClientIP}}{{else}}-{{end}}</span><small>{{.CountryLabel}}</small></td><td><span class="badge {{if .Blocked}}danger{{else}}warn{{end}}">{{if .Blocked}}차단{{else}}탐지{{end}}</span></td></tr>{{end}}</tbody></table></div>{{else}}<div class="empty">선택한 범위에 공격 요청이 없습니다.</div>{{end}}</section>
   </main>
 </body></html>
 {{end}}
