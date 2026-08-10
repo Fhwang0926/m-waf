@@ -32,6 +32,8 @@ project_name=${MWAF_E2E_PROJECT_NAME:-$(stored_value MWAF_E2E_PROJECT_NAME)}
 project_name=${project_name:-mwaf-e2e}
 manager_image=${MWAF_E2E_MANAGER_IMAGE:-$(stored_value MWAF_MANAGER_IMAGE)}
 manager_image=${manager_image:-ghcr.io/fhwang0926/m-waf-manager:latest}
+customer_image=${MWAF_E2E_CUSTOMER_IMAGE:-$(stored_value MWAF_E2E_CUSTOMER_IMAGE)}
+customer_image=${customer_image:-docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea}
 admin_port=${MWAF_E2E_ADMIN_PORT:-$(stored_value MWAF_ADMIN_PORT)}
 admin_port=${admin_port:-8443}
 apache_port=${MWAF_E2E_APACHE_PORT:-$(stored_value MWAF_E2E_APACHE_PORT)}
@@ -41,7 +43,6 @@ nginx_port=${nginx_port:-18081}
 web_bind=${MWAF_E2E_WEB_BIND:-$(stored_value MWAF_E2E_WEB_BIND)}
 web_bind=${web_bind:-127.0.0.1}
 enterprise_name=${MWAF_E2E_ENTERPRISE_NAME:-mwaf-e2e}
-group_name=${MWAF_E2E_GROUP_NAME:-mwaf-e2e-webservers}
 policy_name=${MWAF_E2E_POLICY_NAME:-mwaf-e2e-block-policy}
 admin_display_name=${MWAF_E2E_ADMIN_DISPLAY_NAME:-M-WAF E2E Administrator}
 admin_url_input=${MWAF_E2E_ADMIN_URL:-$(stored_value MWAF_E2E_ADMIN_URL)}
@@ -66,6 +67,7 @@ Commands:
 
 Options:
   --manager-image IMAGE   Tagged or digest-pinned Manager image
+  --customer-image IMAGE  Ubuntu 24.04 or Debian 12 customer base image
   --admin-port PORT       Host Manager HTTPS port (default: 8443)
   --admin-url URL         Existing Manager HTTPS origin
   --ca-cert FILE          CA certificate for an existing Manager
@@ -171,6 +173,7 @@ esac
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --manager-image) [ "$#" -ge 2 ] || fail "--manager-image requires a value"; manager_image=$2; shift 2 ;;
+    --customer-image) [ "$#" -ge 2 ] || fail "--customer-image requires a value"; customer_image=$2; shift 2 ;;
     --admin-port) [ "$#" -ge 2 ] || fail "--admin-port requires a value"; admin_port=$2; shift 2 ;;
     --admin-url) [ "$#" -ge 2 ] || fail "--admin-url requires a value"; admin_url_input=$2; shift 2 ;;
     --ca-cert) [ "$#" -ge 2 ] || fail "--ca-cert requires a value"; ca_cert_input=$2; shift 2 ;;
@@ -317,6 +320,7 @@ MWAF_E2E_REMOTE=1
 MWAF_E2E_ADMIN_URL=$admin_url
 MWAF_E2E_CA_CERT=$runtime_ca
 MWAF_E2E_RUNTIME_DIR=$runtime_dir
+MWAF_E2E_CUSTOMER_IMAGE=$customer_image
 MWAF_E2E_WEB_BIND=$web_bind
 MWAF_E2E_APACHE_PORT=$apache_port
 MWAF_E2E_NGINX_PORT=$nginx_port
@@ -339,6 +343,7 @@ MWAF_PUBLIC_URL=$agent_url
 MWAF_EVENT_RETENTION=720h
 MWAF_POLICY_SYNC_INTERVAL=15m
 MWAF_E2E_RUNTIME_DIR=$runtime_dir
+MWAF_E2E_CUSTOMER_IMAGE=$customer_image
 MWAF_E2E_WEB_BIND=$web_bind
 MWAF_E2E_APACHE_PORT=$apache_port
 MWAF_E2E_NGINX_PORT=$nginx_port
@@ -608,42 +613,6 @@ wait_agents_online() {
   fail "both Agents did not become ONLINE within 180 seconds"
 }
 
-extract_group_id() {
-  file=$1
-  awk -v target="$group_name" 'BEGIN { RS="<section class=\"panel\">" }
-    index($0, "value=\"" target "\"") {
-      if (match($0, /action="\/groups\/[^\"]+"/)) {
-        value=substr($0, RSTART, RLENGTH); sub(/^action="\/groups\//, "", value); sub(/"$/, "", value); print value; exit
-      }
-    }' "$file"
-}
-
-ensure_group() {
-  page="$runtime_dir/groups.html"
-  admin_get /groups "$page"
-  group_id=$(extract_group_id "$page")
-  csrf=$(extract_csrf "$page")
-  [ -n "$csrf" ] || fail "could not read group CSRF token"
-  if [ -z "$group_id" ]; then
-    status=$(curl --silent --show-error --cacert "$secrets_dir/mwaf_ca_cert.pem" \
-      --cookie "$cookie_jar" --cookie-jar "$cookie_jar" -o "$runtime_dir/group-result.html" -w '%{http_code}' \
-      --data-urlencode "csrf=$csrf" --data-urlencode "enterprise_id=$enterprise_id" \
-      --data-urlencode "name=$group_name" --data-urlencode "server_ids=$apache_server_id" \
-      --data-urlencode "server_ids=$nginx_server_id" "$admin_url/groups")
-    [ "$status" = 303 ] || fail "group creation returned HTTP $status"
-    admin_get /groups "$page"
-    group_id=$(extract_group_id "$page")
-  else
-    status=$(curl --silent --show-error --cacert "$secrets_dir/mwaf_ca_cert.pem" \
-      --cookie "$cookie_jar" --cookie-jar "$cookie_jar" -o "$runtime_dir/group-result.html" -w '%{http_code}' \
-      --data-urlencode "csrf=$csrf" --data-urlencode "enterprise_id=$enterprise_id" \
-      --data-urlencode "name=$group_name" --data-urlencode "server_ids=$apache_server_id" \
-      --data-urlencode "server_ids=$nginx_server_id" "$admin_url/groups/$group_id")
-    [ "$status" = 303 ] || fail "group update returned HTTP $status"
-  fi
-  [ -n "$group_id" ] || fail "could not resolve the E2E group ID"
-}
-
 ensure_policy() {
   page="$runtime_dir/policies.html"
   admin_get /policies "$page"
@@ -651,16 +620,18 @@ ensure_policy() {
     return 0
   fi
   policy_page="$runtime_dir/policy-new.html"
-  admin_get /policies/new "$policy_page"
+  admin_get "/policies/new?enterprise_id=$enterprise_id" "$policy_page"
   csrf=$(extract_csrf "$policy_page")
   [ -n "$csrf" ] || fail "could not read policy CSRF token"
   custom_rule='SecRule REQUEST_URI "@streq /mwaf-e2e-block" "id:100001,phase:1,deny,status:403,log,msg:M-WAF E2E block"'
   status=$(curl --silent --show-error --cacert "$secrets_dir/mwaf_ca_cert.pem" \
     --cookie "$cookie_jar" --cookie-jar "$cookie_jar" -o "$runtime_dir/policy-result.html" -w '%{http_code}' \
-    --data-urlencode "csrf=$csrf" --data-urlencode 'template_key=crs-baseline' \
-    --data-urlencode "name=$policy_name" --data-urlencode 'description=Container E2E group policy' \
-    --data-urlencode "target=group:$group_id" --data-urlencode 'update_strategy=MANUAL' \
-    --data-urlencode 'mode=On' --data-urlencode 'paranoia_level=1' --data-urlencode 'inbound_score=5' \
+    --data-urlencode "csrf=$csrf" --data-urlencode "enterprise_id=$enterprise_id" --data-urlencode 'template_key=crs-baseline' \
+    --data-urlencode "name=$policy_name" --data-urlencode 'description=Container E2E protection policy' \
+    --data-urlencode "server_ids=$apache_server_id" --data-urlencode "server_ids=$nginx_server_id" \
+    --data-urlencode 'update_strategy=MANUAL' --data-urlencode 'publish_confirm=confirmed' \
+    --data-urlencode 'mode=On' --data-urlencode 'paranoia_level=1' --data-urlencode 'executing_paranoia_level=1' \
+    --data-urlencode 'inbound_score=5' --data-urlencode 'outbound_score=4' --data-urlencode 'sampling_percentage=100' \
     --data-urlencode 'request_body=on' --data-urlencode 'excluded_paths=/mwaf-e2e-excluded' \
     --data-urlencode "custom_rules=$custom_rule" "$admin_url/policies")
   [ "$status" = 303 ] || fail "policy creation returned HTTP $status"
@@ -681,7 +652,7 @@ wait_policy_applied() {
     fi
     sleep 5
   done
-  fail "group policy was not APPLIED to both servers within 240 seconds"
+  fail "protection policy was not APPLIED to both servers within 240 seconds"
 }
 
 expect_http_status() {
@@ -744,7 +715,6 @@ verify_stack() {
   ensure_enterprise
   ensure_system_policy
   wait_agents_online
-  ensure_group
   ensure_policy
   wait_policy_applied
 
@@ -762,9 +732,8 @@ verify_stack() {
   jq -n \
     --arg status PASS --arg commit "$commit" --arg manager_mode "$manager_mode" --arg manager_image "$manager_image" \
     --arg admin_url "$admin_url" --arg agent_url "$agent_url" --arg apache_server_id "$apache_server_id" \
-    --arg nginx_server_id "$nginx_server_id" --arg enterprise_id "$enterprise_id" \
-    --arg group_id "$group_id" --arg policy_name "$policy_name" \
-    '{status:$status,commit:$commit,manager_mode:$manager_mode,manager_image:(if $manager_mode == "remote" then null else $manager_image end),admin_url:$admin_url,agent_url:$agent_url,enterprise_id:$enterprise_id,group_id:$group_id,policy_name:$policy_name,servers:{apache:$apache_server_id,nginx:$nginx_server_id},checks:["agents_online","group_policy_applied","benign_200","excluded_path_200","blocked_path_403","blocked_events_collected"]}' \
+    --arg nginx_server_id "$nginx_server_id" --arg enterprise_id "$enterprise_id" --arg policy_name "$policy_name" \
+    '{status:$status,commit:$commit,manager_mode:$manager_mode,manager_image:(if $manager_mode == "remote" then null else $manager_image end),admin_url:$admin_url,agent_url:$agent_url,enterprise_id:$enterprise_id,policy_name:$policy_name,servers:{apache:$apache_server_id,nginx:$nginx_server_id},checks:["agents_online","protection_policy_applied","benign_200","excluded_path_200","blocked_path_403","blocked_events_collected"]}' \
     > "$result_dir/summary.json"
   printf 'PASS\n' > "$result_dir/status.txt"
   collect_diagnostics

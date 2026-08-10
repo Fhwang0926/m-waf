@@ -863,7 +863,7 @@ func (s *Server) validateMigrationCompatibility(r *http.Request, source model.Po
 	}
 	items := make([]migrationCompatibility, 0, len(servers))
 	for _, server := range servers {
-		if server.Revoked {
+		if server.Revoked || !serverReadyForPolicyCompatibility(server) {
 			continue
 		}
 		item := migrationCompatibility{ServerID: server.ID, ServerName: server.Name}
@@ -927,6 +927,13 @@ func (s *Server) validateMigrationCompatibility(r *http.Request, source model.Po
 		items = append(items, item)
 	}
 	return items
+}
+
+func serverReadyForPolicyCompatibility(server ServerRecord) bool {
+	if server.Inventory.InstallationStage != "" {
+		return server.Inventory.InstallationStage == model.InstallationStageProtected
+	}
+	return server.Inventory.ConnectorLoaded && server.Inventory.ConfigTestOK
 }
 
 func (s *Server) catalogPolicySources() []model.PolicySourceArtifact {

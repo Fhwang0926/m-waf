@@ -483,9 +483,20 @@ pre,
 .install-environment-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--line); gap: 1px; }
 .install-environment-card { display: flex; min-width: 0; min-height: 174px; flex-direction: column; gap: 12px; padding: 16px; background: #0c1420; }
 .install-environment-label { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .05em; }
+.install-supported-os { display: grid; min-height: 74px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.install-supported-os > span { display: flex; min-width: 0; flex-direction: column; justify-content: center; padding: 12px; border: 1px solid #26354a; border-radius: 9px; background: #080f19; text-align: center; }
+.install-supported-os strong { color: #e5edf8; }
+.install-supported-os small { margin-top: 3px; }
 .install-brand-row { display: grid; min-height: 74px; flex: 1; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; }
 .install-brand-row.single { grid-template-columns: minmax(0, 1fr); }
 .install-logo-surface { display: flex; min-width: 0; height: 72px; align-items: center; justify-content: center; padding: 10px; overflow: hidden; border: 1px solid #26354a; border-radius: 9px; background: #080f19; }
+.install-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
+.install-choice-card { display: flex; min-width: 0; flex-direction: column; justify-content: space-between; gap: 16px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: #0c1420; }
+.install-choice-card h3 { margin: 4px 0 2px; }
+.install-choice-card form { display: grid; gap: 12px; }
+.install-choice-card .mono { overflow-wrap: anywhere; }
+.integration-guide { display: grid; gap: 8px; margin-top: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: #0c1420; }
+.integration-guide code { overflow-wrap: anywhere; }
 .install-logo-surface img { display: block; max-width: 100%; object-fit: contain; }
 .install-logo-ubuntu { width: 54px; height: 54px; }
 .install-logo-apache { width: 150px; max-height: 50px; }
@@ -1216,6 +1227,7 @@ body.sidebar-collapsed .workspace-topbar { left: 76px; }
   .detail-list,
   .support-grid,
   .install-environment-grid,
+  .install-choice-grid,
   .install-steps { grid-template-columns: 1fr; }
   .filter-grid .actions { grid-column: auto; }
   .resource-toolbar .actions { grid-column: auto; flex-wrap: wrap; }

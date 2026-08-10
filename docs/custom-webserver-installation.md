@@ -1,290 +1,232 @@
 # 커스텀 Apache/Nginx 설치 가이드
 
-## 목적
+## 설치 원칙
 
-호스팅사가 직접 컴파일했거나 제3자 저장소로 설치한 Apache/Nginx를 M-WAF에 연결하는 방법을 설명한다.
+M-WAF는 고객 서버 설치를 두 단계로 분리한다.
 
-`external` 통합은 고객 웹서버와 ModSecurity Connector를 빌드하거나 교체하지 않는다. 호스팅사가 호환성을 확인해 미리 설치한 Connector를 그대로 사용하며 설치 방식은 두 가지다.
+1. 공통 설치 명령은 `mwaf-agent`만 설치하고 Manager에 서버를 등록한다.
+2. Agent가 운영체제, 아키텍처, 실행 중인 Apache/Nginx 경로, 버전, 빌드 해시와 패키지 소유 여부를 점검한다.
+3. 운영자는 Manager의 **보호 서버 → 서버 상세 → 설치 유형과 웹서버 연동**에서 설치 유형을 선택한다.
+4. Agent가 Manager의 서명 bundle에 포함된 파일을 검증한 뒤 모듈을 설치한다.
+5. 운영자는 화면에 표시된 전용 설정 경로를 기존 웹서버 설정에 포함한다.
+6. Agent가 Connector와 M-WAF include를 확인한 뒤 선택된 제어 방식으로 configtest와 reload를 수행하고, 서명 정책 적용이 끝나면 서버 상태가 `보호 중`으로 바뀐다.
 
-1. 기본 `package`: `mwaf-agent`와 Apache/Nginx용 M-WAF external 통합 패키지를 설치한다.
-2. `manual`: 서명된 `mwaf-agent`만 설치하고, 기존 Connector에 M-WAF 전용 include와 로그 회전 설정을 연결한다.
+Agent와 모듈 설치는 분리된다. 초기 설치 스크립트는 Apache/Nginx/ModSecurity 패키지를 설치하거나, 고객 설정 파일을 편집하거나, 웹서버를 reload하지 않는다. 웹서버 제어는 서버 상세에서 설치 계획을 확정한 뒤에만 활성화된다.
 
-두 방식 모두 Apache, Nginx, libmodsecurity와 Connector를 패키지로 교체하지 않는다. `manual`은 Connector 수동 설치를 허용하는 방식이지, Agent 바이너리나 정책을 검증 없이 복사하는 우회 경로가 아니다. Agent와 정책은 계속 Manager가 제공하고 서명을 검증한다.
+## 설치 유형
+
+| 유형 | 대상 | Manager가 제공하는 파일 | 고객 서버 영향 |
+|---|---|---|---|
+| 패키지 기반 | Ubuntu 24.04 또는 Debian 12의 배포판 Apache/Nginx | Agent DEB + 웹서버용 모듈 DEB | 모듈 DEB의 APT 의존성이 설치될 수 있다. 고객 웹서버 설정과 reload는 자동 수행하지 않는다. |
+| 커스텀 ZIP | 호스팅사가 직접 빌드한 Apache/Nginx | Agent DEB + 해당 빌드 전용 ZIP | OS 의존성 패키지를 추가하지 않는다. ZIP은 `/opt/m-waf/modules` 아래에만 풀고 고객 설정은 수정하지 않는다. |
+
+배포판 패키지 소유로 확인된 웹서버에는 패키지 기반만, 그 외 빌드에는 커스텀 ZIP만 선택할 수 있다. 커스텀 ZIP은 비슷한 버전이 아니라 Agent가 수집한 `web_server_build_hash`와 정확히 일치해야 한다.
 
 ## 지원 조건
 
-- 운영체제: Ubuntu Server 24.04 LTS
+- 운영체제: Ubuntu Server 24.04 LTS 또는 Debian 12 Bookworm
 - 아키텍처: amd64
-- 웹서버 제어 바이너리의 절대 경로를 알고 있어야 한다.
-- Apache는 `apachectl`을 제공하고 `security2_module`이 이미 로드되어 있어야 한다.
-- Nginx는 해당 Nginx 빌드와 호환되는 ModSecurity-nginx Connector가 이미 컴파일·로드되어 있어야 한다.
-- 웹서버의 기존 include 대상 디렉터리에 M-WAF 전용 파일 하나를 추가할 수 있어야 한다.
-- ModSecurity가 JSON 감사 로그 형식을 지원해야 한다.
-- 웹서버 로그 파일을 기록할 기존 Unix group을 지정해야 한다.
+- Agent: 서명된 `mwaf-agent` DEB
+- 웹서버: Apache HTTP Server 2.4 또는 Nginx
+- 서비스 관리: systemd
+- 커스텀 빌드: 실행 중인 프로세스의 실제 바이너리를 `/proc`에서 확인할 수 있어야 한다.
+- 운영자가 기존 웹서버 설정에 M-WAF 전용 파일 하나를 포함하고 configtest/reload할 수 있어야 한다.
 
-`external` 모드는 임의의 사전 빌드 Connector를 배포하지 않는다. Nginx Connector는 고객 Nginx와 동일한 소스·컴파일 조건 또는 호환 빌드 조건으로 준비해야 한다. Apache DSO는 대상 Apache의 `apxs`와 헤더를 사용해 준비하는 것을 권장한다.
+Agent가 웹서버 실행 경로를 확인하지 못하면 Manager에서 설치 유형을 선택할 수 없다. 컨테이너 격리, 숨겨진 mount namespace, 실행 중이지 않은 커스텀 웹서버는 현재 자동 점검 범위 밖이다.
 
-## 설치 전에 준비할 항목
+## 1단계: Agent 설치
 
-### Apache
+Manager에서 **서버 설치 → Agent 설치 명령 복사**를 누르고 대상 서버에서 실행한다. 명령은 다음 작업만 수행한다.
 
-다음은 커스텀 Apache가 `/opt/hosting/apache`에 설치된 예다.
+- Manager CA와 단기 등록 토큰 확인
+- OS/아키텍처에 맞는 Agent DEB 조회
+- SHA-256 검증
+- Agent DEB 설치
+- `/etc/mwaf-agent` 설정과 `/var/lib/mwaf-agent` 상태 디렉터리 생성
+- systemd Agent 시작 및 Manager 등록
 
-1. `/opt/hosting/apache/bin/apachectl -M`에서 `security2_module`을 확인한다.
-2. Apache 주 설정이 전용 설정 디렉터리를 포함하도록 한다.
+Agent DEB에는 런타임 패키지 의존성이 없다. 이 단계에서는 Apache, Nginx, Connector, CRS 모듈과 logrotate 패키지를 추가하지 않는다.
+
+## 2단계: Agent 점검 결과 확인
+
+서버 상세에는 감지된 웹서버마다 다음 정보가 표시된다.
+
+- Apache/Nginx 종류와 버전
+- 실제 실행 바이너리 경로
+- 정규화한 빌드 정보의 SHA-256
+- 배포판 패키지 소유 여부
+- configtest 가능 여부
+
+Apache와 Nginx가 같이 있거나 동일 종류의 커스텀 바이너리가 여러 개면 각각 별도 후보로 표시한다. 운영자가 선택한 후보의 빌드 해시는 설치 직전에 Agent가 다시 확인한다. 그 사이 바이너리가 교체되면 설치를 중단한다.
+
+## 3-A단계: 패키지 기반 설치
+
+배포판 패키지로 설치된 웹서버에서 **패키지 기반 설치**를 선택한다. Agent는 다음 고정 작업만 수행한다.
+
+1. Manager mTLS API에서 할당된 Agent/모듈 DEB 다운로드
+2. 크기와 SHA-256 검증
+3. `apt-get install --no-install-recommends`로 모듈 DEB 설치
+4. Agent 버전이 바뀌는 경우에만 Agent DEB도 함께 갱신
+5. 설치 결과와 버전을 Manager에 보고
+
+모듈 패키지가 선언한 Apache/Nginx용 ModSecurity 의존성은 APT가 설치할 수 있다. 설치 전에 변경 허용 정책과 저장소 상태를 확인해야 한다. Agent는 `/etc/apache2`, `/etc/nginx`의 고객 설정을 직접 편집하거나 웹서버를 reload하지 않는다.
+
+## 3-B단계: 커스텀 ZIP 준비와 설치
+
+커스텀 빌드는 호스팅사가 대상 웹서버와 동일한 소스·옵션·ABI로 Connector를 준비한다. 범용 ZIP 하나를 여러 빌드에 사용하지 않는다.
+
+입력 디렉터리의 최소 구조는 다음과 같다.
+
+```text
+custom-module/
+├── module/
+│   └── connector.so
+└── integration/
+    └── mwaf.conf
+```
+
+`integration/mwaf.conf`는 고객의 주 설정 파일이 아니라, 운영자가 주 설정에서 include할 M-WAF 전용 설정이다. ZIP과 metadata는 표준 라이브러리 기반 도구로 만든다.
+
+```sh
+go run ./cmd/mwaf-module-zip \
+  -input ./custom-module \
+  -output ./dist/packages/mwaf-nginx-custom-1.24.0.zip \
+  -metadata-output ./dist/metadata/mwaf-nginx-custom-1.24.0.json \
+  -id mwaf-nginx-custom-build-7f3a \
+  -version 1.0.0 \
+  -os-id ubuntu \
+  -os-version 24.04 \
+  -webserver nginx \
+  -webserver-build AGENT_SCREEN_BUILD_HASH \
+  -runtime-abi modsecurity-v3
+```
+
+생성된 ZIP과 metadata를 기존 `mwaf-bundle` 입력에 추가하고 호스팅사 Manager 이미지를 빌드한다. bundle 서명 후 Manager가 ZIP을 제공한다. 정확히 일치하는 ZIP이 없으면 서버 상세의 **커스텀 ZIP 설치** 버튼은 비활성화된다.
+
+Agent는 ZIP 설치 시 다음을 강제한다.
+
+- Manager가 서명한 artifact metadata와 SHA-256
+- ZIP 루트의 `mwaf-module.json`과 metadata의 웹서버·버전·빌드 해시·ABI 일치
+- 절대 경로, `..`, symlink, 과도한 파일 수/크기 거부
+- `/opt/m-waf/modules/{apache|nginx}/{version}-{sha}/`에만 추출
+- 검증이 끝난 버전을 `/opt/m-waf/modules/{apache|nginx}/current` symlink로 전환
+- APT/RPM 실행 안 함
+- 고객 Apache/Nginx 설정 파일 편집 및 reload 안 함
+
+M-WAF의 커스텀 모듈 payload에만 `/opt/m-waf`를 사용한다. Agent 설정·인증서·상태·정책·감사 로그는 Linux 표준 경로인 `/etc/mwaf-agent`, `/var/lib/mwaf-agent`, `/etc/mwaf`, `/var/log/modsecurity`를 유지한다.
+
+## 4단계: 웹서버 연동
+
+모듈 설치가 끝나면 Manager 상태는 `웹서버 연동 필요`가 된다. 운영자는 서버 상세에 표시된 경로를 기존 웹서버 설정에서 include한다.
+
+### 커스텀 Apache
 
 ```apache
-IncludeOptional /opt/hosting/apache/conf/extra/*.conf
+Include /opt/m-waf/modules/apache/current/integration/mwaf.conf
 ```
-
-3. 변경 전 설정을 검사한다.
 
 ```sh
 /opt/hosting/apache/bin/apachectl configtest
+/opt/hosting/apache/bin/apachectl graceful
 ```
 
-설치기는 `/opt/hosting/apache/conf/extra/mwaf.conf` 한 파일만 생성한다. 이미 같은 경로에 M-WAF가 관리하지 않는 파일이 있으면 덮어쓰지 않고 중단한다.
+### 커스텀 Nginx
 
-### Nginx
-
-다음은 커스텀 Nginx가 `/opt/hosting/nginx`에 설치된 예다.
-
-1. `/opt/hosting/nginx/sbin/nginx -V`와 현재 설정에서 ModSecurity-nginx Connector가 로드되었는지 확인한다.
-2. `http` 컨텍스트가 전용 설정 디렉터리를 포함하도록 한다.
+`http` 또는 해당 패키지가 지정한 올바른 컨텍스트에서 전용 파일을 포함한다.
 
 ```nginx
-http {
-    include /opt/hosting/nginx/conf/conf.d/*.conf;
-}
+include /opt/m-waf/modules/nginx/current/integration/mwaf.conf;
 ```
-
-3. 변경 전 설정을 검사한다.
 
 ```sh
 /opt/hosting/nginx/sbin/nginx -t
+/opt/hosting/nginx/sbin/nginx -s reload
 ```
 
-Nginx의 기존 `modsecurity_rules_file`과 같은 컨텍스트에 M-WAF 설정을 중복 선언하면 안 된다. 기존 ModSecurity 기본 설정이 필요하면 해당 파일 경로를 설치 명령의 `--modsecurity-base`로 전달한다.
+M-WAF는 고객의 Apache/Nginx 주 설정 파일을 수정하지 않는다. 운영자가 include를 반영하면 Agent가 다음 polling에서 실제 구성을 확인하고, 설치 계획에서 선택한 방식으로 정책을 검증·재적용한다.
 
-## 공통 설치 파일 받기
+## 웹서버 제어 방식
 
-Manager의 **설치 및 등록**에서 기업 설치 토큰을 생성한다. 화면에서 제공하는 CA 포함 설치 블록을 사용하거나 공개 CA 인증서를 고객 서버로 복사한 뒤 설치 스크립트를 내려받아 검토한다.
+### 표준 웹서버 제어
+
+Agent가 감지하고 빌드 해시를 확인한 바이너리에 고정 인자만 사용한다.
+
+| 웹서버 | 설정 검사 | 재적용 |
+|---|---|---|
+| Apache | `<감지된 바이너리> -t` | `<감지된 바이너리> -k graceful` |
+| Nginx | `<감지된 바이너리> -t` | `<감지된 바이너리> -s reload` |
+
+### 고객 Hook
+
+호스팅사의 supervisor, service wrapper 또는 커스텀 제어 절차가 필요하면 Manager에서 **고객 Hook 사용**을 선택한다. Manager에는 명령 문자열을 입력하지 않는다. 대상 서버에 다음 두 실행 파일을 미리 준비한다.
+
+```text
+/opt/m-waf/hooks/apache/configtest
+/opt/m-waf/hooks/apache/reload
+/opt/m-waf/hooks/nginx/configtest
+/opt/m-waf/hooks/nginx/reload
+```
+
+선택한 웹서버 디렉터리의 `configtest`, `reload`만 필요하다. Agent는 설치 전에 다음 조건을 검사한다.
+
+- symlink가 아닌 일반 파일
+- Hook 파일과 `/opt/m-waf`, `hooks`, 웹서버별 상위 디렉터리가 root 소유
+- 소유자 실행 권한
+- Hook 파일과 상위 디렉터리에 group/others 쓰기 권한 없음
+- 고정된 `/opt/m-waf/hooks/{apache|nginx}` 경로
+
+Hook에는 `PATH`, `MWAF_WEB_SERVER`, `MWAF_WEB_SERVER_BINARY`, `MWAF_POLICY_PATH`만 전달된다. `configtest`가 성공한 경우에만 `reload`를 실행한다. 어느 단계든 실패하면 정책을 이전 상태로 되돌리고 같은 Hook으로 다시 검증·재적용한다.
+
+예시는 호스팅사가 이미 운영하는 제어 도구를 호출하는 최소 wrapper다.
 
 ```sh
-curl --fail \
-  --cacert ./mwaf_ca_cert.pem \
-  https://manager.example.com:8443/bootstrap/v1/install.sh \
-  -o /tmp/mwaf-install.sh
+#!/bin/sh
+exec /opt/hosting/apache/bin/apachectl configtest
 ```
-
-## 커스텀 Apache 설치
 
 ```sh
-sudo sh /tmp/mwaf-install.sh \
-  --manager https://manager.example.com:8443 \
-  --ca ./mwaf_ca_cert.pem \
-  --install-token-stdin \
-  --webserver apache \
-  --integration external \
-  --module-install manual \
-  --webserver-bin /opt/hosting/apache/bin/apachectl \
-  --integration-config /opt/hosting/apache/conf/extra/mwaf.conf \
-  --audit-log /var/log/modsecurity/mwaf-audit.jsonl \
-  --web-group www-data \
-  --reload
+#!/bin/sh
+exec /usr/local/sbin/hosting-web-control reload tenant-apache
 ```
 
-Apache 기본 ModSecurity 설정이 다른 파일에 있고 기존 Apache 설정에서 아직 포함하지 않았다면 다음 옵션을 추가할 수 있다.
+Hook 파일은 고객이 서버에서 직접 검토·배치한다. Manager가 임의 셸 명령, 인자, 파이프, `sudo` 또는 스크립트 본문을 Agent로 전달하는 기능은 제공하지 않는다.
 
-```sh
---modsecurity-base /opt/hosting/apache/conf/modsecurity.conf
-```
+설치 후 제어 방식을 변경하려면 **보호 서버 → 서버 상세 → 설치 유형과 웹서버 연동 → 정책 재적용 방식 변경**을 사용한다. Agent는 재설치 없이 로컬 설치 선택을 갱신하며, 변경된 방식은 다음 정책 적용부터 사용한다. 고객 Hook으로 변경할 때는 두 Hook 파일의 보안 조건을 먼저 검증하고, 실패하면 기존 방식을 유지한다.
 
-같은 기본 설정을 Apache가 이미 포함하고 있다면 중복 Rule ID를 방지하기 위해 이 옵션을 사용하지 않는다.
+## 상태 의미
 
-## 커스텀 Nginx 설치
+| Manager 상태 | 의미 | 다음 작업 |
+|---|---|---|
+| 설치 유형 선택 필요 | Agent 등록과 점검은 끝났지만 모듈 계획이 없다. | 웹서버 후보와 설치 유형 선택 |
+| 패키지 적용 대기 | Manager가 설치 파일을 할당했고 Agent polling을 기다린다. | Agent 연결·로그 확인 |
+| 웹서버 연동 필요 | 모듈은 설치됐지만 M-WAF 전용 설정 include가 확인되지 않았다. | 운영자가 include를 반영하고 선택한 제어 방식 준비 |
+| 보호 중 | Connector, include, configtest와 서명 정책 적용이 확인됐다. | 이벤트 수신과 탐지/차단 검증 |
+| 실패 | 다운로드, 해시, ABI, ZIP, APT 또는 버전 검증이 실패했다. | 상세 오류를 해결한 뒤 재예약 |
 
-```sh
-sudo sh /tmp/mwaf-install.sh \
-  --manager https://manager.example.com:8443 \
-  --ca ./mwaf_ca_cert.pem \
-  --install-token-stdin \
-  --webserver nginx \
-  --integration external \
-  --module-install manual \
-  --webserver-bin /opt/hosting/nginx/sbin/nginx \
-  --integration-config /opt/hosting/nginx/conf/conf.d/mwaf.conf \
-  --modsecurity-base /opt/hosting/nginx/conf/modsecurity.conf \
-  --audit-log /var/log/modsecurity/mwaf-audit.jsonl \
-  --web-group www-data \
-  --reload
-```
+고객 Hook을 선택한 경우 Hook 파일이 없거나 권한 검증에 실패해도 설치를 시작하지 않는다. 서버에서 파일과 권한을 수정한 뒤 같은 설치 계획을 다시 예약한다.
 
-커스텀 supervisor나 별도 service wrapper로만 reload할 수 있다면 `--reload`를 생략한다. 설치 완료 후 호스팅사의 기존 운영 절차로 reload해야 M-WAF 설정이 실제 worker에 반영된다.
+## 실패 처리
 
-## 옵션 설명
-
-| 옵션 | 의미 |
-|---|---|
-| `--install-token-stdin` | 기업 설치 토큰을 터미널에서 숨김 입력한다. 일반 수동 설치에 권장한다. |
-| `--install-token-file` | 자동화 도구가 권한 0600 비밀 파일로 제공한 기업 설치 토큰을 읽는다. |
-| `--name` | Manager에 자동 등록할 서버 이름을 지정한다. 생략하면 호스트명을 사용한다. |
-| `--integration external` | 배포판 웹서버·Connector 패키지를 설치하지 않고 기존 Connector를 사용한다. |
-| `--module-install package\|manual` | 기본값은 M-WAF external 통합 패키지를 함께 설치하는 `package`다. `manual`은 Agent 패키지만 설치하고 기존 Connector에 최소 설정을 연결한다. `external`에서만 사용할 수 있다. |
-| `--webserver apache\|nginx` | 한 Agent가 관리할 웹서버 종류를 고정한다. |
-| `--webserver-bin` | Agent가 inventory, configtest와 정책 reload에 사용할 절대 경로다. Apache는 `apachectl` 경로를 사용한다. |
-| `--integration-config` | 기존 Apache/Nginx include 범위 안에 생성할 M-WAF 전용 파일이다. |
-| `--modsecurity-base` | M-WAF 엔진 설정에서 먼저 포함할 기존 ModSecurity 기본 설정이다. 선택 항목이다. |
-| `--audit-log` | Agent가 읽고 ModSecurity가 기록할 JSONL 파일이다. |
-| `--web-group` | 감사 로그에 쓰기 권한을 가질 기존 Unix group이다. |
-| `--reload` | configtest 성공 후 웹서버 기본 제어 명령으로 reload한다. |
-
-## 설치기가 확인하는 내용
-
-1. Ubuntu 24.04 amd64 여부
-2. 웹서버 바이너리 절대 경로와 실행 권한
-3. 웹서버 버전과 정규화된 빌드 해시
-4. Apache `security2_module` 또는 Nginx Connector 로드 흔적
-5. 지정한 Unix group과 설정 디렉터리 존재 여부
-6. 기존 설정 파일을 덮어쓰지 않는지 여부
-7. 설치한 전용 설정이 실제 웹서버 include 결과에 나타나는지 여부
-8. `apachectl configtest` 또는 `nginx -t` 성공 여부
-9. Agent와, `package` 방식이면 통합 패키지의 SHA-256 및 Manager 서명 번들 일치 여부
-
-설정 검사에 실패하면 설치기는 기존 M-WAF 전용 통합 설정을 복원하거나 새로 만든 통합 설정을 제거한다. 고객 웹서버 바이너리, Connector와 기존 주 설정은 수정하지 않는다. Agent 패키지 설치 자체는 APT 트랜잭션이므로 자동 제거하지 않는다.
-
-## 설치 후 확인
-
-### Apache
-
-```sh
-/opt/hosting/apache/bin/apachectl configtest
-/opt/hosting/apache/bin/apachectl -M | grep security2_module
-/opt/hosting/apache/bin/apachectl -t -D DUMP_INCLUDES | grep mwaf.conf
-systemctl status mwaf-agent --no-pager
-```
-
-### Nginx
-
-```sh
-/opt/hosting/nginx/sbin/nginx -t
-/opt/hosting/nginx/sbin/nginx -T 2>&1 | grep -A2 'mwaf.conf'
-systemctl status mwaf-agent --no-pager
-```
-
-### 공통
-
-```sh
-test -s /etc/mwaf/active/main.conf
-test -L /etc/mwaf/active
-test -e /var/log/modsecurity/mwaf-audit.jsonl
-journalctl -u mwaf-agent -n 100 --no-pager
-```
-
-Manager의 **서버** 화면에서 `integration_mode=external`, `installation_mode`, 웹서버 버전·빌드 해시, Connector 로드/configtest 상태와 지원 정책 형식을 확인한다. `manual` 서버에는 M-WAF 모듈 패키지 버전 대신 탐지된 Connector 정보가 표시된다.
-
-## DEB 설치가 실패한 경우
-
-### 현재 동작
-
-설치 스크립트는 다음 단계 중 하나라도 실패하면 즉시 종료한다.
-
-1. Manager 연결 또는 기업 설치 토큰·단기 등록 세션 검증
-2. 호환 Agent 패키지와, `package` 방식이면 통합 패키지 조회·다운로드
-3. SHA-256 검증
-4. APT/DPKG 설치
-5. external Connector와 전용 include 확인
-6. Apache/Nginx configtest와 선택적 reload
-7. Agent 설정 생성과 systemd 서비스 시작
-
-다른 형식의 패키지나 서명되지 않은 파일로 자동 전환하지 않는다. APT는 `package` 방식에서 Agent와 통합 패키지를 한 명령으로 설치하고, `manual` 방식에서는 Agent만 설치한다. 실패 시 먼저 처리된 패키지가 `unpacked` 또는 `installed` 상태로 남을 수 있으며 설치 스크립트는 이를 자동 제거하지 않는다.
-
-external 설정 도구가 실패한 경우에는 M-WAF가 관리하는 전용 include, `/etc/mwaf/external` 설정과 로그 회전 설정을 실행 직전 상태로 복원한다. 고객 웹서버 바이너리, Connector와 주 설정 파일은 변경하거나 제거하지 않는다.
-
-### 1. 설치 전 사전진단
-
-설치 전에 다음 항목을 확인하면 일반적인 DEB 실패를 줄일 수 있다.
-
-```sh
-test "$(uname -m)" = x86_64
-. /etc/os-release && test "$ID" = ubuntu && test "$VERSION_ID" = 24.04
-df -h / /var /tmp
-sudo dpkg --audit
-sudo apt-get update
-sudo apt-get --simulate install logrotate
-```
-
-`distro` 모드는 선택한 Apache/Nginx와 ModSecurity Ubuntu 패키지의 의존성도 APT가 해결할 수 있어야 한다. `external` 모드는 웹서버 패키지를 설치하지 않으며 통합 DEB의 런타임 의존성은 `logrotate`뿐이다.
-
-### 2. 실패 상태 확인
-
-먼저 설치 명령의 최초 오류를 보존하고 다음 명령으로 M-WAF 패키지 상태를 확인한다.
+### Agent DEB 실패
 
 ```sh
 sudo dpkg --audit
-dpkg-query -W -f='${binary:Package}\t${db:Status-Abbrev}\t${Version}\n' \
-  mwaf-agent mwaf-modsecurity-apache mwaf-modsecurity-apache-external \
-  mwaf-modsecurity-nginx mwaf-modsecurity-nginx-external 2>/dev/null || true
-```
-
-`ii`는 정상 설치, `iU`는 unpack 후 미설정 상태다. Agent 서비스까지 생성된 경우에는 다음 로그도 확인한다.
-
-```sh
+dpkg-query -W -f='${binary:Package}\t${db:Status-Abbrev}\t${Version}\n' mwaf-agent 2>/dev/null || true
 systemctl status mwaf-agent --no-pager || true
 journalctl -u mwaf-agent -n 100 --no-pager || true
 ```
 
-### 3. 오류 유형별 처리
+잠금, 공간, 저장소, 중단된 DPKG 원인을 먼저 해결한다. Agent DEB를 수동 복사하거나 서명 검증을 우회하지 않는다.
 
-| 오류 | 확인할 내용 | 처리 원칙 |
-|---|---|---|
-| `Could not get lock` | 다른 APT/DPKG 작업 실행 여부 | 기존 패키지 작업이 정상 종료될 때까지 기다린다. 잠금 파일을 강제로 삭제하지 않는다. |
-| `No space left on device` | `/`, `/var`, `/tmp` 여유 공간과 inode | 공간을 확보한 뒤 DPKG 상태를 복구한다. |
-| 의존성 또는 저장소 오류 | Ubuntu 24.04 저장소와 proxy/mirror 상태 | 저장소를 복구하고 `sudo apt-get --fix-broken install`을 실행한다. |
-| `dpkg was interrupted` | `sudo dpkg --audit` 결과 | 원인을 해결한 뒤 `sudo dpkg --configure -a`를 실행한다. |
-| checksum 또는 서명 불일치 | Manager 번들, 프록시 변조, 잘못된 파일 | 설치를 강행하지 않는다. Manager의 같은 태그 번들과 인증서를 확인한다. |
-| 호환 패키지 없음 | OS, amd64, 웹서버 종류, `integration_mode` | 조건을 바꾸어 우회하지 않는다. 커스텀 빌드는 명시적으로 `external`을 선택한다. |
-| Connector 미탐지 | Apache `security2_module`, Nginx Connector 로드 상태 | 대상 웹서버와 호환되는 Connector를 먼저 준비한다. |
-| include/configtest 실패 | 전용 경로가 실제 include 범위인지, 중복 Rule/설정인지 | 주 설정을 임의 교체하지 말고 원인을 수정한 뒤 같은 명령을 재실행한다. |
-| Agent 시작 실패 | `agent.json`, 인증서 경로, Manager 연결, systemd 로그 | Agent 로그를 해결한 뒤 서비스를 다시 시작한다. |
+### 패키지 기반 모듈 실패
 
-복구 명령은 오류에 해당할 때만 사용한다. 특히 `--fix-broken install`이나 `dpkg --configure -a`를 실행하기 전에 현재 진행 중인 패키지 작업이 없는지 확인한다.
+서버 상세의 배포 결과와 Agent 로그를 확인하고 APT가 보고한 정확한 의존성을 점검한다. 실패했다고 Apache/Nginx 전체를 purge하거나 `dpkg --force-*`를 사용하지 않는다.
 
-### 4. 안전한 재시도
+### 커스텀 ZIP 실패
 
-원인을 해결한 다음 처음 검토했던 동일한 설치 명령을 다시 실행한다. external 설정 파일은 M-WAF 관리 marker가 있는 경우에만 갱신되므로 재실행할 수 있다.
+- `selected build is no longer present`: 웹서버가 점검 이후 교체되었다. Agent의 새 점검 결과를 기다린다.
+- `does not match signed package metadata`: ZIP manifest 또는 Manager bundle metadata가 대상 빌드와 다르다. 다시 빌드·서명한다.
+- `unsafe custom module ZIP entry`: 경로 이동 또는 symlink가 포함됐다. 입력 구조를 정리하고 새 ZIP을 만든다.
+- `destination already exists with different contents`: 동일 버전/해시 경로에 다른 파일이 있다. 자동 덮어쓰지 않으므로 원인을 조사한다.
 
-DEB 설치 단계에서 실패하면 같은 기업 설치 토큰으로 다시 실행할 수 있으며 Manager가 새 단기 등록 세션을 발급한다. 기업 설치 토큰은 관리자가 폐기하기 전까지 같은 기업의 여러 서버에서 계속 사용할 수 있다. 토큰을 폐기했거나 원문을 분실했다면 기존 토큰을 폐기한 뒤 새 토큰을 생성한다. 재시도 전에 Manager의 **서버** 목록과 `/var/lib/mwaf-agent/server-id`를 확인한다. 이미 등록된 서버에서는 설치기가 중복 등록을 거부한다.
-
-설치기는 기업 토큰을 `/etc/mwaf-agent/event-verification.token`에 권한 `0600`으로 저장한다. Agent는 이 값을 탐지 이벤트 배치에만 추가하며, Manager는 mTLS로 확인한 서버와 토큰이 같은 기업에 속할 때만 로그를 수신한다. heartbeat, 정책, 패키지, 명령과 인증서 API에는 이 토큰을 보내지 않는다. 기존 Agent를 업그레이드할 때는 Manager의 필수 검증을 켜기 전에 토큰 파일과 `event_verification_token_file` 설정을 함께 배포해야 한다.
-
-다음 복구 방식은 사용하지 않는다.
-
-- `dpkg --force-*`로 호환성이나 의존성 검사를 무시
-- Apache/Nginx 패키지 전체 purge
-- 원인 확인 전 `/etc/mwaf`, `/var/lib/mwaf-agent` 삭제
-- Manager 번들을 거치지 않은 Agent 바이너리나 CRS 수동 복사
-- `distro`와 `external` 패키지 동시 설치
-
-### 5. Agent DEB를 사용할 수 없는 환경
-
-현재 Agent의 공식 설치 형식은 Ubuntu 24.04 amd64 DEB뿐이다. Connector는 `external/manual`로 운영자가 설치할 수 있지만 Agent의 `tar.gz` portable 설치, RPM, ARM64와 수동 파일 복사는 아직 지원하지 않는다. 따라서 Agent DEB를 설치할 수 없는 이미지형 서버나 변경 불가능한 어플라이언스에는 설치를 강행하지 않는다.
-
-향후 portable 설치를 추가하더라도 고객 설치 범위는 Agent와 웹서버 통합 구성 두 개로 유지하고, 다음 조건을 충족해야 한다.
-
-- Manager 서명과 SHA-256 검증
-- systemd 등록 및 전용 사용자·권한 설정
-- 설치 manifest 기반 업그레이드와 제거
-- configtest 실패 시 설정 롤백
-- Manager에서 설치 방식과 버전 식별
-
-이 조건이 구현되기 전에는 수동 복사를 공식 우회 경로로 취급하지 않는다.
-
-## 실패 처리와 운영 주의사항
-
-- `unmanaged integration config` 오류는 지정 경로에 기존 파일이 있다는 뜻이다. 다른 전용 경로를 선택해야 한다.
-- Connector를 찾지 못하면 M-WAF가 임의 모듈을 설치하지 않고 중단한다.
-- configtest 실패 시 웹서버 오류 로그를 확인하고 기존 ModSecurity 설정의 중복 Include와 Rule ID를 점검한다.
-- 웹서버를 다시 컴파일하거나 Nginx configure option을 변경했다면 Connector도 다시 호환 빌드하고 configtest를 수행해야 한다.
-- Agent의 통합 모드를 `external`에서 `distro`로 자동 전환하지 않는다. 전환은 별도 유지보수 작업으로 진행한다.
-- GitHub Actions의 external 시험은 M-WAF 전용 include, 절대 바이너리 경로, Connector 재사용, 패키지 무의존성과 configtest를 확인한다. 이어서 Apache/Nginx를 실제 기동해 고정 시험 규칙의 `403` 차단과 JSON 감사 로그 생성을 검증한다. 고객사의 모든 컴파일러와 ABI 조합을 보장하지는 않는다.
+커스텀 ZIP은 고객 설정을 건드리지 않으므로 설치 실패만으로 웹서버가 reload되지는 않는다. 운영자가 include를 반영하기 전까지 기존 웹 서비스는 그대로 유지된다.

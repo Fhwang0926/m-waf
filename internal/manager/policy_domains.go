@@ -2,11 +2,16 @@ package manager
 
 import (
 	"database/sql"
-	"strings"
+	"fmt"
 	"time"
 
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
 )
+
+type policyServerChoice struct {
+	Server   ServerRecord
+	Selected bool
+}
 
 const (
 	PolicyStrategyManual    = "MANUAL"
@@ -105,6 +110,7 @@ type EnterprisePolicyRecord struct {
 	HasActiveRollout           bool
 	MigrationRequired          bool
 	MigrationDetail            string
+	ServerCount                int
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
 }
@@ -127,20 +133,7 @@ func (p EnterprisePolicyRecord) StrategyLabel() string {
 }
 
 func (p EnterprisePolicyRecord) TargetLabel() string {
-	kind, _, ok := strings.Cut(p.Target, ":")
-	if !ok {
-		return "기존 대상"
-	}
-	switch kind {
-	case "enterprise":
-		return "기업 기본"
-	case "server":
-		return "개별 서버"
-	case "group":
-		return "서버 그룹"
-	default:
-		return "기존 대상"
-	}
+	return fmt.Sprintf("연결 서버 %d대", p.ServerCount)
 }
 
 type PolicyRevisionRecord struct {
@@ -189,6 +182,7 @@ type PolicyRolloutTargetRecord struct {
 	ResumeStatus           string
 	SourceAgentPackageID   string
 	SourceModulePackageID  string
+	SourceRevisionID       string
 	TargetAgentPackageID   string
 	TargetModulePackageID  string
 	TransitionRevisionID   string

@@ -27,10 +27,16 @@ import (
 var policyRevisionName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 
 type PolicyApplier struct {
-	cfg config.Agent
+	cfg              config.Agent
+	webServerControl string
 }
 
 func NewPolicyApplier(cfg config.Agent) *PolicyApplier { return &PolicyApplier{cfg: cfg} }
+
+func (p *PolicyApplier) ConfigureWebServer(binary, controlMode string) {
+	p.cfg.WebServerBinary = binary
+	p.webServerControl = model.NormalizeWebServerControl(controlMode)
+}
 
 func (p *PolicyApplier) Apply(parent context.Context, webServer string, state model.DesiredState, artifact []byte) error {
 	if state.Mode != "DetectionOnly" && state.Mode != "On" {
@@ -231,6 +237,17 @@ func (p *PolicyApplier) verifySignature(artifact []byte, encoded string) error {
 }
 
 func (p *PolicyApplier) testAndReload(ctx context.Context, webServer string) error {
+	if model.NormalizeWebServerControl(p.webServerControl) == model.WebServerControlHooks {
+		if err := validateControlHooks(webServer); err != nil {
+			return err
+		}
+		for _, action := range []string{"configtest", "reload"} {
+			if err := runControlHook(ctx, webServer, action, p.cfg.WebServerBinary, p.cfg.PolicyPath); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	var commands [][]string
 	switch webServer {
 	case "apache":
@@ -241,7 +258,7 @@ func (p *PolicyApplier) testAndReload(ctx context.Context, webServer string) err
 				binary = "httpd"
 			}
 		}
-		commands = [][]string{{binary, "configtest"}, {binary, "graceful"}}
+		commands = [][]string{{binary, "-t"}, {binary, "-k", "graceful"}}
 	case "nginx":
 		binary := p.cfg.WebServerBinary
 		if binary == "" {

@@ -141,10 +141,37 @@ func (s ServerRecord) LastHeartbeatAge() string {
 		return fmt.Sprintf("%d일 전", int(elapsed/(24*time.Hour)))
 	}
 }
-func (s ServerRecord) PolicyDeploymentLabel() string      { return statusLabel(s.PolicyDeploymentStatus) }
-func (s ServerRecord) PolicyDeploymentClass() string      { return statusClass(s.PolicyDeploymentStatus) }
-func (s ServerRecord) PackageDeploymentLabel() string     { return statusLabel(s.PackageDeploymentStatus) }
-func (s ServerRecord) PackageDeploymentClass() string     { return statusClass(s.PackageDeploymentStatus) }
+func (s ServerRecord) PolicyDeploymentLabel() string  { return statusLabel(s.PolicyDeploymentStatus) }
+func (s ServerRecord) PolicyDeploymentClass() string  { return statusClass(s.PolicyDeploymentStatus) }
+func (s ServerRecord) PackageDeploymentLabel() string { return statusLabel(s.PackageDeploymentStatus) }
+func (s ServerRecord) PackageDeploymentClass() string { return statusClass(s.PackageDeploymentStatus) }
+func (s ServerRecord) InstallationStage() string {
+	if s.PackageDeploymentStatus == "PENDING" {
+		return "INSTALLING"
+	}
+	if s.Inventory.InstallationStage == "" {
+		return "PLAN_REQUIRED"
+	}
+	return s.Inventory.InstallationStage
+}
+func (s ServerRecord) InstallationStageLabel() string {
+	switch s.InstallationStage() {
+	case "PROTECTED":
+		return "보호 중"
+	case "INTEGRATION_REQUIRED":
+		return "웹서버 연동 필요"
+	case "INSTALLING":
+		return "설치 중"
+	default:
+		return "설치 유형 선택 필요"
+	}
+}
+func (s ServerRecord) InstallationStageClass() string {
+	if s.InstallationStage() == "PROTECTED" {
+		return "ok"
+	}
+	return "warn"
+}
 func (s ServerRecord) LastCommandStatusLabel() string     { return statusLabel(s.LastCommandStatus) }
 func (s ServerRecord) LastCommandStatusClass() string     { return statusClass(s.LastCommandStatus) }
 func (p EnterprisePolicyRecord) CurrentModeLabel() string { return modeLabel(p.CurrentMode) }
@@ -163,6 +190,9 @@ func (p PolicyRolloutTargetRecord) StatusClass() string { return statusClass(p.S
 func (p PolicyRolloutRecord) TypeLabel() string {
 	switch p.Type {
 	case "SEED":
+		if p.FromRevisionID != "" {
+			return "서버 연결·이동"
+		}
 		return "초기 적용"
 	case "UPDATE":
 		return "버전 업데이트"

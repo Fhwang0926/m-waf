@@ -27,3 +27,13 @@ ubuntu_24_04:
     minimum_version: 1.0.3-1build3
     connector: https://github.com/owasp-modsecurity/ModSecurity-nginx
     engine_package: libmodsecurity3
+debian_12:
+  apache_module:
+    package: libapache2-mod-security2
+    minimum_version: 2.9.7-1
+    upstream: https://github.com/owasp-modsecurity/ModSecurity/tree/v2/master
+  nginx_module:
+    package: libnginx-mod-http-modsecurity
+    minimum_version: 1.0.3-1
+    connector: https://github.com/owasp-modsecurity/ModSecurity-nginx
+    engine_package: libmodsecurity3

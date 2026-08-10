@@ -16,7 +16,7 @@ import (
 type OverviewFilter struct {
 	Range        string
 	EnterpriseID string
-	GroupID      string
+	PolicyID     string
 	ServerID     string
 	Since        time.Time
 }
@@ -103,29 +103,12 @@ func (s *Store) Overview(ctx context.Context, filter OverviewFilter, now time.Ti
 	if err != nil {
 		return OverviewData{}, err
 	}
-	groupMembers := map[string]bool(nil)
-	if filter.GroupID != "" {
-		groupMembers = make(map[string]bool)
-		groups, groupErr := s.ListGroups(ctx, filter.EnterpriseID)
-		if groupErr != nil {
-			return OverviewData{}, groupErr
-		}
-		for _, group := range groups {
-			if group.ID != filter.GroupID {
-				continue
-			}
-			for _, member := range group.Members {
-				groupMembers[member.ID] = true
-			}
-			break
-		}
-	}
 	selectedServers := make(map[string]bool)
 	for _, server := range servers {
 		if filter.ServerID != "" && server.ID != filter.ServerID {
 			continue
 		}
-		if groupMembers != nil && !groupMembers[server.ID] {
+		if filter.PolicyID != "" && server.EnterprisePolicyID != filter.PolicyID {
 			continue
 		}
 		selectedServers[server.ID] = true
@@ -154,7 +137,7 @@ func (s *Store) Overview(ctx context.Context, filter OverviewFilter, now time.Ti
 	}
 
 	where, args := overviewIncidentWhere(filter)
-	countQuery := `SELECT COUNT(*),COALESCE(SUM(si.blocked),0),COUNT(DISTINCT si.client_ip) FROM security_incidents si JOIN servers s ON s.id=si.agent_id` + where
+	countQuery := `SELECT COUNT(*),COALESCE(SUM(si.blocked),0),COUNT(DISTINCT si.client_ip) FROM security_incidents si JOIN servers s ON s.id=si.agent_id LEFT JOIN policy_revisions pr ON pr.id=si.policy_revision` + where
 	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&data.Summary.EventCount, &data.Summary.BlockedCount, &data.Summary.UniqueSourceIPs); err != nil {
 		return OverviewData{}, err
 	}
@@ -163,7 +146,7 @@ func (s *Store) Overview(ctx context.Context, filter OverviewFilter, now time.Ti
 	}
 
 	seriesQuery := `SELECT FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(si.occurred_at)/?)*?),COUNT(*),COALESCE(SUM(si.blocked),0)
-FROM security_incidents si JOIN servers s ON s.id=si.agent_id` + where + ` GROUP BY 1 ORDER BY 1`
+FROM security_incidents si JOIN servers s ON s.id=si.agent_id LEFT JOIN policy_revisions pr ON pr.id=si.policy_revision` + where + ` GROUP BY 1 ORDER BY 1`
 	seriesArgs := append([]any{bucketSeconds, bucketSeconds}, args...)
 	rows, err := s.db.QueryContext(ctx, seriesQuery, seriesArgs...)
 	if err != nil {
@@ -210,7 +193,7 @@ FROM security_incidents si JOIN servers s ON s.id=si.agent_id` + where + ` GROUP
 		}
 	}
 
-	incidentFilter := IncidentFilter{EnterpriseID: filter.EnterpriseID, GroupID: filter.GroupID, ServerID: filter.ServerID, Since: since}
+	incidentFilter := IncidentFilter{EnterpriseID: filter.EnterpriseID, PolicyID: filter.PolicyID, ServerID: filter.ServerID, Since: since}
 	data.Recent, err = s.ListIncidents(ctx, "", incidentFilter, 8)
 	if err != nil {
 		return OverviewData{}, err
@@ -224,7 +207,7 @@ FROM security_incidents si JOIN servers s ON s.id=si.agent_id` + where + ` GROUP
 		if filter.EnterpriseID != "" && policy.EnterpriseID != filter.EnterpriseID {
 			continue
 		}
-		if filter.ServerID != "" || filter.GroupID != "" {
+		if filter.ServerID != "" || filter.PolicyID != "" {
 			winners, winnerErr := s.enterprisePolicyTargetsForOverview(ctx, policy, selectedServers)
 			if winnerErr != nil {
 				return OverviewData{}, winnerErr
@@ -264,9 +247,9 @@ func (s *Store) overviewServerCounts(ctx context.Context, filter OverviewFilter,
 		conditions = append(conditions, "s.enterprise_id=?")
 		args = append(args, filter.EnterpriseID)
 	}
-	if filter.GroupID != "" {
-		conditions = append(conditions, `EXISTS (SELECT 1 FROM server_group_members gm JOIN server_groups g ON g.id=gm.group_id WHERE gm.server_id=s.id AND g.id=? AND g.enterprise_id=s.enterprise_id)`)
-		args = append(args, filter.GroupID)
+	if filter.PolicyID != "" {
+		conditions = append(conditions, `EXISTS (SELECT 1 FROM enterprise_policy_servers eps JOIN enterprise_policies ep ON ep.id=eps.enterprise_policy_id WHERE eps.server_id=s.id AND ep.id=? AND ep.enterprise_id=s.enterprise_id)`)
+		args = append(args, filter.PolicyID)
 	}
 	if filter.ServerID != "" {
 		conditions = append(conditions, "s.id=?")
@@ -287,9 +270,9 @@ func overviewEventWhere(filter OverviewFilter) (string, []any) {
 		conditions = append(conditions, "s.enterprise_id=?")
 		args = append(args, filter.EnterpriseID)
 	}
-	if filter.GroupID != "" {
-		conditions = append(conditions, `EXISTS (SELECT 1 FROM server_group_members gm JOIN server_groups g ON g.id=gm.group_id WHERE gm.server_id=s.id AND g.id=? AND g.enterprise_id=s.enterprise_id)`)
-		args = append(args, filter.GroupID)
+	if filter.PolicyID != "" {
+		conditions = append(conditions, `pr.enterprise_policy_id=? AND EXISTS (SELECT 1 FROM enterprise_policies ep WHERE ep.id=pr.enterprise_policy_id AND ep.enterprise_id=s.enterprise_id)`)
+		args = append(args, filter.PolicyID)
 	}
 	if filter.ServerID != "" {
 		conditions = append(conditions, "se.agent_id=?")
@@ -305,9 +288,9 @@ func overviewIncidentWhere(filter OverviewFilter) (string, []any) {
 		conditions = append(conditions, "si.enterprise_id=?")
 		args = append(args, filter.EnterpriseID)
 	}
-	if filter.GroupID != "" {
-		conditions = append(conditions, `EXISTS (SELECT 1 FROM server_group_members gm JOIN server_groups g ON g.id=gm.group_id WHERE gm.server_id=si.agent_id AND g.id=? AND g.enterprise_id=si.enterprise_id)`)
-		args = append(args, filter.GroupID)
+	if filter.PolicyID != "" {
+		conditions = append(conditions, `pr.enterprise_policy_id=? AND EXISTS (SELECT 1 FROM enterprise_policies ep WHERE ep.id=pr.enterprise_policy_id AND ep.enterprise_id=si.enterprise_id)`)
+		args = append(args, filter.PolicyID)
 	}
 	if filter.ServerID != "" {
 		conditions = append(conditions, "si.agent_id=?")
@@ -317,7 +300,7 @@ func overviewIncidentWhere(filter OverviewFilter) (string, []any) {
 }
 
 func (s *Store) overviewRanks(ctx context.Context, field, extra, urlPrefix, where string, args []any) ([]OverviewRank, error) {
-	query := `SELECT ` + field + `,` + field + `,COUNT(*),COALESCE(SUM(se.blocked),0) FROM security_events se JOIN servers s ON s.id=se.agent_id` + where + ` AND ` + extra + ` GROUP BY 1 ORDER BY 3 DESC LIMIT 5`
+	query := `SELECT ` + field + `,` + field + `,COUNT(*),COALESCE(SUM(se.blocked),0) FROM security_events se JOIN servers s ON s.id=se.agent_id LEFT JOIN policy_revisions pr ON pr.id=se.policy_revision` + where + ` AND ` + extra + ` GROUP BY 1 ORDER BY 3 DESC LIMIT 5`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -336,7 +319,7 @@ func (s *Store) overviewRanks(ctx context.Context, field, extra, urlPrefix, wher
 }
 
 func (s *Store) overviewIncidentRanks(ctx context.Context, field, extra, urlPrefix, where string, args []any) ([]OverviewRank, error) {
-	query := `SELECT ` + field + `,` + field + `,COUNT(*),COALESCE(SUM(si.blocked),0) FROM security_incidents si JOIN servers s ON s.id=si.agent_id` + where + ` AND ` + extra + ` GROUP BY 1 ORDER BY 3 DESC LIMIT 5`
+	query := `SELECT ` + field + `,` + field + `,COUNT(*),COALESCE(SUM(si.blocked),0) FROM security_incidents si JOIN servers s ON s.id=si.agent_id LEFT JOIN policy_revisions pr ON pr.id=si.policy_revision` + where + ` AND ` + extra + ` GROUP BY 1 ORDER BY 3 DESC LIMIT 5`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -355,7 +338,7 @@ func (s *Store) overviewIncidentRanks(ctx context.Context, field, extra, urlPref
 }
 
 func (s *Store) enterprisePolicyTargetsForOverview(ctx context.Context, policy EnterprisePolicyRecord, selected map[string]bool) (bool, error) {
-	_, ids, err := s.ResolvePolicyTarget(ctx, policy.EnterpriseID, policy.Target)
+	ids, err := s.ListPolicyServerIDs(ctx, policy.EnterpriseID, policy.ID)
 	if err != nil {
 		return false, nil
 	}
@@ -501,6 +484,10 @@ func (c AgentCommandRecord) CommandLabel() string {
 		return "서버 재시작"
 	case "server_stop":
 		return "서버 종료"
+	case "web_control_standard":
+		return "표준 웹서버 제어 사용"
+	case "web_control_hooks":
+		return "고객 Hook 사용"
 	default:
 		return c.Command
 	}

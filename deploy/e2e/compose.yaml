@@ -7,6 +7,7 @@ services:
     build:
       context: ../e2e/customer
       args:
+        CUSTOMER_BASE_IMAGE: ${MWAF_E2E_CUSTOMER_IMAGE:-docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea}
         WEB_SERVER: apache
     platform: linux/amd64
     hostname: mwaf-e2e-apache
@@ -50,6 +51,7 @@ services:
     build:
       context: ../e2e/customer
       args:
+        CUSTOMER_BASE_IMAGE: ${MWAF_E2E_CUSTOMER_IMAGE:-docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea}
         WEB_SERVER: nginx
     platform: linux/amd64
     hostname: mwaf-e2e-nginx

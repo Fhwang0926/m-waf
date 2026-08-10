@@ -20,6 +20,7 @@
   let taskDialogTrigger = null;
   let globalBusyDialog = null;
   let globalBusyTimer = 0;
+  const enrollmentCommandTemplates = new WeakMap();
 
   function formatKSTDateTime(value) {
     const date = value instanceof Date ? value : new Date(value);
@@ -130,6 +131,49 @@
   async function copyText(text) {
     if (!navigator.clipboard || !window.isSecureContext) throw new Error("clipboard unavailable");
     await navigator.clipboard.writeText(text);
+  }
+
+  async function copyEnrollmentCommand(button) {
+    const target = document.getElementById(button.dataset.commandTarget || "");
+    const status = document.getElementById(button.dataset.copyStatus || "copy-status");
+    if (!target) return;
+    if (!enrollmentCommandTemplates.has(target)) enrollmentCommandTemplates.set(target, target.textContent.trim());
+    const template = enrollmentCommandTemplates.get(target);
+    if (!template.includes("__MWAF_ENROLLMENT_TOKEN__")) {
+      if (status) status.textContent = "설치 명령 형식을 확인할 수 없습니다.";
+      return;
+    }
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    if (status) status.textContent = "15분 단기 등록 토큰을 준비하는 중입니다.";
+    showGlobalBusy("설치 명령을 안전하게 준비하는 중입니다.");
+    let command = "";
+    try {
+      const response = await fetch("/api/v1/enrollment-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": button.dataset.csrf || "", Accept: "application/json" },
+        body: JSON.stringify({ enterprise_id: button.dataset.enterpriseId || "", label: "관리자 화면 빠른 설치" }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "단기 등록 토큰을 만들지 못했습니다.");
+      if (!/^[A-Za-z0-9_-]{32,128}$/.test(data.token || "")) throw new Error("Manager가 올바른 단기 등록 토큰을 반환하지 않았습니다.");
+      command = template.replace("__MWAF_ENROLLMENT_TOKEN__", data.token);
+      target.textContent = command;
+      await copyText(command);
+      const expiresAt = formatKSTDateTime(data.expires_at);
+      if (status) status.textContent = `토큰이 포함된 설치 명령을 복사했습니다.${expiresAt ? ` ${expiresAt} KST 전에 실행하세요.` : ""}`;
+    } catch (error) {
+      if (status) status.textContent = command ? "명령은 생성했지만 클립보드 복사에 실패했습니다. 아래 명령을 직접 복사하세요." : error.message || "설치 명령을 만들지 못했습니다.";
+      if (command) {
+        const details = target.closest("details");
+        if (details) details.open = true;
+        target.focus();
+      }
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+      hideGlobalBusy();
+    }
   }
 
   function setSidebar(open) {
@@ -740,10 +784,11 @@
     return {
       policy_id: data.get("policy_id") || "",
       expected_revision_id: data.get("expected_revision_id") || "",
+      enterprise_id: data.get("enterprise_id") || "",
+      server_ids: data.getAll("server_ids"),
       template_key: data.get("template_key") || "",
       name: data.get("name") || "",
       description: data.get("description") || "",
-      target: data.get("target") || "",
       mode: data.get("mode") || "",
       paranoia_level: Number(data.get("paranoia_level")),
       executing_paranoia_level: Number(data.get("executing_paranoia_level")),
@@ -1422,6 +1467,11 @@
         const summary = $("summary", details);
         if (summary) summary.focus();
       }
+      return;
+    }
+    const enrollmentCommandButton = event.target.closest("[data-enrollment-command]");
+    if (enrollmentCommandButton) {
+      await copyEnrollmentCommand(enrollmentCommandButton);
       return;
     }
     const button = event.target.closest("[data-copy-target], [data-copy-text]");

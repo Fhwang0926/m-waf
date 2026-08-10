@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Fhwang0926/m-waf/internal/model"
 )
 
 const (
@@ -37,18 +39,30 @@ type incidentPageResult struct {
 	HasNext     bool
 }
 
+type serverInstallationCandidateView struct {
+	Kind               string
+	Version            string
+	BuildHash          string
+	Binary             string
+	PackageManaged     bool
+	ConfigTestOK       bool
+	PackageAvailable   bool
+	CustomZIPAvailable bool
+}
+
+func (c serverInstallationCandidateView) Label() string {
+	if c.Kind == "apache" {
+		return "Apache HTTP Server"
+	}
+	if c.Kind == "nginx" {
+		return "Nginx"
+	}
+	return c.Kind
+}
+
 type filterChip struct {
 	Label     string
 	RemoveURL string
-}
-
-type groupPolicyView struct {
-	Policy          EnterprisePolicyRecord
-	RolloutLabel    string
-	RolloutClass    string
-	CompletedCount  int
-	TargetCount     int
-	ProgressPercent int
 }
 
 func (s *Server) effectiveEnterpriseFilter(r *http.Request, requested string) (string, bool) {
@@ -70,7 +84,7 @@ func overviewFilterFromRequest(r *http.Request, enterpriseID string) OverviewFil
 	return OverviewFilter{
 		Range:        strings.TrimSpace(r.URL.Query().Get("range")),
 		EnterpriseID: enterpriseID,
-		GroupID:      truncate(strings.TrimSpace(r.URL.Query().Get("group_id")), 64),
+		PolicyID:     truncate(strings.TrimSpace(r.URL.Query().Get("policy_id")), 64),
 		ServerID:     truncate(strings.TrimSpace(r.URL.Query().Get("server_id")), 64),
 	}
 }
@@ -78,7 +92,7 @@ func overviewFilterFromRequest(r *http.Request, enterpriseID string) OverviewFil
 func (s *Server) loadOverview(ctx context.Context, filter OverviewFilter, now time.Time) (OverviewData, error) {
 	rangeKey, _, _, _ := normalizeOverviewRange(filter.Range, now)
 	filter.Range = rangeKey
-	cacheKey := strings.Join([]string{filter.Range, filter.EnterpriseID, filter.GroupID, filter.ServerID}, "\x00")
+	cacheKey := strings.Join([]string{filter.Range, filter.EnterpriseID, filter.PolicyID, filter.ServerID}, "\x00")
 	s.overviewCacheMu.Lock()
 	if cached, ok := s.overviewCache[cacheKey]; ok && cached.ExpiresAt.After(now) {
 		s.overviewCacheMu.Unlock()
@@ -113,7 +127,7 @@ func eventFilterFromRequest(r *http.Request, enterpriseID string) (EventFilter, 
 	}
 	filter := EventFilter{
 		EnterpriseID: enterpriseID,
-		GroupID:      truncate(strings.TrimSpace(query.Get("group_id")), 64),
+		PolicyID:     truncate(strings.TrimSpace(query.Get("policy_id")), 64),
 		ServerID:     truncate(strings.TrimSpace(serverID), 64),
 		Severity:     strings.TrimSpace(query.Get("severity")),
 		RuleID:       truncate(strings.TrimSpace(query.Get("rule_id")), 64),
@@ -228,7 +242,7 @@ func eventFilterChips(r *http.Request, session sessionData) []filterChip {
 		Prefix string
 	}{
 		{"range", "기간"},
-		{"enterprise_id", "기업"}, {"group_id", "그룹"}, {"server", "서버"}, {"server_id", "서버"},
+		{"enterprise_id", "기업"}, {"policy_id", "보호 정책"}, {"server", "서버"}, {"server_id", "서버"},
 		{"result", "처리"}, {"category", "공격 유형"}, {"severity", "위험도"}, {"rule_id", "Rule"}, {"q", "검색"},
 	}
 	chips := make([]filterChip, 0)
@@ -240,7 +254,7 @@ func eventFilterChips(r *http.Request, session sessionData) []filterChip {
 		}
 		seen[item.Prefix] = true
 		labelValue := value
-		if item.Key == "enterprise_id" || item.Key == "group_id" || item.Key == "server" || item.Key == "server_id" {
+		if item.Key == "enterprise_id" || item.Key == "policy_id" || item.Key == "server" || item.Key == "server_id" {
 			labelValue = "지정됨"
 		}
 		if item.Key == "result" {
@@ -320,7 +334,7 @@ func (s *Server) apiIncidents(w http.ResponseWriter, r *http.Request) {
 		category = ""
 	}
 	filter := IncidentFilter{
-		EnterpriseID: enterpriseID, GroupID: eventFilter.GroupID, ServerID: eventFilter.ServerID,
+		EnterpriseID: enterpriseID, PolicyID: eventFilter.PolicyID, ServerID: eventFilter.ServerID,
 		Category: category, Severity: eventFilter.Severity, RuleID: eventFilter.RuleID, Query: eventFilter.Query,
 		Blocked: eventFilter.Blocked, Since: eventFilter.Since,
 	}
@@ -378,12 +392,14 @@ func (s *Server) serverDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allServers, err := s.store.ListServers(r.Context(), server.EnterpriseID, 5000)
-	if err == nil {
-		for _, item := range allServers {
-			if item.ID == server.ID {
-				server = item
-				break
-			}
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "서버의 보호 정책 상태를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	for _, item := range allServers {
+		if item.ID == server.ID {
+			server = item
+			break
 		}
 	}
 	if s.catalog != nil {
@@ -395,22 +411,6 @@ func (s *Server) serverDetail(w http.ResponseWriter, r *http.Request) {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 제어 이력을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	groups, err := s.store.ListGroups(r.Context(), server.EnterpriseID)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	memberGroups := make([]GroupRecord, 0)
-	groupIDs := make(map[string]bool)
-	for _, group := range groups {
-		for _, member := range group.Members {
-			if member.ID == server.ID {
-				memberGroups = append(memberGroups, group)
-				groupIDs[group.ID] = true
-				break
-			}
-		}
-	}
 	policies, err := s.store.ListEnterprisePolicies(r.Context(), server.EnterpriseID, 5000)
 	if err != nil {
 		s.renderAdminError(w, r, http.StatusInternalServerError, "적용 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
@@ -418,70 +418,35 @@ func (s *Server) serverDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	assigned := make([]EnterprisePolicyRecord, 0)
 	for _, policy := range policies {
-		kind, id, found := strings.Cut(policy.Target, ":")
-		if found && (kind == "server" && id == server.ID || kind == "group" && groupIDs[id]) {
+		if policy.ID == server.EnterprisePolicyID {
 			assigned = append(assigned, policy)
-		}
-	}
-	data := map[string]any{"Server": server, "Commands": commands, "Groups": memberGroups, "Policies": assigned, "Notice": r.URL.Query().Get("notice"), "ScopeLabel": server.EnterpriseName}
-	_ = s.templates.ExecuteTemplate(w, "server-detail.html", s.viewData(r, "servers", data))
-}
-
-func (s *Server) groupDetail(w http.ResponseWriter, r *http.Request) {
-	session := sessionFrom(r)
-	groups, err := s.store.ListGroups(r.Context(), session.ScopeEnterpriseID())
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	var selected *GroupRecord
-	for i := range groups {
-		if groups[i].ID == r.PathValue("id") {
-			selected = &groups[i]
 			break
 		}
 	}
-	if selected == nil {
-		s.renderAdminError(w, r, http.StatusNotFound, "서버 그룹을 찾을 수 없습니다", "현재 기업 범위에서 접근할 수 없는 그룹입니다.")
-		return
+	installationCandidates := make([]serverInstallationCandidateView, 0, len(server.Inventory.WebServerCandidates))
+	candidates := server.Inventory.WebServerCandidates
+	if len(candidates) == 0 && server.Inventory.WebServer != "" {
+		candidates = []model.WebServerCandidate{{Kind: server.Inventory.WebServer, Version: server.Inventory.WebServerVersion, BuildHash: server.Inventory.WebServerBuild, PackageManaged: model.NormalizeIntegrationMode(server.Inventory.IntegrationMode) == model.IntegrationModeDistro}}
 	}
-	policies, err := s.store.ListEnterprisePolicies(r.Context(), selected.EnterpriseID, 5000)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "그룹 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	groupPolicies := make([]groupPolicyView, 0)
-	for _, policy := range policies {
-		if policy.Target != "group:"+selected.ID {
-			continue
-		}
-		view := groupPolicyView{Policy: policy, RolloutLabel: policy.RolloutStatusLabel(), RolloutClass: policy.RolloutStatusClass()}
-		rollouts, rolloutErr := s.store.ListPolicyRollouts(r.Context(), selected.EnterpriseID, policy.ID, 1)
-		if rolloutErr != nil {
-			s.renderAdminError(w, r, http.StatusInternalServerError, "그룹 정책 배포 현황을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-			return
-		}
-		if len(rollouts) > 0 {
-			view.RolloutLabel = rollouts[0].StatusLabel()
-			view.RolloutClass = rollouts[0].StatusClass()
-			targets, targetErr := s.store.ListPolicyRolloutTargets(r.Context(), rollouts[0].ID)
-			if targetErr != nil {
-				s.renderAdminError(w, r, http.StatusInternalServerError, "그룹 정책 서버 결과를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-				return
-			}
-			view.TargetCount = len(targets)
-			for _, target := range targets {
-				if target.Status == "APPLIED" || target.Status == "ROLLED_BACK" || target.Status == "FAILED" {
-					view.CompletedCount++
-				}
-			}
-			if view.TargetCount > 0 {
-				view.ProgressPercent = view.CompletedCount * 100 / view.TargetCount
+	for _, candidate := range candidates {
+		view := serverInstallationCandidateView{Kind: candidate.Kind, Version: candidate.Version, BuildHash: candidate.BuildHash, Binary: candidate.Binary, PackageManaged: candidate.PackageManaged, ConfigTestOK: candidate.ConfigTestOK}
+		if s.catalog != nil {
+			inventory := server.Inventory
+			inventory.WebServer, inventory.WebServerVersion, inventory.WebServerBuild = candidate.Kind, candidate.Version, candidate.BuildHash
+			if candidate.PackageManaged {
+				inventory.IntegrationMode, inventory.InstallationMode = model.IntegrationModeDistro, model.InstallationModePackage
+				_, _, resolveErr := s.catalog.Resolve(inventory)
+				view.PackageAvailable = resolveErr == nil
+			} else {
+				inventory.IntegrationMode, inventory.InstallationMode = model.IntegrationModeExternal, model.InstallationModeCustomZIP
+				_, _, resolveErr := s.catalog.Resolve(inventory)
+				view.CustomZIPAvailable = resolveErr == nil
 			}
 		}
-		groupPolicies = append(groupPolicies, view)
+		installationCandidates = append(installationCandidates, view)
 	}
-	_ = s.templates.ExecuteTemplate(w, "group-detail.html", s.viewData(r, "groups", map[string]any{"Group": selected, "GroupPolicies": groupPolicies, "ScopeLabel": selected.EnterpriseName}))
+	data := map[string]any{"Server": server, "Commands": commands, "Policies": assigned, "InstallationCandidates": installationCandidates, "Notice": r.URL.Query().Get("notice"), "ScopeLabel": server.EnterpriseName}
+	_ = s.templates.ExecuteTemplate(w, "server-detail.html", s.viewData(r, "servers", data))
 }
 
 func (s *Server) auditLogs(w http.ResponseWriter, r *http.Request) {

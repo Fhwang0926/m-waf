@@ -29,3 +29,47 @@ func TestWebServerInfoUsesConfiguredBinary(t *testing.T) {
 		t.Fatalf("unexpected custom web-server inventory: version=%q build=%q", version, build)
 	}
 }
+
+func TestInstallationSelectionDefaultsAndValidatesControlMode(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "installation-selection.json")
+	legacy := []byte(`{"web_server":"nginx","web_server_binary":"/opt/hosting/nginx","integration_mode":"external","installation_mode":"custom_zip"}`)
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	selected, ok := readInstallationSelection(directory)
+	if !ok || selected.WebServerControl != "standard" {
+		t.Fatalf("legacy selection did not default to standard control: ok=%v selection=%#v", ok, selected)
+	}
+	invalid := []byte(`{"web_server":"nginx","web_server_binary":"/opt/hosting/nginx","web_server_control":"shell","integration_mode":"external","installation_mode":"custom_zip"}`)
+	if err := os.WriteFile(path, invalid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readInstallationSelection(directory); ok {
+		t.Fatal("arbitrary web-server control mode was accepted")
+	}
+}
+
+func TestControlHookPathsStayUnderOptMWAF(t *testing.T) {
+	if got := controlHookPath("apache", "reload"); got != "/opt/m-waf/hooks/apache/reload" {
+		t.Fatalf("unexpected hook path %q", got)
+	}
+}
+
+func TestAgentCanReturnInstalledServerToStandardControl(t *testing.T) {
+	directory := t.TempDir()
+	selection := []byte(`{"web_server":"apache","web_server_binary":"/opt/hosting/apachectl","web_server_control":"hooks","integration_mode":"external","installation_mode":"custom_zip"}`)
+	if err := os.WriteFile(filepath.Join(directory, "installation-selection.json"), selection, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	agent := Agent{}
+	agent.cfg.StateDirectory = directory
+	handled, _, err := agent.applyWebServerControlCommand("web_control_standard")
+	if err != nil || !handled {
+		t.Fatalf("standard control command failed: handled=%v err=%v", handled, err)
+	}
+	updated, ok := readInstallationSelection(directory)
+	if !ok || updated.WebServerControl != "standard" {
+		t.Fatalf("control mode was not updated: ok=%v selection=%#v", ok, updated)
+	}
+}

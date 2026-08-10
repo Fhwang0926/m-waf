@@ -30,10 +30,11 @@ type policyValidationRequest struct {
 	ConfigSchemaVersion    int                `json:"config_schema_version,omitempty"`
 	PolicyID               string             `json:"policy_id"`
 	ExpectedRevision       string             `json:"expected_revision_id"`
+	EnterpriseID           string             `json:"enterprise_id,omitempty"`
+	ServerIDs              []string           `json:"server_ids"`
 	TemplateKey            string             `json:"template_key"`
 	Name                   string             `json:"name"`
 	Description            string             `json:"description"`
-	Target                 string             `json:"target"`
 	Mode                   string             `json:"mode"`
 	ParanoiaLevel          int                `json:"paranoia_level"`
 	InboundScore           int                `json:"inbound_score"`
@@ -66,7 +67,7 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	request.Name = truncate(strings.TrimSpace(request.Name), 255)
 	request.Description = truncate(strings.TrimSpace(request.Description), 1024)
-	request.Target = strings.TrimSpace(request.Target)
+	request.EnterpriseID = strings.TrimSpace(request.EnterpriseID)
 	request.ExpectedRevision = strings.TrimSpace(request.ExpectedRevision)
 	fieldErrors := make(map[string]string)
 	if request.Name == "" {
@@ -96,7 +97,6 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session := sessionFrom(r)
-	var policy *EnterprisePolicyRecord
 	var policyTemplate systempolicy.Template
 	if request.PolicyID != "" {
 		loaded, loadErr := s.store.EnterprisePolicyByID(r.Context(), session.ScopeEnterpriseID(), truncate(strings.TrimSpace(request.PolicyID), 64))
@@ -104,8 +104,12 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusNotFound, "policy not found")
 			return
 		}
-		policy = &loaded
-		request.Target = loaded.Target
+		request.EnterpriseID = loaded.EnterpriseID
+		request.ServerIDs, loadErr = s.store.ListPolicyServerIDs(r.Context(), loaded.EnterpriseID, loaded.ID)
+		if loadErr != nil {
+			writeProblem(w, http.StatusInternalServerError, "policy servers unavailable")
+			return
+		}
 		if request.ExpectedRevision == "" || request.ExpectedRevision != loaded.CurrentRevisionID {
 			fieldErrors["expected_revision_id"] = "다른 관리자가 먼저 정책을 변경했습니다. 최신 상태를 다시 확인하세요."
 		}
@@ -115,20 +119,25 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 			fieldErrors["template_key"] = "현재 CRS 기반 시스템 정책을 확인할 수 없습니다."
 		}
 	} else {
-		if request.Target == "" {
-			fieldErrors["target"] = "배포 대상을 선택하세요."
+		if len(request.ServerIDs) == 0 {
+			fieldErrors["server_ids"] = "적용 서버를 선택하세요."
 		}
-		var found bool
-		policyTemplate, found = s.latestSystemPolicyTemplate(r.Context(), strings.TrimSpace(request.TemplateKey))
-		if !found {
-			fieldErrors["template_key"] = "지원하는 시스템 정책을 선택하세요."
+		policyTemplate = s.defaultSystemPolicyTemplate(r.Context())
+		if policyTemplate.Reference() == "@" || policyTemplate.Status != systempolicy.StatusPublished {
+			fieldErrors["template_key"] = "현재 게시된 시스템 정책을 확인할 수 없습니다."
 		}
 	}
 
 	metadata := ManagedPolicyMetadata{
 		SchemaVersion: policyTemplate.SchemaVersion, TemplateKey: policyTemplate.Key, TemplateVersion: policyTemplate.Version,
-		CRSTrack: policyTemplate.CRSTrack, CRSVersion: policyTemplate.CRSVersion, Target: request.Target,
+		CRSTrack: policyTemplate.CRSTrack, CRSVersion: policyTemplate.CRSVersion, Target: "protection-policy",
 		PolicyOrigin: "administrator", MigrationStatus: "CURRENT",
+	}
+	policyImpact := func() (string, []string, error) {
+		if request.PolicyID != "" {
+			return request.EnterpriseID, request.ServerIDs, nil
+		}
+		return s.store.ValidatePolicyServerIDs(r.Context(), session.ScopeEnterpriseID(), request.EnterpriseID, request.ServerIDs)
 	}
 	if request.ConfigSchemaVersion == PolicyConfigStorageStructured {
 		configuration := PolicyConfiguration{
@@ -156,9 +165,9 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"valid": false, "field_errors": fieldErrors})
 			return
 		}
-		enterpriseID, serverIDs, targetErr := s.store.ResolvePolicyTarget(r.Context(), session.ScopeEnterpriseID(), request.Target)
-		if targetErr != nil || len(serverIDs) == 0 {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"valid": false, "field_errors": map[string]string{"target": "현재 우선순위에서 실제 적용되는 서버가 없습니다."}})
+		enterpriseID, serverIDs, targetErr := policyImpact()
+		if targetErr != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"valid": false, "field_errors": map[string]string{"server_ids": "같은 기업의 활성 서버를 선택하세요."}})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "normalized": map[string]any{"name": request.Name, "description": request.Description, "configuration": configuration}, "impact": map[string]any{"enterprise_id": enterpriseID, "server_ids": serverIDs, "server_count": len(serverIDs)}})
@@ -173,17 +182,9 @@ func (s *Server) apiValidatePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	enterpriseID, serverIDs, targetErr := s.store.ResolvePolicyTarget(r.Context(), session.ScopeEnterpriseID(), request.Target)
+	enterpriseID, serverIDs, targetErr := policyImpact()
 	if targetErr != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"valid": false, "field_errors": map[string]string{"target": "정책 대상을 찾을 수 없습니다."}})
-		return
-	}
-	if policy != nil {
-		enterpriseID = policy.EnterpriseID
-		serverIDs, targetErr = s.policyWinnerServerIDs(r, *policy)
-	}
-	if targetErr != nil || len(serverIDs) == 0 {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"valid": false, "field_errors": map[string]string{"target": "현재 우선순위에서 실제 적용되는 서버가 없습니다."}})
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"valid": false, "field_errors": map[string]string{"server_ids": "같은 기업의 활성 서버를 선택하세요."}})
 		return
 	}
 	var settings PolicySettings
@@ -562,10 +563,10 @@ func (s *Server) createEnterprisePolicyRevision(w http.ResponseWriter, r *http.R
 		s.renderPolicyForm(w, r, http.StatusBadRequest, "정책 설정이 올바르지 않습니다: "+err.Error(), form)
 		return
 	}
-	serverIDs, err := s.policyWinnerServerIDs(r, policy)
-	if err != nil || len(serverIDs) == 0 {
+	serverIDs, err := s.store.ListPolicyServerIDs(r.Context(), policy.EnterpriseID, policy.ID)
+	if err != nil {
 		_ = os.Remove(fullPath)
-		s.renderPolicyForm(w, r, http.StatusConflict, "현재 우선순위에서 이 정책이 실제 적용되는 서버가 없습니다.", form)
+		s.renderPolicyForm(w, r, http.StatusInternalServerError, "정책 연결 서버를 확인할 수 없습니다.", form)
 		return
 	}
 	session := sessionFrom(r)
@@ -581,35 +582,9 @@ func (s *Server) createEnterprisePolicyRevision(w http.ResponseWriter, r *http.R
 	}
 	s.audit(r, session.Username, "enterprise_policy.revision_create", policy.ID+":"+rolloutID, "success")
 	s.TriggerPolicySync()
+	if len(serverIDs) == 0 {
+		s.redirectEnterprisePolicy(w, r, policy.ID, "연결 서버가 없는 휴면 정책에 새 불변 개정본을 저장했습니다.")
+		return
+	}
 	s.redirectEnterprisePolicy(w, r, policy.ID, "새 불변 개정본의 단계 배포를 시작했습니다.")
-}
-
-func (s *Server) policyWinnerServerIDs(r *http.Request, policy EnterprisePolicyRecord) ([]string, error) {
-	servers, err := s.store.ListServers(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
-	if err != nil {
-		return nil, err
-	}
-	policies, err := s.store.ListEnterprisePolicies(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
-	if err != nil {
-		return nil, err
-	}
-	candidate := policy
-	candidate.CurrentRevisionID = "candidate"
-	candidate.UpdatedAt = time.Now().UTC()
-	found := false
-	for index := range policies {
-		if policies[index].ID == policy.ID {
-			policies[index] = candidate
-			found = true
-			break
-		}
-	}
-	if !found {
-		policies = append(policies, candidate)
-	}
-	winners, err := s.enterprisePolicyWinners(r.Context(), policies, servers)
-	if err != nil {
-		return nil, err
-	}
-	return orderIDsByServers(winners[policy.ID], servers), nil
 }

@@ -34,6 +34,8 @@ type ServerRecord struct {
 	Inventory               model.Inventory
 	PolicyRevision          string
 	DesiredPolicyRevision   string
+	EnterprisePolicyID      string
+	EnterprisePolicyName    string
 	PolicyDeploymentStatus  string
 	PolicyDeploymentDetail  string
 	PackageDeploymentStatus string
@@ -43,6 +45,7 @@ type ServerRecord struct {
 	CanRollbackPackages     bool
 	LastCommand             string
 	LastCommandStatus       string
+	PolicyRolloutActive     bool
 	Revoked                 bool
 	LastHeartbeatAt         sql.NullTime
 	CreatedAt               time.Time
@@ -255,20 +258,22 @@ FROM enterprise_install_tokens WHERE id=? FOR UPDATE`, installTokenID.String).Sc
 	if _, err := tx.ExecContext(ctx, `INSERT INTO servers(id, enterprise_id, name, certificate_serial, inventory_json, agent_version, module_version) VALUES (?, ?, ?, ?, ?, ?, ?)`, serverID, enterpriseID.String, serverName, certSerial, raw, inventory.AgentVersion, inventory.ModuleVersion); err != nil {
 		return err
 	}
+	desiredAgentID := ""
+	desiredModuleID := ""
 	if allowedJSON.Valid {
 		var packageIDs []string
 		if err := json.Unmarshal([]byte(allowedJSON.String), &packageIDs); err != nil {
 			return err
 		}
 		if len(packageIDs) == 1 || len(packageIDs) == 2 {
-			moduleID := ""
+			desiredAgentID = packageIDs[0]
 			if len(packageIDs) == 2 {
-				moduleID = packageIDs[1]
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO desired_states(server_id, agent_package_id, module_package_id) VALUES (?, ?, NULLIF(?,''))`, serverID, packageIDs[0], moduleID); err != nil {
-				return err
+				desiredModuleID = packageIDs[1]
 			}
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO desired_states(server_id, agent_package_id, module_package_id) VALUES (?, NULLIF(?,''), NULLIF(?,''))`, serverID, desiredAgentID, desiredModuleID); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET used_at = UTC_TIMESTAMP(6) WHERE token_hash = ?`, tokenHash(token)); err != nil {
 		return err
@@ -309,12 +314,13 @@ func (s *Store) UpdateHeartbeat(ctx context.Context, serverID string, heartbeat 
 
 func (s *Store) DesiredState(ctx context.Context, serverID string) (model.DesiredState, error) {
 	var state model.DesiredState
-	var revision, artifactPath, hash, signature, mode, settingsJSON, agentPackage, modulePackage, packageDeployment sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT pr.id, pr.artifact_path, pr.artifact_sha256, pr.artifact_signature, pr.mode, pr.settings_json, ds.agent_package_id, ds.module_package_id, ds.package_deployment_id
+	var revision, artifactPath, hash, signature, mode, settingsJSON, agentPackage, modulePackage, packageDeployment, packageDeploymentDetail sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT pr.id, pr.artifact_path, pr.artifact_sha256, pr.artifact_signature, pr.mode, pr.settings_json, ds.agent_package_id, ds.module_package_id, ds.package_deployment_id, pkg.detail
 FROM servers s
 LEFT JOIN desired_states ds ON ds.server_id=s.id
 LEFT JOIN policy_revisions pr ON pr.id=ds.policy_revision_id
-WHERE s.id=? AND s.revoked_at IS NULL`, serverID).Scan(&revision, &artifactPath, &hash, &signature, &mode, &settingsJSON, &agentPackage, &modulePackage, &packageDeployment)
+LEFT JOIN package_deployments pkg ON pkg.id=ds.package_deployment_id
+WHERE s.id=? AND s.revoked_at IS NULL`, serverID).Scan(&revision, &artifactPath, &hash, &signature, &mode, &settingsJSON, &agentPackage, &modulePackage, &packageDeployment, &packageDeploymentDetail)
 	if err != nil {
 		return state, err
 	}
@@ -340,7 +346,8 @@ WHERE s.id=? AND s.revoked_at IS NULL`, serverID).Scan(&revision, &artifactPath,
 	state.AgentPackageID = agentPackage.String
 	state.ModulePackageID = modulePackage.String
 	if packageDeployment.Valid {
-		state.PackageDeployment = &model.PackageDeployment{ID: packageDeployment.String}
+		plan := decodePackageDeploymentPlan(packageDeploymentDetail.String)
+		state.PackageDeployment = &model.PackageDeployment{ID: packageDeployment.String, WebServerControl: plan.WebServerControl}
 	}
 	return state, nil
 }
@@ -498,10 +505,14 @@ func (s *Store) SyncCatalog(ctx context.Context, catalog *packages.Catalog) erro
 func (s *Store) ListServers(ctx context.Context, enterpriseID string, limit int) ([]ServerRecord, error) {
 	query := `SELECT s.id,COALESCE(s.enterprise_id,''),COALESCE(e.name,'미지정'),s.name,s.status,s.inventory_json,s.policy_revision,
 COALESCE(ds.policy_revision_id,''),COALESCE(pd.status,''),COALESCE(pd.detail,''),COALESCE(pkg.status,''),COALESCE(pkg.detail,''),
-COALESCE(ds.agent_package_id,''),COALESCE(ds.module_package_id,''),COALESCE(cmd.command,''),COALESCE(cmd.status,''),s.revoked_at IS NOT NULL,s.last_heartbeat_at,s.created_at
+COALESCE(ds.agent_package_id,''),COALESCE(ds.module_package_id,''),COALESCE(cmd.command,''),COALESCE(cmd.status,''),
+EXISTS(SELECT 1 FROM policy_rollout_targets prt JOIN policy_rollouts pro ON pro.id=prt.rollout_id WHERE prt.server_id=s.id AND pro.status IN ('AWAITING_APPROVAL','QUEUED','CANARY','EXPANDING','PAUSED')),
+COALESCE(eps.enterprise_policy_id,''),COALESCE(ep.name,''),s.revoked_at IS NOT NULL,s.last_heartbeat_at,s.created_at
 FROM servers s
 LEFT JOIN enterprises e ON e.id=s.enterprise_id
 LEFT JOIN desired_states ds ON ds.server_id=s.id
+LEFT JOIN enterprise_policy_servers eps ON eps.server_id=s.id
+LEFT JOIN enterprise_policies ep ON ep.id=eps.enterprise_policy_id
 LEFT JOIN policy_deployments pd ON pd.server_id=s.id AND pd.policy_revision_id=ds.policy_revision_id
 LEFT JOIN package_deployments pkg ON pkg.id=ds.package_deployment_id
 LEFT JOIN agent_commands cmd ON cmd.id=(SELECT ac.id FROM agent_commands ac WHERE ac.server_id=s.id ORDER BY ac.created_at DESC LIMIT 1)`
@@ -521,9 +532,10 @@ LEFT JOIN agent_commands cmd ON cmd.id=(SELECT ac.id FROM agent_commands ac WHER
 	for rows.Next() {
 		var item ServerRecord
 		var inventory []byte
-		if err := rows.Scan(&item.ID, &item.EnterpriseID, &item.EnterpriseName, &item.Name, &item.Status, &inventory, &item.PolicyRevision, &item.DesiredPolicyRevision, &item.PolicyDeploymentStatus, &item.PolicyDeploymentDetail, &item.PackageDeploymentStatus, &item.PackageDeploymentDetail, &item.AgentPackageID, &item.ModulePackageID, &item.LastCommand, &item.LastCommandStatus, &item.Revoked, &item.LastHeartbeatAt, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.EnterpriseID, &item.EnterpriseName, &item.Name, &item.Status, &inventory, &item.PolicyRevision, &item.DesiredPolicyRevision, &item.PolicyDeploymentStatus, &item.PolicyDeploymentDetail, &item.PackageDeploymentStatus, &item.PackageDeploymentDetail, &item.AgentPackageID, &item.ModulePackageID, &item.LastCommand, &item.LastCommandStatus, &item.PolicyRolloutActive, &item.EnterprisePolicyID, &item.EnterprisePolicyName, &item.Revoked, &item.LastHeartbeatAt, &item.CreatedAt); err != nil {
 			return nil, err
 		}
+		item.PackageDeploymentDetail = packageDeploymentDisplayDetail(item.PackageDeploymentDetail)
 		_ = json.Unmarshal(inventory, &item.Inventory)
 		markServerOffline(&item, time.Now().UTC())
 		result = append(result, item)
@@ -542,7 +554,7 @@ func markServerOffline(item *ServerRecord, now time.Time) {
 
 type EventFilter struct {
 	EnterpriseID    string
-	GroupID         string
+	PolicyID        string
 	ServerID        string
 	Severity        string
 	RuleID          string
@@ -572,9 +584,9 @@ LEFT JOIN policy_revisions pr ON pr.id=se.policy_revision`
 		conditions = append(conditions, `s.enterprise_id=?`)
 		args = append(args, filter.EnterpriseID)
 	}
-	if filter.GroupID != "" {
-		conditions = append(conditions, `EXISTS (SELECT 1 FROM server_group_members gm JOIN server_groups g ON g.id=gm.group_id WHERE gm.server_id=s.id AND g.id=? AND g.enterprise_id=s.enterprise_id)`)
-		args = append(args, filter.GroupID)
+	if filter.PolicyID != "" {
+		conditions = append(conditions, `pr.enterprise_policy_id=? AND EXISTS (SELECT 1 FROM enterprise_policies ep WHERE ep.id=pr.enterprise_policy_id AND ep.enterprise_id=s.enterprise_id)`)
+		args = append(args, filter.PolicyID)
 	}
 	if filter.ServerID != "" {
 		conditions = append(conditions, `se.agent_id=?`)

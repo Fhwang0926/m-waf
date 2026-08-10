@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Fhwang0926/m-waf/internal/model"
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
@@ -263,6 +263,22 @@ func (s *Server) renderEnterprisePolicyDetail(w http.ResponseWriter, r *http.Req
 		s.renderAdminError(w, r, http.StatusInternalServerError, "정책 개정본을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
+	members, err := s.store.ListPolicyServers(r.Context(), policy.EnterpriseID, policy.ID)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "연결 서버를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	servers, err := s.store.ListServers(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "보호 서버를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
+	serverChoices := make([]policyServerChoice, 0, len(servers))
+	for _, server := range servers {
+		if !server.Revoked && server.EnterprisePolicyID != policy.ID {
+			serverChoices = append(serverChoices, policyServerChoice{Server: server})
+		}
+	}
 	rolloutViews := make([]policyRolloutView, 0, len(rollouts))
 	for _, rollout := range rollouts {
 		targets, targetErr := s.store.ListPolicyRolloutTargets(r.Context(), rollout.ID)
@@ -282,13 +298,46 @@ func (s *Server) renderEnterprisePolicyDetail(w http.ResponseWriter, r *http.Req
 		}
 	}
 	data := map[string]any{
-		"Policy": policy, "Rollouts": rolloutViews, "Revisions": revisions, "RollbackAvailable": rollbackAvailable,
+		"Policy": policy, "PolicyServers": members, "PolicyServerChoices": serverChoices, "Rollouts": rolloutViews, "Revisions": revisions, "RollbackAvailable": rollbackAvailable,
 		"Notice": r.URL.Query().Get("notice"), "Error": pageError, "ScopeLabel": policy.EnterpriseName,
 	}
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
 	_ = s.templates.ExecuteTemplate(w, "enterprise-policy.html", s.viewData(r, "policies", data))
+}
+
+func (s *Server) updateEnterprisePolicyServers(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePolicyForm(w, r) {
+		return
+	}
+	policyID := r.PathValue("id")
+	policy, err := s.store.EnterprisePolicyByID(r.Context(), sessionFrom(r).ScopeEnterpriseID(), policyID)
+	if err != nil {
+		s.writePolicyMutationError(w, r, policyID, err)
+		return
+	}
+	if r.FormValue("confirm") != "confirmed" || len(r.Form["server_ids"]) == 0 {
+		s.renderEnterprisePolicyDetail(w, r, http.StatusBadRequest, "이동할 서버와 영향을 확인해야 합니다.")
+		return
+	}
+	session := sessionFrom(r)
+	rolloutID, count, err := s.store.CreatePolicyMembershipRollout(r.Context(), policy, session.UserID, r.Form["server_ids"])
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "active") {
+			s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "선택한 서버의 정책 또는 배포 상태가 변경되었습니다. 새로고침 후 다시 확인하세요.")
+			return
+		}
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "서버 정책 이동을 시작할 수 없습니다. 잠시 후 다시 시도하세요.")
+		return
+	}
+	if count == 0 {
+		s.redirectEnterprisePolicy(w, r, policyID, "선택한 서버는 이미 이 보호 정책에 연결되어 있습니다.")
+		return
+	}
+	s.audit(r, session.Username, "enterprise_policy.servers_assign", policyID+":"+rolloutID, "success")
+	s.TriggerPolicySync()
+	s.redirectEnterprisePolicy(w, r, policyID, strconv.Itoa(count)+"대 서버의 정책 이동을 시작했습니다.")
 }
 
 func (s *Server) updateEnterprisePolicyStrategy(w http.ResponseWriter, r *http.Request) {
@@ -384,38 +433,15 @@ func (s *Server) convertLegacyEnterprisePolicy(w http.ResponseWriter, r *http.Re
 	if settings.InboundScore < 1 || settings.InboundScore > 100 {
 		settings.InboundScore = targetTemplate.Defaults.InboundScore
 	}
-	servers, err := s.store.ListServers(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
+	serverIDs, err := s.store.ListPolicyServerIDs(r.Context(), policy.EnterpriseID, policy.ID)
 	if err != nil {
-		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 대상 서버를 불러올 수 없습니다.")
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 연결 서버를 불러올 수 없습니다.")
 		return
 	}
-	policies, err := s.store.ListEnterprisePolicies(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
-	if err != nil {
-		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다.")
-		return
-	}
-	candidate := policy
-	candidate.Status = EnterprisePolicyActive
-	candidate.CurrentRevisionID = "candidate"
-	candidate.UpdatedAt = time.Now().UTC()
-	eligiblePolicies := make([]EnterprisePolicyRecord, 0, len(policies))
-	for _, item := range policies {
-		if item.ID != policy.ID {
-			eligiblePolicies = append(eligiblePolicies, item)
-		}
-	}
-	eligiblePolicies = append(eligiblePolicies, candidate)
-	winners, err := s.enterprisePolicyWinners(r.Context(), eligiblePolicies, servers)
-	if err != nil {
-		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 우선순위를 계산할 수 없습니다.")
-		return
-	}
-	serverIDs := winners[policy.ID]
 	if len(serverIDs) == 0 {
-		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "현재 우선순위에서 이 정책이 적용되는 서버가 없어 전환할 수 없습니다.")
+		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "이 정책에 연결된 서버가 없어 전환할 수 없습니다.")
 		return
 	}
-	serverIDs = orderIDsByServers(serverIDs, servers)
 	revision, fullPath, err := s.preparePolicyRevision(targetTemplate, policy.Name, policy.Description, mode, settings, policy.CurrentRevisionID, "legacy-conversion")
 	if err != nil {
 		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "기존 정책 설정을 전환할 수 없습니다: "+err.Error())
@@ -462,24 +488,18 @@ func (s *Server) rollbackEnterprisePolicy(w http.ResponseWriter, r *http.Request
 		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "회수되었거나 알 수 없는 CRS 기준으로는 롤백할 수 없습니다.")
 		return
 	}
+	serverIDs, err := s.store.ListPolicyServerIDs(r.Context(), policy.EnterpriseID, policy.ID)
+	if err != nil {
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 연결 서버를 불러올 수 없습니다.")
+		return
+	}
+	if len(serverIDs) == 0 {
+		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "이 정책에 연결된 서버가 없습니다.")
+		return
+	}
 	servers, err := s.store.ListServers(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
 	if err != nil {
-		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 대상 서버를 불러올 수 없습니다.")
-		return
-	}
-	policies, err := s.store.ListEnterprisePolicies(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
-	if err != nil {
-		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다.")
-		return
-	}
-	winners, err := s.enterprisePolicyWinners(r.Context(), policies, servers)
-	if err != nil {
-		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 우선순위를 계산할 수 없습니다.")
-		return
-	}
-	serverIDs := orderIDsByServers(winners[policy.ID], servers)
-	if len(serverIDs) == 0 {
-		s.renderEnterprisePolicyDetail(w, r, http.StatusConflict, "현재 이 정책이 우선 적용되는 서버가 없습니다.")
+		s.renderEnterprisePolicyDetail(w, r, http.StatusInternalServerError, "정책 연결 서버의 호환성을 확인할 수 없습니다.")
 		return
 	}
 	serverByID := make(map[string]ServerRecord, len(servers))

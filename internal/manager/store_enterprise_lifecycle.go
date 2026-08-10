@@ -142,6 +142,9 @@ func (s *Store) DeleteOrTerminateEnterprise(ctx context.Context, enterpriseID, e
 	if _, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET used_at=COALESCE(used_at,?) WHERE enterprise_id=?`, now, enterpriseID); err != nil {
 		return "", err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE eps FROM enterprise_policy_servers eps JOIN enterprise_policies ep ON ep.id=eps.enterprise_policy_id WHERE ep.enterprise_id=?`, enterpriseID); err != nil {
+		return "", err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE servers SET revoked_at=COALESCE(revoked_at,?),revoked_by=COALESCE(revoked_by,?),status='REVOKED' WHERE enterprise_id=?`, now, actorID, enterpriseID); err != nil {
 		return "", err
 	}

@@ -1,4 +1,4 @@
-name: Verify changes, publish latest, and create releases
+name: Verify changes and publish tagged releases
 
 on:
   pull_request:
@@ -16,8 +16,7 @@ on:
       - "rules/**"
       - "web/**"
   push:
-    branches: [dev]
-    tags: ["v*.*.*"]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -29,11 +28,13 @@ concurrency:
 
 env:
   TEST_UBUNTU_IMAGE: docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+  TEST_DEBIAN_IMAGE: docker.io/library/debian:12-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
   TEST_WEBSERVER_IMAGE: mwaf-ci-webservers:ubuntu-24.04-amd64
+  TEST_DEBIAN_WEBSERVER_IMAGE: mwaf-ci-webservers:debian-12-amd64
 
 jobs:
   verify:
-    name: Build and install-test packages
+    name: Install, detect, and block on supported OS
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -46,14 +47,6 @@ jobs:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
-
-      - name: Validate release tag
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          set -eu
-          printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 
       - name: Verify source and deployment files
         run: |
@@ -68,6 +61,7 @@ jobs:
           sh -n packaging/agent/deb/build.sh
           sh -n packaging/module/deb/build.sh
           sh -n packaging/module/external/configure.sh
+          sh -n build/containers/ci-webservers/test-distro-smoke.sh
           sh -n deploy/compose/prepare.sh
           sh -n deploy/compose/reset-system-admin-password.sh
           sh -n deploy/compose/test-prepare.sh
@@ -116,9 +110,25 @@ jobs:
           tags: ${{ env.TEST_WEBSERVER_IMAGE }}
           build-args: |
             APT_REFRESH_WEEK=${{ steps.fixture-cache.outputs.apt_refresh_week }}
-            TEST_UBUNTU_IMAGE=${{ env.TEST_UBUNTU_IMAGE }}
+            TEST_BASE_IMAGE=${{ env.TEST_UBUNTU_IMAGE }}
           cache-from: type=gha,scope=mwaf-ci-webservers-amd64
           cache-to: type=gha,scope=mwaf-ci-webservers-amd64,mode=max,ignore-error=true
+
+      - name: Build cached Debian web server fixture
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: build/containers/ci-webservers
+          file: build/containers/ci-webservers/Dockerfile
+          load: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          tags: ${{ env.TEST_DEBIAN_WEBSERVER_IMAGE }}
+          build-args: |
+            APT_REFRESH_WEEK=${{ steps.fixture-cache.outputs.apt_refresh_week }}
+            TEST_BASE_IMAGE=${{ env.TEST_DEBIAN_IMAGE }}
+          cache-from: type=gha,scope=mwaf-ci-webservers-debian-12-amd64
+          cache-to: type=gha,scope=mwaf-ci-webservers-debian-12-amd64,mode=max,ignore-error=true
 
       - name: Build Agent and module packages
         env:
@@ -136,6 +146,7 @@ jobs:
           CRS_LTS_COMMIT: ${{ steps.crs.outputs.lts_commit }}
           CRS_LTS_TAG_OBJECT: ${{ steps.crs.outputs.lts_tag_object }}
           RUN_NUMBER: ${{ github.run_number }}
+          MWAF_DEB_TARGETS: ubuntu:24.04 debian:12
         run: |
           set -eu
           case "$GITHUB_REF" in
@@ -183,49 +194,37 @@ jobs:
             dpkg-deb --info "$package"
           done
 
-      - name: Install Agent and Apache module on clean Ubuntu
-        env:
-          CRS_VERSION: ${{ steps.crs.outputs.stable_version }}
+      - name: Smoke-test install, detection, and blocking on Ubuntu 24.04 Apache
         run: |
           set -eu
-          docker run --rm --platform linux/amd64 -e EXPECTED_CRS_VERSION="$CRS_VERSION" \
+          docker run --rm --platform linux/amd64 \
             -v "$PWD/dist:/dist:ro" \
-            "$TEST_WEBSERVER_IMAGE" sh -euxc '
-              export DEBIAN_FRONTEND=noninteractive
-              dpkg --unpack /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-apache_*.deb
-              apt-get --no-download --fix-broken install --no-install-recommends -y
-              dpkg-query -W mwaf-agent mwaf-modsecurity-apache
-              /usr/bin/mwaf-agent -version
-              apachectl configtest
-              apachectl -M 2>&1 | grep -q security2_module
-              grep -q "copytruncate" /etc/logrotate.d/mwaf-modsecurity
-              test ! -e /usr/share/mwaf/crs
-              test ! -e /etc/apache2/conf-enabled/mwaf.conf
-              test -f /etc/mwaf/active/main.conf
-              test "$(stat -c "%a:%U:%G" /var/log/modsecurity/audit.jsonl)" = "660:root:www-data"
-            '
+            -v "$PWD/build/containers/ci-webservers/test-distro-smoke.sh:/test-distro-smoke.sh:ro" \
+            "$TEST_WEBSERVER_IMAGE" sh /test-distro-smoke.sh apache
 
-      - name: Install Agent and Nginx module on clean Ubuntu
-        env:
-          CRS_VERSION: ${{ steps.crs.outputs.stable_version }}
+      - name: Smoke-test install, detection, and blocking on Ubuntu 24.04 Nginx
         run: |
           set -eu
-          docker run --rm --platform linux/amd64 -e EXPECTED_CRS_VERSION="$CRS_VERSION" \
+          docker run --rm --platform linux/amd64 \
             -v "$PWD/dist:/dist:ro" \
-            "$TEST_WEBSERVER_IMAGE" sh -euxc '
-              export DEBIAN_FRONTEND=noninteractive
-              dpkg --unpack /dist/packages/mwaf-agent_*.deb /dist/packages/mwaf-modsecurity-nginx_*.deb
-              apt-get --no-download --fix-broken install --no-install-recommends -y
-              dpkg-query -W mwaf-agent mwaf-modsecurity-nginx
-              /usr/bin/mwaf-agent -version
-              nginx -t
-              ! nginx -T 2>&1 | grep -q "/etc/nginx/conf.d/mwaf.conf"
-              grep -q "copytruncate" /etc/logrotate.d/mwaf-modsecurity
-              test ! -e /usr/share/mwaf/crs
-              test -f /usr/share/mwaf/integration/nginx.conf
-              test -f /etc/mwaf/active/main.conf
-              test "$(stat -c "%a:%U:%G" /var/log/modsecurity/audit.jsonl)" = "660:root:www-data"
-            '
+            -v "$PWD/build/containers/ci-webservers/test-distro-smoke.sh:/test-distro-smoke.sh:ro" \
+            "$TEST_WEBSERVER_IMAGE" sh /test-distro-smoke.sh nginx
+
+      - name: Smoke-test install, detection, and blocking on Debian 12 Apache
+        run: |
+          set -eu
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/build/containers/ci-webservers/test-distro-smoke.sh:/test-distro-smoke.sh:ro" \
+            "$TEST_DEBIAN_WEBSERVER_IMAGE" sh /test-distro-smoke.sh apache
+
+      - name: Smoke-test install, detection, and blocking on Debian 12 Nginx
+        run: |
+          set -eu
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/dist:/dist:ro" \
+            -v "$PWD/build/containers/ci-webservers/test-distro-smoke.sh:/test-distro-smoke.sh:ro" \
+            "$TEST_DEBIAN_WEBSERVER_IMAGE" sh /test-distro-smoke.sh nginx
 
       - name: Reuse pre-installed Apache connector through an external integration path
         run: |
@@ -304,12 +303,22 @@ jobs:
           openssl genpkey -algorithm ED25519 -out dist/test-bundle-signing.key
           go run ./cmd/mwaf-bundle -metadata dist/metadata -packages dist/packages -output dist/bundle -key dist/test-bundle-signing.key -public-key-output dist/package-signing.pub -version "test-${COMMIT}" -commit "$COMMIT"
           test "$(find dist/bundle/packages -type f | wc -l)" -eq 5
+          test "$(jq '.artifacts | length' dist/bundle/bundle-manifest.json)" -eq 10
+          test "$(jq '[.artifacts[] | select(.os_id == "debian" and .os_version == "12")] | length' dist/bundle/bundle-manifest.json)" -eq 5
           test "$(find dist/bundle/policy-sources -type f -name '*.json' | wc -l)" -eq 2
           test "$(find dist/bundle/policy-sources -type f -name '*.tar.gz' | wc -l)" -eq 2
           test "$(jq -r .hot_rule_set.version dist/bundle/bundle-manifest.json)" = "$(jq -r .version rules/hot/manifest.json)"
 
+      - name: Validate version release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
       - name: Upload verified package inputs
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v'))
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: verified-package-inputs
@@ -323,7 +332,7 @@ jobs:
 
   publish:
     name: Publish Manager image
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -475,7 +484,6 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest
-            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
             type=sha,prefix=sha-,format=long
 
       - name: Build and push Manager image with verified packages

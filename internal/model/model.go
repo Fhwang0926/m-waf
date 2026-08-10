@@ -5,6 +5,21 @@ import "time"
 const (
 	IntegrationModeDistro   = "distro"
 	IntegrationModeExternal = "external"
+
+	InstallationModeDiscovery = "discovery"
+	InstallationModePackage   = "package"
+	InstallationModeCustomZIP = "custom_zip"
+
+	WebServerControlStandard = "standard"
+	WebServerControlHooks    = "hooks"
+
+	InstallationStagePlanRequired      = "PLAN_REQUIRED"
+	InstallationStageInstalling        = "INSTALLING"
+	InstallationStageIntegrationNeeded = "INTEGRATION_REQUIRED"
+	InstallationStageProtected         = "PROTECTED"
+
+	PackageFormatDEB = "deb"
+	PackageFormatZIP = "zip"
 )
 
 func NormalizeIntegrationMode(mode string) string {
@@ -14,23 +29,50 @@ func NormalizeIntegrationMode(mode string) string {
 	return mode
 }
 
+func NormalizePackageFormat(format string) string {
+	if format == "" {
+		return PackageFormatDEB
+	}
+	return format
+}
+
+func NormalizeWebServerControl(mode string) string {
+	if mode == "" {
+		return WebServerControlStandard
+	}
+	return mode
+}
+
 type Inventory struct {
-	Hostname         string   `json:"hostname"`
-	OSID             string   `json:"os_id"`
-	OSVersion        string   `json:"os_version"`
-	Architecture     string   `json:"architecture"`
-	WebServer        string   `json:"web_server"`
-	WebServerVersion string   `json:"web_server_version"`
-	WebServerBuild   string   `json:"web_server_build_hash"`
-	IntegrationMode  string   `json:"integration_mode,omitempty"`
-	InstallationMode string   `json:"installation_mode,omitempty"`
-	AgentVersion     string   `json:"agent_version,omitempty"`
-	ModuleVersion    string   `json:"module_version,omitempty"`
-	CRSVersion       string   `json:"crs_version,omitempty"`
-	ConnectorVersion string   `json:"connector_version,omitempty"`
-	ConnectorLoaded  bool     `json:"connector_loaded,omitempty"`
-	ConfigTestOK     bool     `json:"config_test_ok,omitempty"`
-	PolicyFormats    []string `json:"policy_formats,omitempty"`
+	Hostname            string               `json:"hostname"`
+	OSID                string               `json:"os_id"`
+	OSVersion           string               `json:"os_version"`
+	Architecture        string               `json:"architecture"`
+	WebServer           string               `json:"web_server"`
+	WebServerVersion    string               `json:"web_server_version"`
+	WebServerBuild      string               `json:"web_server_build_hash"`
+	IntegrationMode     string               `json:"integration_mode,omitempty"`
+	InstallationMode    string               `json:"installation_mode,omitempty"`
+	AgentVersion        string               `json:"agent_version,omitempty"`
+	ModuleVersion       string               `json:"module_version,omitempty"`
+	CRSVersion          string               `json:"crs_version,omitempty"`
+	ConnectorVersion    string               `json:"connector_version,omitempty"`
+	ConnectorLoaded     bool                 `json:"connector_loaded,omitempty"`
+	ConfigTestOK        bool                 `json:"config_test_ok,omitempty"`
+	IntegrationReady    bool                 `json:"integration_ready,omitempty"`
+	InstallationStage   string               `json:"installation_stage,omitempty"`
+	WebServerControl    string               `json:"web_server_control,omitempty"`
+	WebServerCandidates []WebServerCandidate `json:"web_server_candidates,omitempty"`
+	PolicyFormats       []string             `json:"policy_formats,omitempty"`
+}
+
+type WebServerCandidate struct {
+	Kind           string `json:"kind"`
+	Version        string `json:"version,omitempty"`
+	BuildHash      string `json:"build_hash,omitempty"`
+	Binary         string `json:"binary"`
+	PackageManaged bool   `json:"package_managed"`
+	ConfigTestOK   bool   `json:"config_test_ok,omitempty"`
 }
 
 type PackageArtifact struct {
@@ -53,6 +95,8 @@ type PackageArtifact struct {
 	SHA256           string   `json:"sha256"`
 	RollbackID       string   `json:"rollback_id,omitempty"`
 	PolicyFormats    []string `json:"policy_formats,omitempty"`
+	PackageFormat    string   `json:"package_format,omitempty"`
+	InstallRoot      string   `json:"install_root,omitempty"`
 }
 
 type BundleManifest struct {
@@ -104,13 +148,19 @@ type PackageResolution struct {
 }
 
 type PackageDownload struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Version    string `json:"version"`
-	URL        string `json:"url"`
-	Size       int64  `json:"size"`
-	SHA256     string `json:"sha256"`
-	RollbackID string `json:"rollback_id,omitempty"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Version         string `json:"version"`
+	URL             string `json:"url"`
+	Size            int64  `json:"size"`
+	SHA256          string `json:"sha256"`
+	RollbackID      string `json:"rollback_id,omitempty"`
+	Format          string `json:"format,omitempty"`
+	InstallRoot     string `json:"install_root,omitempty"`
+	WebServer       string `json:"web_server,omitempty"`
+	WebServerBuild  string `json:"web_server_build_hash,omitempty"`
+	IntegrationMode string `json:"integration_mode,omitempty"`
+	RuntimeABI      string `json:"runtime_abi,omitempty"`
 }
 
 type EnrollRequest struct {
@@ -160,9 +210,10 @@ type DesiredState struct {
 }
 
 type PackageDeployment struct {
-	ID     string          `json:"id"`
-	Agent  PackageDownload `json:"agent"`
-	Module PackageDownload `json:"module"`
+	ID               string          `json:"id"`
+	WebServerControl string          `json:"web_server_control,omitempty"`
+	Agent            PackageDownload `json:"agent"`
+	Module           PackageDownload `json:"module"`
 }
 
 type DeploymentResult struct {

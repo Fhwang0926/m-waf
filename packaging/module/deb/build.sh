@@ -7,6 +7,7 @@ set -eu
 : "${METADATA_DIR:?METADATA_DIR is required}"
 INTEGRATION_MODE=${INTEGRATION_MODE:-distro}
 RUNTIME_ABI=${RUNTIME_ABI:-modsecurity-v3}
+MWAF_DEB_TARGETS=${MWAF_DEB_TARGETS:-ubuntu:24.04 debian:12}
 command -v dpkg-deb >/dev/null 2>&1 || { echo "dpkg-deb is required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 case "$INTEGRATION_MODE" in distro|external) ;; *) echo "unsupported integration mode: $INTEGRATION_MODE" >&2; exit 1 ;; esac
@@ -44,12 +45,12 @@ EOF
       dependency='apache2, libapache2-mod-security2 (>= 2.9.7), logrotate'
       mkdir -p "$root/etc/apache2/conf-available"
       install -m 0644 packaging/module/deb/mwaf-apache.conf "$root/etc/apache2/conf-available/mwaf.conf"
-      postinst_body='a2enmod security2 >/dev/null'
+      postinst_body=':'
       prerm_body='if [ -e /etc/apache2/conf-enabled/mwaf.conf ]; then a2disconf mwaf >/dev/null; if ! apachectl configtest; then a2enconf mwaf >/dev/null; exit 1; fi; if systemctl is-active --quiet apache2; then systemctl reload apache2; fi; fi'
       ;;
     nginx)
       package_name=mwaf-modsecurity-nginx
-      dependency='nginx (>= 1.24.0), libnginx-mod-http-modsecurity (>= 1.0.3), logrotate'
+      dependency='nginx (>= 1.22.0), libnginx-mod-http-modsecurity (>= 1.0.3), logrotate'
       install -m 0644 packaging/module/deb/mwaf-nginx.conf "$root/usr/share/mwaf/integration/nginx.conf"
       install -m 0644 packaging/module/deb/modsecurity-nginx.conf "$root/usr/share/mwaf/integration/modsecurity-nginx.conf"
       postinst_body=':'
@@ -71,9 +72,9 @@ EOF
 cat > "$root/DEBIAN/postinst" <<EOF
 #!/bin/sh
 set -e
-if [ ! -e /etc/mwaf/active ]; then
-  install -d -m 0750 /etc/mwaf/active
-  printf '%s\n' '# Policy staging placeholder. Not included by the web server.' > /etc/mwaf/active/main.conf
+install -d -m 0750 /etc/mwaf/active
+if [ ! -e /etc/mwaf/active/main.conf ]; then
+  printf '%s\n' '# M-WAF unassigned safe policy.' 'SecRuleEngine DetectionOnly' > /etc/mwaf/active/main.conf
   chmod 0640 /etc/mwaf/active/main.conf
 fi
 if [ "$INTEGRATION_MODE" = "distro" ]; then
@@ -99,4 +100,12 @@ chmod 0755 "$root/DEBIAN/prerm"
 
 filename="${package_name}_${VERSION}_amd64.deb"
 dpkg-deb --build --root-owner-group "$root" "$OUTPUT_DIR/$filename"
-jq -n --arg id "${package_name}-ubuntu-24.04-amd64-${VERSION}" --arg name "$package_name" --arg version "$VERSION" --arg web "$WEBSERVER" --arg integration "$INTEGRATION_MODE" --arg runtime_abi "$RUNTIME_ABI" --arg path "$filename" '{id:$id,kind:"module",name:$name,version:$version,os_id:"ubuntu",os_version:"24.04",architecture:"amd64",web_server:$web,integration_mode:$integration,runtime_abi:$runtime_abi,policy_delivery:"bundle",path:$path}' > "$METADATA_DIR/module-$WEBSERVER-$INTEGRATION_MODE.json"
+for target in $MWAF_DEB_TARGETS; do
+  case "$target" in
+    ubuntu:24.04|debian:12) ;;
+    *) echo "unsupported DEB target: $target" >&2; exit 1 ;;
+  esac
+  target_os=${target%%:*}
+  target_version=${target#*:}
+  jq -n --arg id "${package_name}-${target_os}-${target_version}-amd64-${VERSION}" --arg name "$package_name" --arg version "$VERSION" --arg os_id "$target_os" --arg os_version "$target_version" --arg web "$WEBSERVER" --arg integration "$INTEGRATION_MODE" --arg runtime_abi "$RUNTIME_ABI" --arg path "$filename" '{id:$id,kind:"module",name:$name,version:$version,os_id:$os_id,os_version:$os_version,architecture:"amd64",web_server:$web,integration_mode:$integration,runtime_abi:$runtime_abi,policy_delivery:"bundle",path:$path}' > "$METADATA_DIR/module-$WEBSERVER-$INTEGRATION_MODE-${target_os}-${target_version}.json"
+done

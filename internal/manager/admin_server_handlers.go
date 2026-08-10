@@ -6,13 +6,17 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/Fhwang0926/m-waf/internal/model"
 )
 
 var allowedAgentCommands = map[string]string{
-	"agent_restart":  "Agent 재시작",
-	"agent_stop":     "Agent 중지",
-	"server_restart": "서버 재시작",
-	"server_stop":    "서버 종료",
+	"agent_restart":        "Agent 재시작",
+	"agent_stop":           "Agent 중지",
+	"server_restart":       "서버 재시작",
+	"server_stop":          "서버 종료",
+	"web_control_standard": "표준 웹서버 제어 사용",
+	"web_control_hooks":    "고객 Hook 사용",
 }
 
 func (s *Server) createServerCommand(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +46,11 @@ func (s *Server) createServerCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, session.Username, "server.command", serverID+":"+commandID+":"+command, "success")
-	http.Redirect(w, r, "/servers?notice="+url.QueryEscape(label+" 명령이 예약되었습니다."), http.StatusSeeOther)
+	redirectPath := "/servers"
+	if command == "web_control_standard" || command == "web_control_hooks" {
+		redirectPath = "/servers/" + serverID
+	}
+	http.Redirect(w, r, redirectPath+"?notice="+url.QueryEscape(label+" 명령이 예약되었습니다."), http.StatusSeeOther)
 }
 
 func (s *Server) deployServerPackages(w http.ResponseWriter, r *http.Request) {
@@ -95,13 +103,96 @@ func (s *Server) deployServerPackages(w http.ResponseWriter, r *http.Request) {
 		s.renderServers(w, r, http.StatusBadRequest, "지원하지 않는 패키지 작업입니다.")
 		return
 	}
-	deploymentID, err := s.store.AssignPackages(r.Context(), session.ScopeEnterpriseID(), serverID, agentID, moduleID, session.UserID)
+	deploymentID, err := s.store.AssignPackagesWithControl(r.Context(), session.ScopeEnterpriseID(), serverID, agentID, moduleID, session.UserID, server.Inventory.WebServerControl)
 	if err != nil {
 		s.renderServers(w, r, http.StatusConflict, "패키지 배포를 예약할 수 없습니다: "+err.Error())
 		return
 	}
 	s.audit(r, session.Username, "package."+operation, serverID+":"+deploymentID, "success")
 	http.Redirect(w, r, "/servers?notice="+url.QueryEscape("Agent와 WAF 모듈 "+map[string]string{"update": "업데이트", "rollback": "롤백"}[operation]+"가 예약되었습니다."), http.StatusSeeOther)
+}
+
+func (s *Server) installServerModule(w http.ResponseWriter, r *http.Request) {
+	if !s.validCSRF(r) {
+		s.renderAdminError(w, r, http.StatusForbidden, "보안 정보가 만료되었습니다", "화면을 새로고침한 뒤 다시 시도하세요.")
+		return
+	}
+	if s.catalog == nil {
+		s.renderAdminError(w, r, http.StatusServiceUnavailable, "설치 파일을 사용할 수 없습니다", "Manager에 서명된 배포 bundle이 포함되어 있는지 확인하세요.")
+		return
+	}
+	if r.FormValue("confirm") != "confirmed" {
+		s.renderAdminError(w, r, http.StatusBadRequest, "설치 영향 확인이 필요합니다", "설치 유형과 웹서버를 확인한 뒤 다시 시도하세요.")
+		return
+	}
+	session := sessionFrom(r)
+	serverID := r.PathValue("id")
+	server, err := s.store.ServerByID(r.Context(), session.ScopeEnterpriseID(), serverID)
+	if err != nil || server.Revoked {
+		s.renderAdminError(w, r, http.StatusNotFound, "서버를 찾을 수 없습니다", "등록 해제되었거나 현재 기업 범위에서 접근할 수 없는 서버입니다.")
+		return
+	}
+	webServer := strings.TrimSpace(r.FormValue("web_server"))
+	buildHash := strings.TrimSpace(r.FormValue("web_server_build"))
+	installType := strings.TrimSpace(r.FormValue("install_type"))
+	controlMode := model.NormalizeWebServerControl(strings.TrimSpace(r.FormValue("web_server_control")))
+	if controlMode != model.WebServerControlStandard && controlMode != model.WebServerControlHooks {
+		s.renderAdminError(w, r, http.StatusBadRequest, "웹서버 제어 방식이 올바르지 않습니다", "표준 제어 또는 고객 Hook을 선택하세요.")
+		return
+	}
+	candidate, ok := installationCandidate(server.Inventory, webServer, buildHash)
+	if !ok {
+		s.renderAdminError(w, r, http.StatusConflict, "웹서버 점검 정보가 변경되었습니다", "Agent의 다음 점검을 기다린 뒤 새로고침하여 다시 선택하세요.")
+		return
+	}
+	inventory := server.Inventory
+	inventory.WebServer = candidate.Kind
+	inventory.WebServerVersion = candidate.Version
+	inventory.WebServerBuild = candidate.BuildHash
+	switch installType {
+	case model.InstallationModePackage:
+		if !candidate.PackageManaged {
+			s.renderAdminError(w, r, http.StatusUnprocessableEntity, "패키지 설치를 선택할 수 없습니다", "배포판 패키지가 아닌 웹서버는 커스텀 ZIP 설치를 선택하세요.")
+			return
+		}
+		inventory.IntegrationMode = model.IntegrationModeDistro
+		inventory.InstallationMode = model.InstallationModePackage
+	case model.InstallationModeCustomZIP:
+		if candidate.PackageManaged {
+			s.renderAdminError(w, r, http.StatusUnprocessableEntity, "커스텀 ZIP 설치 대상이 아닙니다", "배포판 패키지 웹서버는 패키지 기반 설치를 선택하세요.")
+			return
+		}
+		inventory.IntegrationMode = model.IntegrationModeExternal
+		inventory.InstallationMode = model.InstallationModeCustomZIP
+	default:
+		s.renderAdminError(w, r, http.StatusBadRequest, "설치 유형이 올바르지 않습니다", "패키지 기반 또는 커스텀 ZIP을 선택하세요.")
+		return
+	}
+	agentPackage, modulePackage, err := s.catalog.Resolve(inventory)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusUnprocessableEntity, "호환 설치 파일을 찾을 수 없습니다", err.Error())
+		return
+	}
+	deploymentID, err := s.store.AssignPackagesWithControl(r.Context(), session.ScopeEnterpriseID(), serverID, agentPackage.ID, modulePackage.ID, session.UserID, controlMode)
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusConflict, "설치를 예약할 수 없습니다", err.Error())
+		return
+	}
+	s.audit(r, session.Username, "server.install."+installType, serverID+":"+deploymentID+":"+candidate.Kind+":"+controlMode, "success")
+	http.Redirect(w, r, "/servers/"+serverID+"?notice="+url.QueryEscape("Agent가 선택한 설치 파일을 내려받아 검증·설치합니다. 고객 설정 파일은 수정하지 않으며 정책 적용 시 선택한 방식으로 configtest와 reload를 수행합니다."), http.StatusSeeOther)
+}
+
+func installationCandidate(inventory model.Inventory, webServer, buildHash string) (model.WebServerCandidate, bool) {
+	candidates := inventory.WebServerCandidates
+	if len(candidates) == 0 && inventory.WebServer != "" {
+		candidates = []model.WebServerCandidate{{Kind: inventory.WebServer, Version: inventory.WebServerVersion, BuildHash: inventory.WebServerBuild, PackageManaged: model.NormalizeIntegrationMode(inventory.IntegrationMode) == model.IntegrationModeDistro}}
+	}
+	for _, candidate := range candidates {
+		if candidate.Kind == webServer && candidate.BuildHash == buildHash {
+			return candidate, true
+		}
+	}
+	return model.WebServerCandidate{}, false
 }
 
 func (s *Server) revokeServer(w http.ResponseWriter, r *http.Request) {

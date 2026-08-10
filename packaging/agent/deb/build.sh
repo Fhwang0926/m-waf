@@ -6,6 +6,7 @@ set -eu
 : "${AGENT_BINARY:?AGENT_BINARY is required}"
 : "${OUTPUT_DIR:?OUTPUT_DIR is required}"
 : "${METADATA_DIR:?METADATA_DIR is required}"
+MWAF_DEB_TARGETS=${MWAF_DEB_TARGETS:-ubuntu:24.04 debian:12}
 command -v dpkg-deb >/dev/null 2>&1 || { echo "dpkg-deb is required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; exit 1; }
 
@@ -45,4 +46,12 @@ chmod 0755 "$root/DEBIAN/prerm"
 
 filename="mwaf-agent_${VERSION}_amd64.deb"
 dpkg-deb --build --root-owner-group "$root" "$OUTPUT_DIR/$filename"
-jq -n --arg id "mwaf-agent-ubuntu-24.04-amd64-${VERSION}" --arg version "$VERSION" --arg path "$filename" '{id:$id,kind:"agent",name:"mwaf-agent",version:$version,os_id:"ubuntu",os_version:"24.04",architecture:"amd64",path:$path}' > "$METADATA_DIR/agent.json"
+for target in $MWAF_DEB_TARGETS; do
+  case "$target" in
+    ubuntu:24.04|debian:12) ;;
+    *) echo "unsupported DEB target: $target" >&2; exit 1 ;;
+  esac
+  target_os=${target%%:*}
+  target_version=${target#*:}
+  jq -n --arg id "mwaf-agent-${target_os}-${target_version}-amd64-${VERSION}" --arg version "$VERSION" --arg os_id "$target_os" --arg os_version "$target_version" --arg path "$filename" '{id:$id,kind:"agent",name:"mwaf-agent",version:$version,os_id:$os_id,os_version:$os_version,architecture:"amd64",path:$path}' > "$METADATA_DIR/agent-${target_os}-${target_version}.json"
+done

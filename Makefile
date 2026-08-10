@@ -1,11 +1,12 @@
 SHELL := /bin/sh
 
-.PHONY: fmt build-manager build-agent dev dev-down dev-db-logs prepare deploy pull prepare-dev deploy-dev pull-dev down logs e2e e2e-up e2e-verify e2e-status e2e-logs e2e-down e2e-remote e2e-remote-verify e2e-remote-down
+.PHONY: fmt build-manager build-agent dev dev-full dev-bundle dev-down dev-db-logs prepare deploy pull prepare-dev deploy-dev pull-dev down logs e2e e2e-debian12 e2e-up e2e-verify e2e-status e2e-logs e2e-down e2e-remote e2e-remote-verify e2e-remote-down
 
 MWAF_E2E_REMOTE_ADMIN_URL ?= https://192.168.7.200:18443
 MWAF_E2E_REMOTE_CA_CERT ?= deploy/compose/secrets/mwaf_ca_cert.pem
 MWAF_E2E_REMOTE_RUNTIME_DIR ?= .local/mwaf-e2e-192-168-7-200
 MWAF_E2E_REMOTE_PROJECT ?= mwaf-e2e-192-168-7-200
+MWAF_E2E_DEBIAN12_IMAGE ?= docker.io/library/debian:12-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
 fmt:
 	gofmt -w cmd internal migrations web/assets.go
@@ -20,6 +21,12 @@ build-agent:
 
 dev:
 	sh ./deploy/compose/run-local.sh
+
+dev-bundle:
+	sh ./deploy/compose/build-local-bundle.sh
+
+dev-full: dev-bundle
+	MWAF_DEV_BUNDLE_MODE=local MWAF_DB_MIGRATE=false sh ./deploy/compose/run-local.sh
 
 dev-down:
 	sh ./deploy/compose/run-local.sh down
@@ -50,6 +57,9 @@ logs:
 
 e2e:
 	./deploy/e2e/run.sh all
+
+e2e-debian12:
+	MWAF_E2E_RUNTIME_DIR=".local/mwaf-e2e-debian12" MWAF_E2E_PROJECT_NAME="mwaf-e2e-debian12" ./deploy/e2e/run.sh all --customer-image "$(MWAF_E2E_DEBIAN12_IMAGE)"
 
 e2e-up:
 	./deploy/e2e/run.sh up

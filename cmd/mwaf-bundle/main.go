@@ -32,9 +32,22 @@ func main() {
 	commit := flag.String("commit", "", "source commit")
 	previousBundle := flag.String("previous-bundle", "", "verified previous bundle directory")
 	previousPublicKey := flag.String("previous-public-key", "", "previous bundle public key PEM")
+	verifyBundle := flag.String("verify-bundle", "", "verify an existing bundle directory and exit")
+	verifyPublicKey := flag.String("verify-public-key", "", "public key for -verify-bundle")
 	policySourceMetadata := flag.String("policy-source-metadata", "dist/policy-source-metadata", "policy source metadata directory")
 	policySources := flag.String("policy-sources", "dist/policy-sources", "policy source input directory")
 	flag.Parse()
+	if *verifyBundle != "" || *verifyPublicKey != "" {
+		if *verifyBundle == "" || *verifyPublicKey == "" {
+			fmt.Fprintln(os.Stderr, "verify-bundle and verify-public-key are required together")
+			os.Exit(1)
+		}
+		if _, err := packages.Load(*verifyBundle, *verifyPublicKey, "", false); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := assemble(*metadataDir, *packagesDir, *policySourceMetadata, *policySources, *outputDir, *privateKeyPath, *publicKeyPath, *version, *commit, *previousBundle, *previousPublicKey); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -442,7 +455,9 @@ func attachPreviousRelease(current []model.PackageArtifact, previousBundle, prev
 func sameTarget(current, previous model.PackageArtifact) bool {
 	return current.Kind == previous.Kind && current.OSID == previous.OSID && current.OSVersion == previous.OSVersion &&
 		current.Architecture == previous.Architecture && current.WebServer == previous.WebServer &&
-		model.NormalizeIntegrationMode(current.IntegrationMode) == model.NormalizeIntegrationMode(previous.IntegrationMode)
+		current.WebServerBuild == previous.WebServerBuild &&
+		model.NormalizeIntegrationMode(current.IntegrationMode) == model.NormalizeIntegrationMode(previous.IntegrationMode) &&
+		model.NormalizePackageFormat(current.PackageFormat) == model.NormalizePackageFormat(previous.PackageFormat)
 }
 
 func stagePreviousArtifact(previousBundle, outputDir string, artifact *model.PackageArtifact) error {

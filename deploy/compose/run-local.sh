@@ -36,6 +36,8 @@ requested_admin_port=${MWAF_ADMIN_PORT:-}
 requested_admin_bind=${MWAF_DEV_ADMIN_BIND:-}
 requested_public_url=${MWAF_PUBLIC_URL:-}
 requested_dev_bundle_image=${MWAF_DEV_BUNDLE_IMAGE:-}
+requested_dev_bundle_mode=${MWAF_DEV_BUNDLE_MODE:-}
+requested_db_migrate=${MWAF_DB_MIGRATE:-}
 set -a
 . "$script_dir/.env"
 set +a
@@ -43,6 +45,8 @@ set +a
 [ -z "$requested_admin_bind" ] || export MWAF_DEV_ADMIN_BIND="$requested_admin_bind"
 [ -z "$requested_public_url" ] || export MWAF_PUBLIC_URL="$requested_public_url"
 [ -z "$requested_dev_bundle_image" ] || export MWAF_DEV_BUNDLE_IMAGE="$requested_dev_bundle_image"
+[ -z "$requested_dev_bundle_mode" ] || export MWAF_DEV_BUNDLE_MODE="$requested_dev_bundle_mode"
+[ -z "$requested_db_migrate" ] || export MWAF_DB_MIGRATE="$requested_db_migrate"
 
 admin_port=${MWAF_ADMIN_PORT:-8443}
 
@@ -78,12 +82,28 @@ if bundle_complete "$dist_bundle_root" "$dist_bundle_public_key"; then
   dist_bundle_schema=${dist_bundle_schema:-0}
 fi
 
-# Local development follows the newest published signed bundle by default.
-# A specific immutable release can be selected only through
-# MWAF_DEV_BUNDLE_IMAGE. A checkout bundle remains an offline fallback.
-manager_image=${MWAF_DEV_BUNDLE_IMAGE:-ghcr.io/fhwang0926/m-waf-manager:latest}
-echo "Refreshing the signed development bundle from $manager_image"
-if docker pull --platform linux/amd64 "$manager_image"; then
+bundle_mode=${MWAF_DEV_BUNDLE_MODE:-release}
+case "$bundle_mode" in release|local) ;; *) echo "MWAF_DEV_BUNDLE_MODE must be release or local" >&2; exit 1 ;; esac
+
+if [ "$bundle_mode" = local ]; then
+  current_bundle_file="$runtime_root/dev-bundle-current"
+  [ -s "$current_bundle_file" ] || { echo "Local development bundle is missing. Run 'make dev-bundle' first." >&2; exit 1; }
+  local_bundle_release=$(sed -n '1p' "$current_bundle_file")
+  case "$local_bundle_release" in /*) ;; *) echo "Local development bundle path is invalid" >&2; exit 1 ;; esac
+  local_bundle_root="$local_bundle_release/bundle"
+  local_bundle_public_key="$local_bundle_release/package-signing.pub"
+  bundle_complete "$local_bundle_root" "$local_bundle_public_key" || { echo "Local development bundle is incomplete" >&2; exit 1; }
+  (cd "$repository_root" && go run ./cmd/mwaf-bundle -verify-bundle "$local_bundle_root" -verify-public-key "$local_bundle_public_key")
+  bundle_root="$local_bundle_root"
+  bundle_public_key="$local_bundle_public_key"
+  bundle_available=1
+  echo "Using locally built signed development bundle from $local_bundle_release"
+else
+  # Manager/UI development follows a published signed bundle by default.
+  # A specific immutable release can be selected through MWAF_DEV_BUNDLE_IMAGE.
+  manager_image=${MWAF_DEV_BUNDLE_IMAGE:-ghcr.io/fhwang0926/m-waf-manager:latest}
+  echo "Refreshing the signed development bundle from $manager_image"
+  if docker pull --platform linux/amd64 "$manager_image"; then
   image_id=$(docker image inspect --format '{{.Id}}' "$manager_image")
   image_id=${image_id#sha256:}
   case "$image_id" in
@@ -124,10 +144,11 @@ if docker pull --platform linux/amd64 "$manager_image"; then
   bundle_public_key="$cache_bundle_public_key"
   bundle_available=1
   echo "Using latest signed schema v${image_bundle_schema} development bundle from $manager_image"
-elif [ "$bundle_available" -eq 1 ]; then
-  echo "Could not refresh the latest signed development bundle; using local schema v${dist_bundle_schema} fallback" >&2
-else
-  echo "Latest tagged release bundle is unavailable; starting Manager development without package installation APIs" >&2
+  elif [ "$bundle_available" -eq 1 ]; then
+    echo "Could not refresh the latest signed development bundle; using local schema v${dist_bundle_schema} fallback" >&2
+  else
+    echo "Latest tagged release bundle is unavailable; starting Manager development without package installation APIs" >&2
+  fi
 fi
 
 if [ "$bundle_available" -eq 1 ]; then
@@ -149,7 +170,7 @@ export MWAF_DB_PORT=${MWAF_DEV_DB_PORT:-3306}
 export MWAF_DB_NAME=${MWAF_DB_NAME:-mwaf}
 export MWAF_DB_USER=${MWAF_DB_USER:-mwaf}
 export MWAF_DB_PASSWORD_FILE="$script_dir/secrets/mariadb_app_password"
-export MWAF_DB_MIGRATE=true
+export MWAF_DB_MIGRATE=${MWAF_DB_MIGRATE:-true}
 export MWAF_SESSION_KEY_FILE="$script_dir/secrets/mwaf_session_key"
 export MWAF_TLS_CERT="$script_dir/secrets/mwaf_tls_cert.pem"
 export MWAF_TLS_KEY="$script_dir/secrets/mwaf_tls_key.pem"
@@ -167,7 +188,7 @@ fi
 export MWAF_ARTIFACT_ROOT="$runtime_root/artifacts"
 export MWAF_DEV_LIVE_RELOAD=true
 
-echo "Starting local M-WAF Admin UI at https://localhost:$admin_port"
+echo "Starting local M-WAF Admin UI at $MWAF_PUBLIC_URL"
 echo "Agent requests use the same Manager URL at $MWAF_PUBLIC_URL"
 echo "Go, template, CSS, and JavaScript changes are applied automatically."
 if [ -z "${MWAF_CRS_GITHUB_TOKEN:-}" ]; then

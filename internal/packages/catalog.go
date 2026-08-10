@@ -156,6 +156,10 @@ func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, mod
 	}
 	var agent *model.PackageArtifact
 	var module *model.PackageArtifact
+	desiredModuleFormat := model.PackageFormatDEB
+	if inventory.InstallationMode == model.InstallationModeCustomZIP {
+		desiredModuleFormat = model.PackageFormatZIP
+	}
 	for i := range c.manifest.Artifacts {
 		artifact := c.manifest.Artifacts[i]
 		if rollbackTargets[artifact.ID] || !matchesBase(artifact, inventory) {
@@ -168,6 +172,9 @@ func (c *Catalog) Resolve(inventory model.Inventory) (model.PackageArtifact, mod
 			}
 			agent = &artifact
 		case "module":
+			if model.NormalizePackageFormat(artifact.PackageFormat) != desiredModuleFormat {
+				continue
+			}
 			if artifact.WebServer != inventory.WebServer {
 				continue
 			}
@@ -225,8 +232,15 @@ func (c *Catalog) ResolveCRS(inventory model.Inventory, crsVersion string) (mode
 	}
 	var currentModules []model.PackageArtifact
 	var rollbackModules []model.PackageArtifact
+	desiredModuleFormat := model.PackageFormatDEB
+	if inventory.InstallationMode == model.InstallationModeCustomZIP {
+		desiredModuleFormat = model.PackageFormatZIP
+	}
 	for _, artifact := range c.manifest.Artifacts {
 		if artifact.Kind != "module" || !matchesBase(artifact, inventory) || artifact.WebServer != inventory.WebServer {
+			continue
+		}
+		if model.NormalizePackageFormat(artifact.PackageFormat) != desiredModuleFormat {
 			continue
 		}
 		if model.NormalizeIntegrationMode(artifact.IntegrationMode) != model.NormalizeIntegrationMode(inventory.IntegrationMode) {
@@ -310,6 +324,16 @@ func (c *Catalog) validateArtifact(artifact model.PackageArtifact) error {
 	}
 	if artifact.Kind != "agent" && artifact.Kind != "module" {
 		return fmt.Errorf("package artifact %q has invalid kind %q", artifact.ID, artifact.Kind)
+	}
+	format := model.NormalizePackageFormat(artifact.PackageFormat)
+	if format != model.PackageFormatDEB && format != model.PackageFormatZIP {
+		return fmt.Errorf("package artifact %q has unsupported format %q", artifact.ID, format)
+	}
+	if artifact.Kind == "agent" && format != model.PackageFormatDEB {
+		return fmt.Errorf("Agent artifact %q must use deb format", artifact.ID)
+	}
+	if format == model.PackageFormatZIP && (artifact.Kind != "module" || artifact.IntegrationMode != model.IntegrationModeExternal || artifact.WebServerBuild == "" || artifact.RuntimeABI == "" || artifact.InstallRoot != "/opt/m-waf") {
+		return fmt.Errorf("custom module artifact %q requires external integration, exact build hash, runtime ABI, and /opt/m-waf install root", artifact.ID)
 	}
 	if artifact.Kind == "module" {
 		mode := model.NormalizeIntegrationMode(artifact.IntegrationMode)

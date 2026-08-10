@@ -91,7 +91,7 @@ func (s *Server) enterprises(w http.ResponseWriter, r *http.Request) {
 func enterpriseDetailTab(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
-	case "users", "servers", "policies", "groups", "management":
+	case "users", "servers", "policies", "management":
 		return value
 	default:
 		return "overview"
@@ -114,7 +114,6 @@ func (s *Server) enterpriseDetail(w http.ResponseWriter, r *http.Request) {
 	var users []UserRecord
 	var servers []ServerRecord
 	var policies []EnterprisePolicyRecord
-	var groups []GroupRecord
 	activeUserCount := 0
 	if tab == "overview" || tab == "users" {
 		users, err = s.store.ListUsers(r.Context(), enterpriseID)
@@ -143,12 +142,6 @@ func (s *Server) enterpriseDetail(w http.ResponseWriter, r *http.Request) {
 			s.renderAdminError(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 			return
 		}
-	case "groups":
-		groups, err = s.store.ListGroups(r.Context(), enterpriseID)
-		if err != nil {
-			s.renderAdminError(w, r, http.StatusInternalServerError, "서버 그룹을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-			return
-		}
 	}
 
 	data := map[string]any{
@@ -158,7 +151,6 @@ func (s *Server) enterpriseDetail(w http.ResponseWriter, r *http.Request) {
 		"ActiveUserCount":    activeUserCount,
 		"Servers":            servers,
 		"Policies":           policies,
-		"Groups":             groups,
 		"VisibleUserCount":   len(users),
 		"HasDeletedUserData": enterprise.UserCount > uint64(len(users)),
 		"Notice":             r.URL.Query().Get("notice"),

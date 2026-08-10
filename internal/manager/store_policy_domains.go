@@ -9,15 +9,16 @@ import (
 	"sort"
 	"time"
 
+	"github.com/Fhwang0926/m-waf/internal/model"
 	"github.com/Fhwang0926/m-waf/internal/systempolicy"
 )
 
 func (s *Store) ListSystemPolicyVersions(ctx context.Context) ([]SystemPolicyVersionRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT sp.id,sp.policy_key,sp.version,sp.schema_version,sp.name,sp.description,sp.crs_track,sp.crs_version,sp.status,sp.template_sha256,sp.source_commit,sp.hot_rule_set_version,sp.hot_rule_set_sha256,sp.defaults_json,sp.migration_notes_json,
-COUNT(DISTINCT ep.enterprise_id),COUNT(DISTINCT ds.server_id),(SELECT COUNT(*) FROM policy_rollouts pr WHERE pr.target_system_policy_version_id=sp.id AND pr.status IN ('AWAITING_APPROVAL','QUEUED','CANARY','EXPANDING','PAUSED')),sp.created_at
+COUNT(DISTINCT ep.enterprise_id),COUNT(DISTINCT eps.server_id),(SELECT COUNT(*) FROM policy_rollouts pr WHERE pr.target_system_policy_version_id=sp.id AND pr.status IN ('AWAITING_APPROVAL','QUEUED','CANARY','EXPANDING','PAUSED')),sp.created_at
 FROM system_policy_versions sp
 LEFT JOIN enterprise_policies ep ON ep.current_system_policy_version_id=sp.id
-LEFT JOIN desired_states ds ON ds.policy_revision_id=ep.current_revision_id
+LEFT JOIN enterprise_policy_servers eps ON eps.enterprise_policy_id=ep.id
 GROUP BY sp.id,sp.policy_key,sp.version,sp.schema_version,sp.name,sp.description,sp.crs_track,sp.crs_version,sp.status,sp.template_sha256,sp.source_commit,sp.hot_rule_set_version,sp.hot_rule_set_sha256,sp.defaults_json,sp.migration_notes_json,sp.created_at
 ORDER BY sp.policy_key,sp.created_at DESC`)
 	if err != nil {
@@ -412,6 +413,14 @@ VALUES (?,?,?,?,?,NULLIF(?,''),NULLIF(?,''),?,?,?,NULLIF(?,''),NULLIF(?,''))`, p
 				return err
 			}
 		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO enterprise_policy_servers(server_id,enterprise_policy_id)
+SELECT s.id,? FROM servers s
+JOIN desired_states ds ON ds.server_id=s.id
+JOIN policy_revisions pr ON pr.id=ds.policy_revision_id
+WHERE s.enterprise_id=? AND s.revoked_at IS NULL AND pr.enterprise_policy_id=?
+ON DUPLICATE KEY UPDATE enterprise_policy_id=VALUES(enterprise_policy_id),updated_at=UTC_TIMESTAMP(6)`, policyID, current.EnterpriseID, policyID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -424,7 +433,8 @@ COALESCE((SELECT r.id FROM policy_rollouts r WHERE r.enterprise_policy_id=ep.id 
 COALESCE((SELECT r.status FROM policy_rollouts r WHERE r.enterprise_policy_id=ep.id ORDER BY r.created_at DESC LIMIT 1),''),
 EXISTS(SELECT 1 FROM policy_rollouts r WHERE r.enterprise_policy_id=ep.id AND r.status IN ('AWAITING_APPROVAL','QUEUED','CANARY','EXPANDING','PAUSED')),ep.created_at,ep.updated_at,
 EXISTS(SELECT 1 FROM policy_migration_impacts mi WHERE mi.enterprise_policy_id=ep.id AND mi.target_system_policy_version_id=latest.id AND mi.status='MIGRATION_REQUIRED'),
-COALESCE((SELECT mi.detail FROM policy_migration_impacts mi WHERE mi.enterprise_policy_id=ep.id AND mi.target_system_policy_version_id=latest.id LIMIT 1),'')
+COALESCE((SELECT mi.detail FROM policy_migration_impacts mi WHERE mi.enterprise_policy_id=ep.id AND mi.target_system_policy_version_id=latest.id LIMIT 1),''),
+(SELECT COUNT(*) FROM enterprise_policy_servers eps WHERE eps.enterprise_policy_id=ep.id)
 FROM enterprise_policies ep
 JOIN enterprises e ON e.id=ep.enterprise_id
 LEFT JOIN system_policy_versions cur ON cur.id=ep.current_system_policy_version_id
@@ -448,7 +458,7 @@ LEFT JOIN policy_revisions pr ON pr.id=ep.current_revision_id`
 		var settings sql.NullString
 		if err := rows.Scan(&item.ID, &item.EnterpriseID, &item.EnterpriseName, &item.Name, &item.Description, &item.Target, &item.SystemPolicyKey, &item.SystemPolicyName,
 			&item.CurrentSystemPolicyID, &item.CurrentSystemPolicyVersion, &item.CurrentCRSVersion, &item.LatestSystemPolicyID, &item.LatestSystemPolicyVersion, &item.LatestCRSVersion,
-			&item.UpdateStrategy, &item.Status, &item.CurrentRevisionID, &item.PreviousRevisionID, &item.CurrentMode, &settings, &item.LatestRolloutID, &item.LatestRolloutStatus, &item.HasActiveRollout, &item.CreatedAt, &item.UpdatedAt, &item.MigrationRequired, &item.MigrationDetail); err != nil {
+			&item.UpdateStrategy, &item.Status, &item.CurrentRevisionID, &item.PreviousRevisionID, &item.CurrentMode, &settings, &item.LatestRolloutID, &item.LatestRolloutStatus, &item.HasActiveRollout, &item.CreatedAt, &item.UpdatedAt, &item.MigrationRequired, &item.MigrationDetail, &item.ServerCount); err != nil {
 			return nil, err
 		}
 		if settings.Valid {
@@ -543,7 +553,7 @@ WHERE ep.id=? AND ep.status='ACTIVE' AND e.status='ACTIVE' AND COALESCE(ep.curre
 	return tx.Commit()
 }
 
-func (s *Store) CreateEnterprisePolicyWithRollout(ctx context.Context, enterpriseID, policyID, name, description, target, systemPolicyKey, strategy, userID string, revision PolicyRevisionInput, rolloutType, rolloutStatus string, serverIDs []string) (string, error) {
+func (s *Store) CreateEnterprisePolicyWithRollout(ctx context.Context, enterpriseID, policyID, name, description, systemPolicyKey, strategy, userID string, revision PolicyRevisionInput, rolloutType, rolloutStatus string, serverIDs []string) (string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", err
@@ -552,6 +562,14 @@ func (s *Store) CreateEnterprisePolicyWithRollout(ctx context.Context, enterpris
 	if err := lockActiveEnterprise(ctx, tx, enterpriseID); err != nil {
 		return "", err
 	}
+	serverIDs, err = validatePolicyRolloutServersTx(ctx, tx, enterpriseID, serverIDs)
+	if err != nil {
+		return "", err
+	}
+	if err := ensureNoActivePolicyRolloutsTx(ctx, tx, serverIDs, ""); err != nil {
+		return "", err
+	}
+	target := "policy:" + policyID
 	if _, err := tx.ExecContext(ctx, `INSERT INTO enterprise_policies(id,enterprise_id,name,description,target,system_policy_key,update_strategy,status,created_by) VALUES (?,?,?,?,?,?,?,'ACTIVE',NULLIF(?,''))`, policyID, enterpriseID, name, description, target, systemPolicyKey, strategy, userID); err != nil {
 		return "", err
 	}
@@ -574,6 +592,16 @@ func (s *Store) ConvertLegacyEnterprisePolicy(ctx context.Context, policy Enterp
 		return "", err
 	}
 	defer tx.Rollback()
+	if err := lockActiveEnterprise(ctx, tx, policy.EnterpriseID); err != nil {
+		return "", err
+	}
+	serverIDs, err = validatePolicyRolloutServersTx(ctx, tx, policy.EnterpriseID, serverIDs)
+	if err != nil {
+		return "", err
+	}
+	if err := ensureNoActivePolicyRolloutsTx(ctx, tx, serverIDs, ""); err != nil {
+		return "", err
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE enterprise_policies SET status='ACTIVE',system_policy_key=?,update_strategy='MANUAL'
 WHERE id=? AND enterprise_id=? AND status='LEGACY_LOCKED' AND COALESCE(current_revision_id,'')=?
 AND EXISTS (SELECT 1 FROM enterprises e WHERE e.id=enterprise_policies.enterprise_id AND e.status='ACTIVE')`, systemPolicyKey, policy.ID, policy.EnterpriseID, expectedRevisionID)
@@ -622,6 +650,15 @@ func (s *Store) CreatePolicyRollout(ctx context.Context, policy EnterprisePolicy
 	}
 	if active != 0 {
 		return "", errors.New("enterprise policy already has an active rollout")
+	}
+	if len(serverIDs) != 0 {
+		serverIDs, err = validatePolicyRolloutServersTx(ctx, tx, policy.EnterpriseID, serverIDs)
+		if err != nil {
+			return "", err
+		}
+		if err := ensureNoActivePolicyRolloutsTx(ctx, tx, serverIDs, ""); err != nil {
+			return "", err
+		}
 	}
 	if revision != nil {
 		if _, err := tx.ExecContext(ctx, `UPDATE enterprise_policies SET name=?,description=? WHERE id=? AND enterprise_id=?`, revision.Name, revision.Description, policy.ID, policy.EnterpriseID); err != nil {
@@ -690,11 +727,11 @@ func insertRolloutTargetsTx(ctx context.Context, tx *sql.Tx, rolloutID, finalRev
 		if index > 0 {
 			batchNo = 1 + (index-1)/25
 		}
-		var agentID, moduleID sql.NullString
-		if err := tx.QueryRowContext(ctx, `SELECT agent_package_id,module_package_id FROM desired_states WHERE server_id=?`, serverID).Scan(&agentID, &moduleID); err != nil {
+		var agentID, moduleID, sourceRevisionID sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT agent_package_id,module_package_id,policy_revision_id FROM desired_states WHERE server_id=?`, serverID).Scan(&agentID, &moduleID, &sourceRevisionID); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO policy_rollout_targets(rollout_id,server_id,batch_no,status,source_agent_package_id,source_module_package_id,final_revision_id,detail) VALUES (?,?,?,'PENDING',?,?,?,'')`, rolloutID, serverID, batchNo, agentID, moduleID, finalRevisionID); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO policy_rollout_targets(rollout_id,server_id,batch_no,status,source_agent_package_id,source_module_package_id,source_revision_id,final_revision_id,detail) VALUES (?,?,?,'PENDING',?,?,?,?, '')`, rolloutID, serverID, batchNo, agentID, moduleID, sourceRevisionID, finalRevisionID); err != nil {
 			return err
 		}
 	}
@@ -724,12 +761,41 @@ func (s *Store) RetryPolicyRollout(ctx context.Context, scopeEnterpriseID, polic
 		return err
 	}
 	defer tx.Rollback()
+	var enterpriseID string
+	if err := tx.QueryRowContext(ctx, `SELECT ep.enterprise_id
+FROM enterprise_policies ep JOIN enterprises e ON e.id=ep.enterprise_id
+WHERE ep.id=? AND e.status='ACTIVE' AND (?='' OR ep.enterprise_id=?)`, policyID, scopeEnterpriseID, scopeEnterpriseID).Scan(&enterpriseID); err != nil {
+		return err
+	}
+	if err := lockActiveEnterprise(ctx, tx, enterpriseID); err != nil {
+		return err
+	}
 	var active int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM policy_rollouts WHERE enterprise_policy_id=? AND id<>? AND status IN ('AWAITING_APPROVAL','QUEUED','CANARY','EXPANDING','PAUSED')`, policyID, rolloutID).Scan(&active); err != nil {
 		return err
 	}
 	if active != 0 {
 		return errors.New("enterprise policy already has an active rollout")
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT server_id FROM policy_rollout_targets
+WHERE rollout_id=? AND status IN ('FAILED','ROLLED_BACK') ORDER BY server_id`, rolloutID)
+	if err != nil {
+		return err
+	}
+	retryServerIDs := make([]string, 0)
+	for rows.Next() {
+		var serverID string
+		if err := rows.Scan(&serverID); err != nil {
+			rows.Close()
+			return err
+		}
+		retryServerIDs = append(retryServerIDs, serverID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := ensureNoActivePolicyRolloutsTx(ctx, tx, retryServerIDs, rolloutID); err != nil {
+		return err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE policy_rollouts r JOIN enterprise_policies ep ON ep.id=r.enterprise_policy_id JOIN enterprises e ON e.id=ep.enterprise_id
 SET r.status='QUEUED',r.approved_by=?,r.detail='',r.started_at=UTC_TIMESTAMP(6),r.completed_at=NULL
@@ -744,7 +810,7 @@ WHERE r.id=? AND r.enterprise_policy_id=? AND r.status IN ('PAUSED','FAILED') AN
 		}
 		return sql.ErrNoRows
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE policy_rollout_targets SET status='PENDING',resume_status=NULL,detail='',stabilized_at=NULL WHERE rollout_id=?`, rolloutID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE policy_rollout_targets SET status='PENDING',resume_status=NULL,detail='',stabilized_at=NULL WHERE rollout_id=? AND status IN ('FAILED','ROLLED_BACK')`, rolloutID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -819,7 +885,7 @@ WHERE e.status='ACTIVE' AND r.status IN ('QUEUED','CANARY','EXPANDING') ORDER BY
 }
 
 func (s *Store) ListPolicyRolloutTargets(ctx context.Context, rolloutID string) ([]PolicyRolloutTargetRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT t.rollout_id,t.server_id,s.name,t.batch_no,t.status,COALESCE(t.resume_status,''),COALESCE(t.source_agent_package_id,''),COALESCE(t.source_module_package_id,''),COALESCE(t.target_agent_package_id,''),COALESCE(t.target_module_package_id,''),COALESCE(t.transition_revision_id,''),COALESCE(t.final_revision_id,''),COALESCE(t.package_deployment_id,''),t.detail,
+	rows, err := s.db.QueryContext(ctx, `SELECT t.rollout_id,t.server_id,s.name,t.batch_no,t.status,COALESCE(t.resume_status,''),COALESCE(t.source_agent_package_id,''),COALESCE(t.source_module_package_id,''),COALESCE(t.source_revision_id,''),COALESCE(t.target_agent_package_id,''),COALESCE(t.target_module_package_id,''),COALESCE(t.transition_revision_id,''),COALESCE(t.final_revision_id,''),COALESCE(t.package_deployment_id,''),t.detail,
 s.status,(s.revoked_at IS NULL AND s.last_heartbeat_at >= UTC_TIMESTAMP(6) - INTERVAL 2 MINUTE),s.inventory_json,s.policy_revision,COALESCE(ds.policy_revision_id,''),COALESCE(pkg.status,''),COALESCE(pd.status,''),COALESCE(tpd.status,''),t.stabilized_at,t.updated_at
 FROM policy_rollout_targets t JOIN servers s ON s.id=t.server_id
 LEFT JOIN desired_states ds ON ds.server_id=s.id
@@ -835,7 +901,7 @@ WHERE t.rollout_id=? ORDER BY t.batch_no,s.name`, rolloutID)
 	for rows.Next() {
 		var item PolicyRolloutTargetRecord
 		var inventory []byte
-		if err := rows.Scan(&item.RolloutID, &item.ServerID, &item.ServerName, &item.BatchNo, &item.Status, &item.ResumeStatus, &item.SourceAgentPackageID, &item.SourceModulePackageID, &item.TargetAgentPackageID, &item.TargetModulePackageID, &item.TransitionRevisionID, &item.FinalRevisionID, &item.PackageDeploymentID, &item.Detail,
+		if err := rows.Scan(&item.RolloutID, &item.ServerID, &item.ServerName, &item.BatchNo, &item.Status, &item.ResumeStatus, &item.SourceAgentPackageID, &item.SourceModulePackageID, &item.SourceRevisionID, &item.TargetAgentPackageID, &item.TargetModulePackageID, &item.TransitionRevisionID, &item.FinalRevisionID, &item.PackageDeploymentID, &item.Detail,
 			&item.ServerStatus, &item.Online, &inventory, &item.CurrentPolicyRevision, &item.DesiredPolicyRevision, &item.PackageStatus, &item.PolicyStatus, &item.TransitionPolicyStatus, &item.StabilizedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -855,8 +921,41 @@ func (s *Store) UpdatePolicyRolloutStatus(ctx context.Context, rolloutID, status
 }
 
 func (s *Store) UpdatePolicyRolloutTarget(ctx context.Context, rolloutID, serverID, status, detail string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE policy_rollout_targets SET status=?,resume_status=NULL,detail=?,stabilized_at=IF(?='APPLIED',UTC_TIMESTAMP(6),stabilized_at) WHERE rollout_id=? AND server_id=?`, status, detail, status, rolloutID, serverID)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE policy_rollout_targets SET status=?,resume_status=NULL,detail=?,stabilized_at=IF(?='APPLIED',UTC_TIMESTAMP(6),stabilized_at) WHERE rollout_id=? AND server_id=?`, status, detail, status, rolloutID, serverID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		if err != nil {
+			return err
+		}
+		return sql.ErrNoRows
+	}
+	if status == "APPLIED" {
+		var rolloutType, policyID, enterpriseID, policyTarget string
+		var fromRevisionID sql.NullString
+		var requestedBy sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT r.rollout_type,r.enterprise_policy_id,ep.enterprise_id,ep.target,r.from_revision_id,r.requested_by
+FROM policy_rollouts r JOIN enterprise_policies ep ON ep.id=r.enterprise_policy_id WHERE r.id=?`, rolloutID).Scan(&rolloutType, &policyID, &enterpriseID, &policyTarget, &fromRevisionID, &requestedBy); err != nil {
+			return err
+		}
+		if rolloutType == "SEED" && (fromRevisionID.Valid || policyTarget == "policy:"+policyID) {
+			_, err := tx.ExecContext(ctx, `INSERT INTO enterprise_policy_servers(server_id,enterprise_policy_id,assigned_by)
+SELECT s.id,ep.id,NULLIF(?,'') FROM servers s JOIN enterprise_policies ep ON ep.id=?
+WHERE s.id=? AND s.enterprise_id=ep.enterprise_id AND ep.enterprise_id=? AND s.revoked_at IS NULL
+ON DUPLICATE KEY UPDATE enterprise_policy_id=VALUES(enterprise_policy_id),assigned_by=VALUES(assigned_by),assigned_at=UTC_TIMESTAMP(6),updated_at=UTC_TIMESTAMP(6)`, requestedBy, policyID, serverID, enterpriseID)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeferPolicyRolloutTarget(ctx context.Context, rolloutID, serverID, resumeStatus string) error {
@@ -977,11 +1076,23 @@ func (s *Store) AssignPackagesForRollout(ctx context.Context, rolloutID, enterpr
 	if accessible != 1 {
 		return "", sql.ErrNoRows
 	}
+	var inventoryJSON []byte
+	if err := tx.QueryRowContext(ctx, `SELECT inventory_json FROM servers WHERE id=?`, serverID).Scan(&inventoryJSON); err != nil {
+		return "", err
+	}
+	var inventory model.Inventory
+	if err := json.Unmarshal(inventoryJSON, &inventory); err != nil {
+		return "", fmt.Errorf("decode server inventory: %w", err)
+	}
+	planDetail, err := encodePackageDeploymentPlan(inventory.WebServerControl)
+	if err != nil {
+		return "", err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE package_deployments SET status='SUPERSEDED',detail='정책 rollout으로 대체됨',updated_at=UTC_TIMESTAMP(6) WHERE server_id=? AND status='PENDING'`, serverID); err != nil {
 		return "", err
 	}
 	deploymentID := randomID()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO package_deployments(id,server_id,agent_package_id,module_package_id,status,detail,requested_by,rollout_id) VALUES (?,?,?,?,'PENDING','',NULLIF(?,''),?)`, deploymentID, serverID, agentID, moduleID, userID, rolloutID); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO package_deployments(id,server_id,agent_package_id,module_package_id,status,detail,requested_by,rollout_id) VALUES (?,?,?,?,'PENDING',?,NULLIF(?,''),?)`, deploymentID, serverID, agentID, moduleID, planDetail, userID, rolloutID); err != nil {
 		return "", err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE desired_states SET agent_package_id=?,module_package_id=?,package_deployment_id=? WHERE server_id=?`, agentID, moduleID, deploymentID, serverID); err != nil {
@@ -1015,7 +1126,7 @@ WHERE ep.id=? AND e.status='ACTIVE' FOR UPDATE`, rollout.EnterprisePolicyID).Sca
 	if currentRevisionID != rollout.ExpectedRevisionID {
 		return errors.New("enterprise policy revision changed")
 	}
-	if rollout.Type != "RECOVERY" {
+	if rollout.Type != "RECOVERY" && rollout.TargetRevisionID != currentRevisionID {
 		if _, err := tx.ExecContext(ctx, `UPDATE enterprise_policies SET previous_revision_id=current_revision_id,current_revision_id=?,current_system_policy_version_id=? WHERE id=?`, rollout.TargetRevisionID, rollout.TargetSystemPolicyVersionID, rollout.EnterprisePolicyID); err != nil {
 			return err
 		}

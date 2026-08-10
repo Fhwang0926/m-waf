@@ -100,6 +100,61 @@ func TestResolveCRSAcceptsPolicyBundleModuleWithoutEmbeddedCRS(t *testing.T) {
 	}
 }
 
+func TestResolveSupportedDEBTargetMatrix(t *testing.T) {
+	targets := []struct {
+		osID      string
+		osVersion string
+	}{
+		{osID: "ubuntu", osVersion: "24.04"},
+		{osID: "debian", osVersion: "12"},
+	}
+	var artifacts []model.PackageArtifact
+	for _, target := range targets {
+		prefix := target.osID + "-" + target.osVersion
+		artifacts = append(artifacts,
+			model.PackageArtifact{ID: prefix + "-agent", Kind: "agent", Version: "1", OSID: target.osID, OSVersion: target.osVersion, Architecture: "amd64"},
+			model.PackageArtifact{ID: prefix + "-apache", Kind: "module", Version: "1", OSID: target.osID, OSVersion: target.osVersion, Architecture: "amd64", WebServer: "apache"},
+			model.PackageArtifact{ID: prefix + "-nginx", Kind: "module", Version: "1", OSID: target.osID, OSVersion: target.osVersion, Architecture: "amd64", WebServer: "nginx"},
+		)
+	}
+	catalog := &Catalog{manifest: model.BundleManifest{Artifacts: artifacts}}
+	for _, target := range targets {
+		for _, webServer := range []string{"apache", "nginx"} {
+			inventory := model.Inventory{OSID: target.osID, OSVersion: target.osVersion, Architecture: "amd64", WebServer: webServer}
+			agent, module, err := catalog.Resolve(inventory)
+			if err != nil {
+				t.Fatalf("resolve %s %s %s: %v", target.osID, target.osVersion, webServer, err)
+			}
+			if agent.OSID != target.osID || agent.OSVersion != target.osVersion || module.WebServer != webServer {
+				t.Fatalf("unexpected resolution for %s %s %s: agent=%+v module=%+v", target.osID, target.osVersion, webServer, agent, module)
+			}
+		}
+	}
+	if _, _, err := catalog.Resolve(model.Inventory{OSID: "ubuntu", OSVersion: "22.04", Architecture: "amd64", WebServer: "apache"}); err == nil {
+		t.Fatal("unsupported Ubuntu 22.04 target must not resolve")
+	}
+}
+
+func TestResolveCustomZIPRequiresExactBuild(t *testing.T) {
+	inventory := model.Inventory{OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", WebServerBuild: "build-a", IntegrationMode: model.IntegrationModeExternal, InstallationMode: model.InstallationModeCustomZIP}
+	catalog := &Catalog{manifest: model.BundleManifest{Artifacts: []model.PackageArtifact{
+		{ID: "agent", Kind: "agent", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64"},
+		{ID: "external-deb", Kind: "module", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", IntegrationMode: model.IntegrationModeExternal},
+		{ID: "custom-a", Kind: "module", Version: "1", OSID: "ubuntu", OSVersion: "24.04", Architecture: "amd64", WebServer: "nginx", WebServerBuild: "build-a", IntegrationMode: model.IntegrationModeExternal, RuntimeABI: "modsecurity-v3", PackageFormat: model.PackageFormatZIP, InstallRoot: "/opt/m-waf"},
+	}}}
+	agent, module, err := catalog.Resolve(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.ID != "agent" || module.ID != "custom-a" {
+		t.Fatalf("unexpected custom ZIP resolution: %s %s", agent.ID, module.ID)
+	}
+	inventory.WebServerBuild = "build-b"
+	if _, _, err := catalog.Resolve(inventory); err == nil {
+		t.Fatal("a custom ZIP for a different web-server build must not resolve")
+	}
+}
+
 func TestValidateHotRuleSetRejectsDuplicateOrOutOfRangeIDs(t *testing.T) {
 	rules := "SecRule REQUEST_URI \"@beginsWith /admin\" \"id:10000,phase:1,deny\"\nSecAction \"id:10000,phase:1,pass\"\n"
 	digest := sha256.Sum256([]byte(rules))

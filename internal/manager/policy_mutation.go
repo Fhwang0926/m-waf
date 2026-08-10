@@ -101,21 +101,12 @@ func (s *Server) createConfigurationRollout(ctx context.Context, policy Enterpri
 	if policy.Status != EnterprisePolicyActive || policy.CurrentRevisionID != expectedRevisionID || policy.HasActiveRollout {
 		return "", errors.New("enterprise policy revision changed or has active rollout")
 	}
-	servers, err := s.store.ListServers(ctx, policy.EnterpriseID, systemPolicyServerLimit)
+	serverIDs, err := s.store.ListPolicyServerIDs(ctx, policy.EnterpriseID, policy.ID)
 	if err != nil {
 		return "", err
 	}
-	policies, err := s.store.ListEnterprisePolicies(ctx, policy.EnterpriseID, systemPolicyServerLimit)
-	if err != nil {
-		return "", err
-	}
-	winners, err := s.enterprisePolicyWinners(ctx, policies, servers)
-	if err != nil {
-		return "", err
-	}
-	serverIDs := orderIDsByServers(winners[policy.ID], servers)
 	if len(serverIDs) == 0 {
-		return "", errors.New("enterprise policy has no effective target servers")
+		return "", errors.New("enterprise policy has no assigned servers")
 	}
 	revision, fullPath, err := s.prepareConfigurationRevision(ctx, policy, configuration, origin)
 	if err != nil {

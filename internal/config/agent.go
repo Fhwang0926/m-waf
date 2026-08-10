@@ -149,8 +149,8 @@ func (c Agent) Validate() error {
 	if c.IntegrationMode != "distro" && c.IntegrationMode != "external" {
 		return errors.New("integration_mode must be distro or external")
 	}
-	if c.InstallationMode != "package" && c.InstallationMode != "manual" {
-		return errors.New("installation_mode must be package or manual")
+	if c.InstallationMode != "discovery" && c.InstallationMode != "package" && c.InstallationMode != "custom_zip" && c.InstallationMode != "manual" {
+		return errors.New("installation_mode must be discovery, package, custom_zip or manual")
 	}
 	if c.WebServerBinary != "" && !filepath.IsAbs(c.WebServerBinary) {
 		return errors.New("web_server_binary must be an absolute path")

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Fhwang0926/m-waf/internal/model"
 	webassets "github.com/Fhwang0926/m-waf/web"
 )
 
@@ -198,7 +199,7 @@ func TestEnterpriseDetailTabSelection(t *testing.T) {
 		" USERS ":    "users",
 		"servers":    "servers",
 		"policies":   "policies",
-		"groups":     "groups",
+		"groups":     "overview",
 		"management": "management",
 		"unknown":    "overview",
 	}
@@ -219,9 +220,9 @@ func TestEnterpriseDetailRendersOnlySelectedTab(t *testing.T) {
 		"Active": "enterprises", "Session": session, "CSRF": "token", "ScopeLabel": "전체 기업",
 		"IsSystemAdmin": true, "CanAccessSystemManagement": true, "InSystemConsole": true, "CanOperate": true, "CanManageUsers": true,
 		"AccountURL": "/account?area=system", "Enterprise": EnterpriseRecord{ID: "enterprise-a", Name: "Example", Status: "ACTIVE"},
-		"Users": []UserRecord{}, "Servers": []ServerRecord{}, "Policies": []EnterprisePolicyRecord{}, "Groups": []GroupRecord{},
+		"Users": []UserRecord{}, "Servers": []ServerRecord{}, "Policies": []EnterprisePolicyRecord{},
 	}
-	tabs := []string{"overview", "users", "servers", "policies", "groups", "management"}
+	tabs := []string{"overview", "users", "servers", "policies", "management"}
 	for _, selected := range tabs {
 		data["Tab"] = selected
 		var output bytes.Buffer
@@ -257,7 +258,7 @@ func TestEnrollmentQuickInstallKeepsTokenOutOfCommand(t *testing.T) {
 	data := map[string]any{
 		"Active": "enrollments", "Session": session, "CSRF": "token", "ScopeLabel": "전체 기업",
 		"IsSystemAdmin": true, "CanAccessSystemManagement": true, "InSystemConsole": true, "CanOperate": true, "CanManageUsers": true,
-		"AccountURL": "/account?area=system", "SelectedEnterpriseName": "Example", "InstallToken": installToken,
+		"AccountURL": "/account?area=system", "SelectedEnterpriseID": "enterprise-1", "SelectedEnterpriseName": "Example", "InstallToken": installToken,
 		"CABase64": "Q0E=", "AgentURL": "https://manager.example:10443",
 	}
 	var output bytes.Buffer
@@ -265,7 +266,7 @@ func TestEnrollmentQuickInstallKeepsTokenOutOfCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := output.String()
-	for _, expected := range []string{"서버에서 설치", "설치 명령 복사", "기업 설치 토큰을 붙여넣으세요", `class="install-command-details"`, "--install-token-stdin"} {
+	for _, expected := range []string{"Agent 설치와 자동 등록", "Agent 설치 명령 복사", "별도 입력이 필요하지 않습니다", `data-enrollment-command`, `data-enterprise-id="enterprise-1"`, `data-csrf="token"`, `class="install-command-details"`, "--token-file", "__MWAF_ENROLLMENT_TOKEN__", "Debian", "12 Bookworm", "curl and base64 are required", "mwaf_root_command"} {
 		if !strings.Contains(html, expected) {
 			t.Fatalf("quick install content %q is missing: %s", expected, html)
 		}
@@ -287,7 +288,96 @@ func TestEnrollmentQuickInstallKeepsTokenOutOfCommand(t *testing.T) {
 	if commandEnd < 0 {
 		t.Fatalf("install command closing tag is missing: %s", html)
 	}
-	if strings.Contains(html[commandStart:commandStart+commandEnd], installToken) {
+	commandHTML := html[commandStart : commandStart+commandEnd]
+	if strings.Contains(commandHTML, "sudo sh /tmp/mwaf-install.sh") {
+		t.Fatalf("quick install must also work when the operator is already root: %s", commandHTML)
+	}
+	if strings.Contains(commandHTML, installToken) {
 		t.Fatalf("install token must not be embedded in the copied command")
+	}
+	if strings.Contains(commandHTML, "--install-token-stdin") {
+		t.Fatalf("quick install must not require a second token prompt: %s", commandHTML)
+	}
+}
+
+func TestBootstrapInstallerInstallsAgentOnlyBeforeManagerPlanning(t *testing.T) {
+	raw, err := bootstrapFiles.ReadFile("bootstrap-install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, expected := range []string{
+		`--token-file) token_file=$2`,
+		`"installation_mode":"discovery"`,
+		"This first stage installs no",
+		"M-WAF unassigned safe policy",
+		"SecRuleEngine DetectionOnly",
+		"Select package-based or custom ZIP installation in Manager",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("bootstrap installer content %q is missing", expected)
+		}
+	}
+	for _, forbidden := range []string{"a2enconf mwaf", "systemctl reload apache2", "nginx -t", "mwaf-module.deb"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("Agent-only bootstrap must not contain %q", forbidden)
+		}
+	}
+}
+
+func TestServerDetailSeparatesPackageAndCustomZIPPlans(t *testing.T) {
+	templates, err := webassets.ParseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionData{DisplayName: "Operator", Role: RoleEnterpriseAdmin, ActualRole: RoleEnterpriseAdmin, EnterpriseID: "enterprise-a", EnterpriseName: "Example"}.asEnterpriseConsole()
+	data := map[string]any{
+		"Active": "servers", "Session": session, "CSRF": "token", "ScopeLabel": "Example", "CanOperate": true, "CanManageUsers": true,
+		"AccountURL": "/account", "Server": ServerRecord{ID: "server-a", EnterpriseName: "Example", Name: "web-a", Inventory: model.Inventory{AgentVersion: "1.0.0", InstallationStage: model.InstallationStagePlanRequired}},
+		"InstallationCandidates": []serverInstallationCandidateView{
+			{Kind: "apache", Version: "2.4.58", BuildHash: "apache-build", Binary: "/usr/sbin/apachectl", PackageManaged: true, PackageAvailable: true},
+			{Kind: "nginx", Version: "1.24.0", BuildHash: "nginx-build", Binary: "/opt/hosting/nginx/sbin/nginx", CustomZIPAvailable: true},
+		},
+	}
+	var output bytes.Buffer
+	if err := templates.ExecuteTemplate(&output, "server-detail.html", data); err != nil {
+		t.Fatal(err)
+	}
+	html := output.String()
+	for _, expected := range []string{"Agent가 먼저 서버를 점검합니다", "패키지 기반 설치", "커스텀 ZIP 설치", "/opt/m-waf", `action="/servers/server-a/installation"`, "보호 정책 미배정", `name="web_server_control"`, "표준 웹서버 제어", "고객 Hook 사용", "/opt/m-waf/hooks/nginx/configtest", "/opt/m-waf/hooks/nginx/reload"} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("server installation plan UI is missing %q: %s", expected, html)
+		}
+	}
+	if strings.Contains(html, "설정 파일을 자동으로 수정") {
+		t.Fatalf("server plan UI claims automatic configuration changes: %s", html)
+	}
+	if strings.Contains(html, `name="custom_command"`) || strings.Contains(html, `name="reload_command"`) {
+		t.Fatalf("server plan UI must not accept arbitrary commands: %s", html)
+	}
+	if strings.Contains(html, "/groups/") || strings.Contains(html, "소속 그룹") {
+		t.Fatalf("legacy server group UI remains in server detail: %s", html)
+	}
+}
+
+func TestServerDetailCanChangeInstalledWebServerControl(t *testing.T) {
+	templates, err := webassets.ParseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionData{DisplayName: "Operator", Role: RoleEnterpriseAdmin, ActualRole: RoleEnterpriseAdmin, EnterpriseID: "enterprise-a", EnterpriseName: "Example"}.asEnterpriseConsole()
+	data := map[string]any{
+		"Active": "servers", "Session": session, "CSRF": "token", "ScopeLabel": "Example", "CanOperate": true, "CanManageUsers": true,
+		"AccountURL": "/account", "Server": ServerRecord{ID: "server-a", EnterpriseName: "Example", Name: "web-a", Inventory: model.Inventory{AgentVersion: "1.0.0", WebServer: "nginx", WebServerControl: model.WebServerControlHooks, InstallationStage: model.InstallationStageIntegrationNeeded}},
+	}
+	var output bytes.Buffer
+	if err := templates.ExecuteTemplate(&output, "server-detail.html", data); err != nil {
+		t.Fatal(err)
+	}
+	html := output.String()
+	for _, expected := range []string{"정책 재적용 방식 변경", `value="web_control_standard"`, `value="web_control_hooks"`, "재설치 없이"} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("installed control UI is missing %q: %s", expected, html)
+		}
 	}
 }

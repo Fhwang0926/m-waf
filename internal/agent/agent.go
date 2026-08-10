@@ -96,6 +96,12 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	for _, candidate := range inventory.WebServerCandidates {
+		if candidate.Kind == inventory.WebServer && candidate.BuildHash == inventory.WebServerBuild {
+			a.policy.ConfigureWebServer(candidate.Binary, inventory.WebServerControl)
+			break
+		}
+	}
 	if a.client.ServerID() == "" {
 		if err := a.client.Enroll(ctx, inventory); err != nil {
 			return err
@@ -135,27 +141,37 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	persistedDesired := desired
 	if desired.RevisionID != "" && (desired.RevisionID != state.RevisionID || desired.SHA256 != state.SHA256) {
-		applyErr := func() error {
-			if err := a.client.EnsurePolicyPublicKey(ctx); err != nil {
+		if !inventory.IntegrationReady || !inventory.ConfigTestOK {
+			persistedDesired.RevisionID = state.RevisionID
+			persistedDesired.ArtifactURL = state.ArtifactURL
+			persistedDesired.ArtifactFormat = state.ArtifactFormat
+			persistedDesired.SHA256 = state.SHA256
+			persistedDesired.Signature = state.Signature
+			persistedDesired.Mode = state.Mode
+		} else {
+			applyErr := func() error {
+				if err := a.client.EnsurePolicyPublicKey(ctx); err != nil {
+					return err
+				}
+				artifact, err := a.client.DownloadPolicy(ctx, desired.ArtifactURL)
+				if err != nil {
+					return err
+				}
+				return a.policy.Apply(ctx, inventory.WebServer, desired, artifact)
+			}()
+			if applyErr != nil {
+				_ = a.client.SendPolicyResult(ctx, desired.RevisionID, "FAILED", applyErr.Error())
+				return applyErr
+			}
+			if err := a.client.SendPolicyResult(ctx, desired.RevisionID, "APPLIED", ""); err != nil {
 				return err
 			}
-			artifact, err := a.client.DownloadPolicy(ctx, desired.ArtifactURL)
-			if err != nil {
-				return err
-			}
-			return a.policy.Apply(ctx, inventory.WebServer, desired, artifact)
-		}()
-		if applyErr != nil {
-			_ = a.client.SendPolicyResult(ctx, desired.RevisionID, "FAILED", applyErr.Error())
-			return applyErr
+			a.logger.Info("policy_applied", "revision", desired.RevisionID, "mode", desired.Mode)
 		}
-		if err := a.client.SendPolicyResult(ctx, desired.RevisionID, "APPLIED", ""); err != nil {
-			return err
-		}
-		a.logger.Info("policy_applied", "revision", desired.RevisionID, "mode", desired.Mode)
 	}
-	if err := a.saveDesiredState(desired); err != nil {
+	if err := a.saveDesiredState(persistedDesired); err != nil {
 		return err
 	}
 	if desired.PackageDeployment != nil {
@@ -174,7 +190,7 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 		}
 		if installedID == deployment.ID {
 			if reportedID != deployment.ID && a.packageRestartRequested != deployment.ID && inventory.AgentVersion == deployment.Agent.Version && inventory.ModuleVersion == deployment.Module.Version {
-				if err := a.client.SendPackageResult(ctx, deployment.ID, "APPLIED", "Agent 재시작 후 설치 버전을 확인했습니다."); err != nil {
+				if err := a.client.SendPackageResult(ctx, deployment.ID, "APPLIED", "모듈 설치 후 Agent가 설치 버전을 확인했습니다. 웹서버 연동은 별도 안내에 따라 활성화해야 합니다."); err != nil {
 					return err
 				}
 				if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "reported-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
@@ -191,7 +207,7 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 				}
 			}
 		} else if failedID != deployment.ID {
-			applyErr := a.applyPackageDeployment(ctx, deployment)
+			agentUpdated, applyErr := a.applyPackageDeployment(ctx, deployment)
 			if applyErr != nil {
 				if err := a.client.SendPackageResult(ctx, deployment.ID, "FAILED", applyErr.Error()); err != nil {
 					return err
@@ -204,10 +220,12 @@ func (a *Agent) runControlCycle(ctx context.Context) error {
 			if err := atomicWrite(filepath.Join(a.cfg.StateDirectory, "last-package-deployment"), []byte(deployment.ID+"\n"), 0o640); err != nil {
 				return err
 			}
-			a.packageRestartRequested = deployment.ID
-			if err := restartUpdatedAgent(); err != nil {
-				_ = a.client.SendPackageResult(ctx, deployment.ID, "FAILED", err.Error())
-				return err
+			if agentUpdated {
+				a.packageRestartRequested = deployment.ID
+				if err := restartUpdatedAgent(); err != nil {
+					_ = a.client.SendPackageResult(ctx, deployment.ID, "FAILED", err.Error())
+					return err
+				}
 			}
 			return nil
 		}

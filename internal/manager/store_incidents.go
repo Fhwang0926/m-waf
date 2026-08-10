@@ -16,7 +16,7 @@ const securityIncidentBackfillLock = "mwaf_security_incident_backfill_v1"
 
 type IncidentFilter struct {
 	EnterpriseID    string
-	GroupID         string
+	PolicyID        string
 	ServerID        string
 	Category        string
 	Severity        string
@@ -67,9 +67,9 @@ LEFT JOIN policy_revisions pr ON pr.id=si.policy_revision LEFT JOIN security_eve
 		conditions = append(conditions, "si.enterprise_id=?")
 		args = append(args, filter.EnterpriseID)
 	}
-	if filter.GroupID != "" {
-		conditions = append(conditions, `EXISTS (SELECT 1 FROM server_group_members gm JOIN server_groups g ON g.id=gm.group_id WHERE gm.server_id=si.agent_id AND g.id=? AND g.enterprise_id=si.enterprise_id)`)
-		args = append(args, filter.GroupID)
+	if filter.PolicyID != "" {
+		conditions = append(conditions, `pr.enterprise_policy_id=? AND EXISTS (SELECT 1 FROM enterprise_policies ep WHERE ep.id=pr.enterprise_policy_id AND ep.enterprise_id=si.enterprise_id)`)
+		args = append(args, filter.PolicyID)
 	}
 	if filter.ServerID != "" {
 		conditions = append(conditions, "si.agent_id=?")
