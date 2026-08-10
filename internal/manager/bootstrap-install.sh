@@ -4,32 +4,60 @@ set -eu
 manager=""
 token=""
 token_file=""
+token_stdin=0
 install_token=""
 install_token_file=""
 install_token_stdin=0
 ca_file=""
+bootstrap_pin=""
 server_name=""
+
+if [ "$(id -u)" -ne 0 ]; then
+  command -v sudo >/dev/null 2>&1 || { echo "run as root or install sudo" >&2; exit 1; }
+  exec sudo sh "$0" "$@"
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --manager) manager=$2; shift 2 ;;
+    -d|--manager) manager=$2; shift 2 ;;
     --token) token=$2; shift 2 ;;
     --token-file) token_file=$2; shift 2 ;;
+    --token-stdin) token_stdin=1; shift ;;
     --install-token-file) install_token_file=$2; shift 2 ;;
     --install-token-stdin) install_token_stdin=1; shift ;;
     --ca) ca_file=$2; shift 2 ;;
+    --bootstrap-pin) bootstrap_pin=$2; shift 2 ;;
     --name) server_name=$2; shift 2 ;;
     *) echo "unknown argument: $1; the first-stage installer accepts Agent registration options only" >&2; exit 2 ;;
   esac
 done
 
-[ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
-[ -n "$manager" ] && [ -r "$ca_file" ] || { echo "--manager and readable --ca are required" >&2; exit 2; }
+[ -n "$manager" ] || { echo "--manager is required" >&2; exit 2; }
 [ ! -s /var/lib/mwaf-agent/server-id ] || { echo "this server is already enrolled; use the existing M-WAF Agent identity" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
 command -v apt-get >/dev/null 2>&1 || { echo "apt-get is required to install the signed Agent DEB" >&2; exit 1; }
-command -v systemctl >/dev/null 2>&1 || { echo "systemd systemctl is required" >&2; exit 1; }
 [ -r /etc/os-release ] || { echo "unsupported OS: /etc/os-release missing" >&2; exit 1; }
+
+temporary=$(mktemp -d)
+trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+if [ -n "$ca_file" ]; then
+  [ -r "$ca_file" ] || { echo "--ca must reference a readable certificate" >&2; exit 2; }
+else
+  case "$bootstrap_pin" in sha256//*) ;; *) echo "--bootstrap-pin is required when --ca is omitted" >&2; exit 2 ;; esac
+  ca_file="$temporary/manager-ca.crt"
+  curl --fail --silent --show-error --insecure --pinnedpubkey "$bootstrap_pin" "$manager/bootstrap/v1/ca.crt" -o "$ca_file"
+  [ -s "$ca_file" ] || { echo "Manager CA certificate download was empty" >&2; exit 1; }
+fi
+
+runtime_mode=""
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  runtime_mode=systemd
+elif [ -e /.dockerenv ] || [ -e /run/.containerenv ] || [ "${container:-}" = docker ] || grep -Eq '(docker|containerd|kubepods|podman)' /proc/1/cgroup 2>/dev/null; then
+  runtime_mode=container
+else
+  echo "systemd is not running and this environment is not a supported Docker/OCI container" >&2
+  exit 1
+fi
 
 . /etc/os-release
 os_id=${ID:-unknown}
@@ -44,12 +72,19 @@ case "$(uname -m)" in
 esac
 
 if [ -n "$token_file" ]; then
-  if [ -n "$token" ] || [ -n "$install_token_file" ] || [ "$install_token_stdin" -eq 1 ]; then
+  if [ -n "$token" ] || [ "$token_stdin" -eq 1 ] || [ -n "$install_token_file" ] || [ "$install_token_stdin" -eq 1 ]; then
     echo "use only one token source" >&2
     exit 2
   fi
   [ -r "$token_file" ] || { echo "enrollment token file is not readable" >&2; exit 2; }
   token=$(sed -n '1p' "$token_file")
+fi
+if [ "$token_stdin" -eq 1 ]; then
+  if [ -n "$token" ] || [ -n "$install_token_file" ] || [ "$install_token_stdin" -eq 1 ]; then
+    echo "use only one token source" >&2
+    exit 2
+  fi
+  IFS= read -r token || { echo "could not read enrollment token" >&2; exit 2; }
 fi
 if [ -n "$token" ] && { [ -n "$install_token_file" ] || [ "$install_token_stdin" -eq 1 ]; }; then
   echo "use either an enrollment token or an enterprise install token source" >&2
@@ -75,7 +110,7 @@ if [ -z "$token" ]; then
     fi
     printf '\n' >&2
   else
-    echo "--token, --token-file, --install-token-file or --install-token-stdin is required" >&2
+    echo "--token, --token-file, --token-stdin, --install-token-file or --install-token-stdin is required" >&2
     exit 2
   fi
 fi
@@ -93,13 +128,11 @@ if [ -z "$token" ]; then
   event_verification_token=$install_token
   session_payload=$(printf '{"name":"%s","inventory":{"hostname":"%s","os_id":"%s","os_version":"%s","architecture":"%s","installation_mode":"discovery","installation_stage":"PLAN_REQUIRED"}}' \
     "$(json_escape "$server_name")" "$(json_escape "$hostname_value")" "$(json_escape "$os_id")" "$(json_escape "$os_version")" "$architecture")
-  install_auth_file=$(mktemp)
+  install_auth_file="$temporary/install-auth"
   chmod 0600 "$install_auth_file"
-  trap 'rm -f "$install_auth_file"' EXIT HUP INT TERM
   printf 'Authorization: Bearer %s\n' "$install_token" > "$install_auth_file"
   token=$(curl --fail --silent --show-error --cacert "$ca_file" -H "@$install_auth_file" -H 'Content-Type: application/json' -H 'Accept: text/plain' --data "$session_payload" "$manager/bootstrap/v1/sessions")
   rm -f "$install_auth_file"
-  trap - EXIT HUP INT TERM
   [ -n "$token" ] || { echo "Manager did not issue an enrollment session" >&2; exit 1; }
 fi
 
@@ -110,8 +143,6 @@ agent_url=$(printf '%s\n' "$resolution" | sed -n '2p')
 agent_sha=$(printf '%s\n' "$resolution" | sed -n '3p')
 [ -n "$agent_url" ] && [ -n "$agent_sha" ] || { echo "invalid Agent package resolution" >&2; exit 1; }
 
-temporary=$(mktemp -d)
-trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 agent_file="$temporary/mwaf-agent.deb"
 curl --fail --silent --show-error --cacert "$ca_file" -H "Authorization: Bearer $token" -o "$agent_file" "$agent_url"
 [ "$(hash_file "$agent_file")" = "$agent_sha" ] || { echo "Agent checksum mismatch" >&2; exit 1; }
@@ -155,15 +186,19 @@ cat > /etc/mwaf-agent/agent.json <<EOF
 }
 EOF
 chmod 0640 /etc/mwaf-agent/agent.json
-systemctl enable --now mwaf-agent
+[ -x /usr/sbin/mwaf-agent-service ] || { echo "installed Agent package does not provide the M-WAF service command" >&2; exit 1; }
+/usr/sbin/mwaf-agent-service start
 
 waited=0
 while [ "$waited" -lt 90 ]; do
   if [ -s /var/lib/mwaf-agent/server-id ]; then
     echo "M-WAF Agent registration completed with an unassigned safe policy. Select package-based or custom ZIP installation in Manager; no web-server configuration was changed."
+    if [ "$runtime_mode" = container ]; then
+      echo "Container mode is active. Preserve /etc/mwaf-agent, /var/lib/mwaf-agent, /etc/mwaf and /opt/m-waf as volumes, and run '/usr/sbin/mwaf-agent-service start' from the container startup command after a restart. Recreating from the original image also removes the installed Agent package, so use a derived image that contains the verified M-WAF Agent DEB."
+    fi
     exit 0
   fi
-  systemctl is-active --quiet mwaf-agent || { echo "M-WAF Agent stopped before registration completed" >&2; exit 1; }
+  /usr/sbin/mwaf-agent-service status || { echo "M-WAF Agent stopped before registration completed" >&2; exit 1; }
   sleep 2
   waited=$((waited + 2))
 done

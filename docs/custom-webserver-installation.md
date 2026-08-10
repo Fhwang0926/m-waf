@@ -216,6 +216,14 @@ systemctl status mwaf-agent --no-pager || true
 journalctl -u mwaf-agent -n 100 --no-pager || true
 ```
 
+systemd가 없는 Docker/OCI 컨테이너에서는 아래 상태 명령을 사용한다.
+
+```sh
+/usr/sbin/mwaf-agent-service status
+```
+
+호스트와 컨테이너는 모두 `/usr/sbin/mwaf-agent-service` 명령을 사용한다. 컨테이너 재시작 시에는 기존 Apache/Nginx 시작 전에 `/usr/sbin/mwaf-agent-service start`를 실행한다. Agent 설정·인증서·상태·정책·커스텀 모듈은 각각 `/etc/mwaf-agent`, `/var/lib/mwaf-agent`, `/etc/mwaf`, `/opt/m-waf` 볼륨으로 보존한다. 원본 이미지로 컨테이너를 재생성하면 설치된 Agent 바이너리는 사라지므로 동일한 검증 DEB를 포함한 파생 이미지를 사용해야 한다. 등록 토큰과 Agent 개인키는 이미지에 포함하지 않는다.
+
 잠금, 공간, 저장소, 중단된 DPKG 원인을 먼저 해결한다. Agent DEB를 수동 복사하거나 서명 검증을 우회하지 않는다.
 
 ### 패키지 기반 모듈 실패

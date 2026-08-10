@@ -38,6 +38,13 @@ type OverviewPoint struct {
 	Blocked int       `json:"blocked"`
 }
 
+func (p OverviewPoint) BlockRate() float64 {
+	if p.Events == 0 {
+		return 0
+	}
+	return float64(p.Blocked) * 100 / float64(p.Events)
+}
+
 type OverviewRank struct {
 	Key     string `json:"key"`
 	Label   string `json:"label"`

@@ -480,7 +480,7 @@ pre,
 .install-command-details pre { margin: 0 0 14px; }
 .install-command-details > p { margin: 0 0 14px; }
 .install-quickstart-note { margin: 12px 0 0; }
-.install-environment-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--line); gap: 1px; }
+.install-environment-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--line); gap: 1px; }
 .install-environment-card { display: flex; min-width: 0; min-height: 174px; flex-direction: column; gap: 12px; padding: 16px; background: #0c1420; }
 .install-environment-label { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .05em; }
 .install-supported-os { display: grid; min-height: 74px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -624,6 +624,28 @@ pre,
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
   .global-busy-spinner { animation: none; border-color: var(--blue); }
+}
+
+@media print {
+  :root { color-scheme: light; --line: #c9ced6; --text: #111827; --muted: #4b5563; }
+  body { padding: 0; background: #fff; color: var(--text); font-size: 11px; }
+  .app-shell,
+  .report-actions,
+  .report-filter,
+  .report-link { display: none !important; }
+  .container { width: 100%; padding: 0; }
+  .page-head { margin-bottom: 14px; }
+  .page-head h1 { font-size: 24px; }
+  .panel,
+  .stats article,
+  .review-item { break-inside: avoid; border-color: var(--line); background: #fff; box-shadow: none; }
+  .panel { margin-bottom: 12px; padding: 14px; }
+  .stats { gap: 8px; margin-bottom: 12px; }
+  .stats article { padding: 12px; }
+  .stats strong { font-size: 20px; }
+  .table-scroll { overflow: visible; }
+  .table-wide { min-width: 0; }
+  a { color: inherit; text-decoration: none; }
 }
 
 /* Operations console shell */

@@ -1,5 +1,6 @@
 {{define "nav-icon-dashboard"}}<svg class="nav-icon nav-icon-fill" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg>{{end}}
 {{define "nav-icon-events"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>{{end}}
+{{define "nav-icon-reports"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l3 3v15H6V3Z"/><path d="M15 3v4h4M9 16v-3m3 3V9m3 7v-5"/></svg>{{end}}
 {{define "nav-icon-policy"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg>{{end}}
 {{define "nav-icon-group"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="6" r="2.5"/><circle cx="6" cy="17" r="2.5"/><circle cx="18" cy="17" r="2.5"/><path d="m10.5 8-3 6m6-6 3 6M8.5 17h7"/></svg>{{end}}
 {{define "nav-icon-ip"}}<svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6l-7-3Z"/><path d="M8 12h8M12 8v8"/></svg>{{end}}
@@ -23,6 +24,7 @@
           <h2>관제</h2>
           <a class="side-link {{if eq .Active "dashboard"}}active{{end}}" href="/" title="운영 현황" {{if eq .Active "dashboard"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-dashboard"}}</span><span>운영 현황</span></a>
           <a class="side-link {{if eq .Active "events"}}active{{end}}" href="/events" title="보안 이벤트" {{if eq .Active "events"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-events"}}</span><span>보안 이벤트</span></a>
+          <a class="side-link {{if eq .Active "reports"}}active{{end}}" href="/reports" title="보고서" {{if eq .Active "reports"}}aria-current="page"{{end}}><span class="nav-mark">{{template "nav-icon-reports"}}</span><span>보고서</span></a>
         </section>
         {{if .CanOperate}}<section class="nav-group">
           <h2>정책</h2>

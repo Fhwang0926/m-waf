@@ -7,6 +7,7 @@ import (
 )
 
 func (s *Server) registerAgentRoutes(mux *http.ServeMux) {
+	mux.Handle(protocol.BootstrapCAPattern, s.limitBootstrap(http.HandlerFunc(s.bootstrapCACertificate)))
 	mux.Handle(protocol.BootstrapInstallerPattern, s.limitBootstrap(http.HandlerFunc(s.bootstrapInstaller)))
 	mux.Handle(protocol.BootstrapSessionPattern, s.limitBootstrap(http.HandlerFunc(s.createBootstrapSession)))
 	mux.Handle(protocol.BootstrapResolvePattern, s.limitBootstrap(http.HandlerFunc(s.resolvePackages)))

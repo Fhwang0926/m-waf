@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -68,6 +69,76 @@ func TestPolicyValidationRequestAcceptsServerIDsInsteadOfTarget(t *testing.T) {
 	}
 	if strings.Contains(string(normalized), `"target"`) {
 		t.Fatalf("legacy target remains in the validation contract: %s", normalized)
+	}
+}
+
+func TestEnterprisePolicyDetailTabSelection(t *testing.T) {
+	for input, expected := range map[string]string{
+		"":          "overview",
+		"overview":  "overview",
+		" SERVERS ": "servers",
+		"rules":     "rules",
+		"rollouts":  "rollouts",
+		"revisions": "revisions",
+		"unknown":   "overview",
+	} {
+		if actual := enterprisePolicyDetailTab(input); actual != expected {
+			t.Fatalf("enterprisePolicyDetailTab(%q) = %q, want %q", input, actual, expected)
+		}
+	}
+}
+
+func TestEnterprisePolicyDetailRendersOnlySelectedTab(t *testing.T) {
+	templates, err := webassets.ParseTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := map[string]any{
+		"Active": "policies", "Session": sessionData{DisplayName: "Operator", Role: RoleEnterpriseUser, ActualRole: RoleEnterpriseUser, EnterpriseID: "enterprise-a", EnterpriseName: "Example"}.asEnterpriseConsole(),
+		"CSRF": "token", "ScopeLabel": "Example", "CanOperate": true, "AccountURL": "/account",
+		"Policy": EnterprisePolicyRecord{
+			ID: "policy-a", EnterpriseID: "enterprise-a", EnterpriseName: "Example", Name: "CRS 기본 보호 정책", Status: EnterprisePolicyActive,
+			CurrentSystemPolicyVersion: "1.0.0", CurrentCRSVersion: "4.28.0", UpdateStrategy: PolicyStrategyManual, CurrentMode: "DetectionOnly", CurrentRevisionID: "revision-a",
+		},
+		"PolicyServers": []ServerRecord{}, "PolicyServerChoices": []policyServerChoice{}, "Rollouts": []policyRolloutView{}, "Revisions": []PolicyRevisionRecord{},
+	}
+	tabs := []string{"overview", "servers", "rules", "rollouts", "revisions"}
+	for _, selected := range tabs {
+		data["Tab"] = selected
+		var output bytes.Buffer
+		if err := templates.ExecuteTemplate(&output, "enterprise-policy.html", data); err != nil {
+			t.Fatalf("render %s tab: %v", selected, err)
+		}
+		html := output.String()
+		for _, section := range tabs {
+			visible := strings.Contains(html, `id="`+section+`"`)
+			if section == selected && !visible {
+				t.Fatalf("selected %s section is missing: %s", selected, html)
+			}
+			if section != selected && visible {
+				t.Fatalf("inactive %s section rendered with selected %s: %s", section, selected, html)
+			}
+		}
+		if !strings.Contains(html, `aria-current="page"`) || strings.Contains(html, `href="#`) {
+			t.Fatalf("%s tab navigation is not URL based and active: %s", selected, html)
+		}
+		if (selected == "overview") != strings.Contains(html, "운영 제어") {
+			t.Fatalf("overview operations visibility is incorrect for %s: %s", selected, html)
+		}
+	}
+}
+
+func TestEnterprisePolicyRedirectKeepsSelectedTab(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/policies/policy-a/servers", nil)
+	request.Form = url.Values{"return_tab": {"servers"}}
+	response := httptest.NewRecorder()
+	new(Server).redirectEnterprisePolicy(response, request, "policy-a", "완료")
+	location, err := url.Parse(response.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusSeeOther || location.Path != "/policies/policy-a" || location.Query().Get("tab") != "servers" || location.Query().Get("notice") != "완료" {
+		t.Fatalf("selected tab redirect was not preserved: status=%d location=%q", response.Code, response.Header().Get("Location"))
 	}
 }
 

@@ -15,6 +15,7 @@ trap 'rm -rf "$root"' EXIT INT TERM
 mkdir -p "$OUTPUT_DIR" "$METADATA_DIR" "$root/DEBIAN" "$root/usr/bin" "$root/usr/sbin" "$root/usr/lib/mwaf" "$root/lib/systemd/system" "$root/usr/share/doc/mwaf-agent"
 install -m 0755 "$AGENT_BINARY" "$root/usr/bin/mwaf-agent"
 install -m 0755 packaging/agent/mwaf-uninstall "$root/usr/sbin/mwaf-uninstall"
+install -m 0755 packaging/agent/container/mwaf-agent-service "$root/usr/sbin/mwaf-agent-service"
 install -m 0755 packaging/module/external/configure.sh "$root/usr/lib/mwaf/configure-external"
 install -m 0644 packaging/agent/systemd/mwaf-agent.service "$root/lib/systemd/system/mwaf-agent.service"
 printf '%s\n' "source: https://github.com/Fhwang0926/m-waf" "commit: $COMMIT" > "$root/usr/share/doc/mwaf-agent/build-info"

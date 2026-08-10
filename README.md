@@ -89,7 +89,7 @@ flowchart LR
     Admin["Hosting administrator"] -->|"HTTPS :8443"| Manager
 ```
 
-The Compose stack intentionally has only two runtime services: `mariadb` and `manager`. Agent and module are not containers; their signed DEB files live under `/opt/mwaf/bundles/current` inside the Manager image and are installed on real customer web servers.
+The Manager Compose stack intentionally has only two runtime services: `mariadb` and `manager`. The signed Agent and module DEBs live under `/opt/mwaf/bundles/current` inside the Manager image and are installed into the customer web-server host or the same Ubuntu/Debian container that runs that web server. M-WAF does not add a separate Agent sidecar that cannot inspect the protected process and files.
 
 ## Local source development
 
@@ -203,22 +203,25 @@ The generated TLS certificate is signed by the local M-WAF CA. Its DNS/IP identi
 3. Manager creates a 15-minute, one-use enrollment token and inserts it into the copied installation block automatically.
 4. Run the block on the customer web server. No separate token prompt is shown.
 
+The quick-copy command contains the one-use token, the installer SHA-256, and the Manager TLS public-key pin. `wget --no-check-certificate` is limited to the initial installer download, whose exact bytes are then checked against the SHA-256 copied from the authenticated Manager UI. The verified installer uses the public-key pin to download the public M-WAF CA and then uses that CA for normal enrollment and package TLS verification.
+
 Example:
 
 ```sh
-mwaf_install_dir=$(mktemp -d)
-printf '%s' 'MANAGER_CA_BASE64_FROM_UI' | base64 -d > "$mwaf_install_dir/manager-ca.crt"
-printf '%s\n' 'ONE_USE_ENROLLMENT_TOKEN_FROM_UI' > "$mwaf_install_dir/enrollment.token"
-curl --fail --cacert "$mwaf_install_dir/manager-ca.crt" https://manager.example.com:8443/bootstrap/v1/install.sh -o "$mwaf_install_dir/install.sh"
-sudo sh "$mwaf_install_dir/install.sh" \
-  --manager https://manager.example.com:8443 \
-  --ca "$mwaf_install_dir/manager-ca.crt" \
-  --token-file "$mwaf_install_dir/enrollment.token"
+mkdir -p ./mwaf_install && wget --no-check-certificate https://manager.example.com:8443/bootstrap/v1/install.sh -O ./mwaf_install/installer.sh && printf '%s  %s\n' 'INSTALLER_SHA256_FROM_UI' './mwaf_install/installer.sh' | sha256sum -c - && printf '%s\n' 'ONE_USE_ENROLLMENT_TOKEN_FROM_UI' | sh ./mwaf_install/installer.sh -d https://manager.example.com:8443 --bootstrap-pin 'sha256//MANAGER_TLS_PUBLIC_KEY_PIN_FROM_UI' --token-stdin
 ```
 
-The quick-install button uses the existing authenticated administrator API to create a short-lived, one-use enrollment token. The copied block keeps it in a mode `0600` temporary file so it is not passed in the installer process arguments; it becomes unusable after one successful enrollment or 15 minutes. Manager also maintains one reusable install token per enterprise for unattended deployment. Store that reusable token in a mode `0600` secret file and use `--install-token-file /secure/path/token`.
+The quick-install button uses the existing authenticated administrator API to create a short-lived, one-use enrollment token. The copied command sends it to the installer over standard input instead of an installer process argument; it becomes unusable after one successful enrollment or 15 minutes. Manager also maintains one reusable install token per enterprise for unattended deployment. Store that reusable token in a mode `0600` secret file and use `--install-token-file /secure/path/token`.
 
 The first-stage installer downloads and installs only the signed Agent DEB. It does not install Apache, Nginx, ModSecurity, logrotate, or a WAF module, and it does not edit or reload a web-server configuration.
+
+The same command supports Ubuntu 24.04 and Debian 12 containers. Hosts and containers use the same `/usr/sbin/mwaf-agent-service` command; it selects the existing systemd unit or the packaged lightweight supervisor automatically. A systemd-free Docker/OCI container does not install systemd or any additional runtime dependency. Check it with:
+
+```sh
+/usr/sbin/mwaf-agent-service status
+```
+
+An install performed inside a running container survives only that container's current writable filesystem. For a normal restart, add `/usr/sbin/mwaf-agent-service start` to the existing container startup command before starting Apache/Nginx. Persist `/etc/mwaf-agent`, `/var/lib/mwaf-agent`, `/etc/mwaf`, `/opt/m-waf`, and the ModSecurity audit-log path as volumes. Recreating the container from its original image removes `/usr/bin/mwaf-agent`; use a reviewed derived image containing the same verified Agent DEB and mount the identity/config volumes at runtime. Do not bake enrollment tokens, Agent private keys, or certificates into the image.
 
 After registration, the Agent reports OS, architecture, running Apache/Nginx binaries, versions, normalized build hashes, and distribution-package ownership. In **보호 서버 → 서버 상세**, the operator selects one of two explicit plans:
 
@@ -227,7 +230,7 @@ After registration, the Agent reports OS, architecture, running Apache/Nginx bin
 
 Both plans leave the customer's Apache/Nginx configuration and reload procedure to the hosting operator. Manager shows the exact M-WAF-owned include file, then Agent verifies configtest, the active include, and the signed policy before reporting `보호 중`. See [Custom Apache/Nginx installation](docs/custom-webserver-installation.md) for the ZIP contract and activation procedure.
 
-No compiler, Go toolchain, Docker runtime, or source checkout is required by M-WAF on the customer server.
+No compiler, Go toolchain, Docker runtime, or source checkout is required by M-WAF inside the customer server or web-server container.
 
 ### If DEB installation fails
 
@@ -257,6 +260,7 @@ The current MVP has no supported Agent `tar.gz`, manual-copy, or RPM installatio
 - **서버** shows inventory, Agent/module versions, heartbeat, policy/package deployment results, and the latest fixed control command.
 - A server is displayed as `OFFLINE` when no heartbeat has arrived for two minutes.
 - **이벤트** filters by server, block/detect result, severity, URL, Rule ID, or message and pages through 100 records at a time.
+- **보고서** summarizes detections, blocks, source IPs, server availability, event trends, and top attack dimensions for the selected enterprise, protection policy, server, and time range. Report timestamps and print output use KST.
 - Agent control uses authenticated HTTPS polling during the normal heartbeat loop. It does not open a WebSocket or arbitrary command port, and arbitrary shell execution is not provided.
 - `Agent 중지` and `서버 종료` cannot be reversed through Manager after connectivity is lost; use the host console, service manager, hypervisor, or power controller to recover them.
 - Starting with the second tagged release, the release workflow resolves the highest earlier semantic GHCR tag, verifies that signed image, and embeds its Agent and module packages as explicit rollback targets.

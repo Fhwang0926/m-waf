@@ -365,7 +365,11 @@ func replaceCustomModuleLink(root, target string) error {
 func restartUpdatedAgent() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "systemctl", "--no-block", "restart", "mwaf-agent.service").CombinedOutput()
+	arguments, ok := agentServiceCommand("restart")
+	if !ok {
+		return errors.New("restart updated agent: no supported Agent service manager is running")
+	}
+	output, err := exec.CommandContext(ctx, arguments[0], arguments[1:]...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("restart updated agent: %s: %w", truncateOperationOutput(output), err)
 	}
@@ -453,16 +457,48 @@ func (a *Agent) applyWebServerControlCommand(command string) (bool, string, erro
 func fixedCommand(command string) ([]string, bool) {
 	switch command {
 	case "agent_restart":
-		return []string{"systemctl", "--no-block", "restart", "mwaf-agent.service"}, true
+		return agentServiceCommand("restart")
 	case "agent_stop":
-		return []string{"systemctl", "--no-block", "stop", "mwaf-agent.service"}, true
+		return agentServiceCommand("stop")
 	case "server_restart":
-		return []string{"systemctl", "--no-block", "reboot"}, true
+		if systemdRunning() {
+			return []string{"systemctl", "--no-block", "reboot"}, true
+		}
+		return nil, false
 	case "server_stop":
-		return []string{"systemctl", "--no-block", "poweroff"}, true
+		if systemdRunning() {
+			return []string{"systemctl", "--no-block", "poweroff"}, true
+		}
+		return nil, false
 	default:
 		return nil, false
 	}
+}
+
+func agentServiceCommand(action string) ([]string, bool) {
+	const serviceCommand = "/usr/sbin/mwaf-agent-service"
+	info, err := os.Lstat(serviceCommand)
+	stat, ownedByRoot := infoSysStat(info)
+	if err == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o111 != 0 && info.Mode().Perm()&0o022 == 0 && ownedByRoot && stat.Uid == 0 {
+		return []string{serviceCommand, action}, true
+	}
+	return nil, false
+}
+
+func infoSysStat(info os.FileInfo) (*syscall.Stat_t, bool) {
+	if info == nil {
+		return nil, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return stat, ok
+}
+
+func systemdRunning() bool {
+	if info, err := os.Stat("/run/systemd/system"); err != nil || !info.IsDir() {
+		return false
+	}
+	_, err := exec.LookPath("systemctl")
+	return err == nil
 }
 
 func readStateValue(path string) (string, error) {

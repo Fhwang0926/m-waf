@@ -242,6 +242,16 @@ func (s *Server) enterprisePolicyDetail(w http.ResponseWriter, r *http.Request) 
 	s.renderEnterprisePolicyDetail(w, r, http.StatusOK, "")
 }
 
+func enterprisePolicyDetailTab(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "servers", "rules", "rollouts", "revisions":
+		return value
+	default:
+		return "overview"
+	}
+}
+
 func (s *Server) renderEnterprisePolicyDetail(w http.ResponseWriter, r *http.Request, status int, pageError string) {
 	session := sessionFrom(r)
 	policy, err := s.store.EnterprisePolicyByID(r.Context(), session.ScopeEnterpriseID(), r.PathValue("id"))
@@ -253,52 +263,66 @@ func (s *Server) renderEnterprisePolicyDetail(w http.ResponseWriter, r *http.Req
 		s.renderAdminError(w, r, http.StatusInternalServerError, "기업 정책을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 		return
 	}
-	rollouts, err := s.store.ListPolicyRollouts(r.Context(), session.ScopeEnterpriseID(), policy.ID, 50)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "단계 배포 이력을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
+	tab := enterprisePolicyDetailTab(r.URL.Query().Get("tab"))
+	if returnTab := strings.TrimSpace(r.FormValue("return_tab")); returnTab != "" {
+		tab = enterprisePolicyDetailTab(returnTab)
 	}
-	revisions, err := s.store.ListPolicyRevisions(r.Context(), session.ScopeEnterpriseID(), policy.ID, 50)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "정책 개정본을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	members, err := s.store.ListPolicyServers(r.Context(), policy.EnterpriseID, policy.ID)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "연결 서버를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	servers, err := s.store.ListServers(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
-	if err != nil {
-		s.renderAdminError(w, r, http.StatusInternalServerError, "보호 서버를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
-		return
-	}
-	serverChoices := make([]policyServerChoice, 0, len(servers))
-	for _, server := range servers {
-		if !server.Revoked && server.EnterprisePolicyID != policy.ID {
-			serverChoices = append(serverChoices, policyServerChoice{Server: server})
-		}
-	}
-	rolloutViews := make([]policyRolloutView, 0, len(rollouts))
-	for _, rollout := range rollouts {
-		targets, targetErr := s.store.ListPolicyRolloutTargets(r.Context(), rollout.ID)
-		if targetErr != nil {
-			s.renderAdminError(w, r, http.StatusInternalServerError, "서버별 단계 배포 결과를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+	var members []ServerRecord
+	var serverChoices []policyServerChoice
+	var rolloutViews []policyRolloutView
+	var revisions []PolicyRevisionRecord
+	rollbackAvailable := false
+	switch tab {
+	case "servers":
+		members, err = s.store.ListPolicyServers(r.Context(), policy.EnterpriseID, policy.ID)
+		if err != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "연결 서버를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
 			return
 		}
-		rolloutViews = append(rolloutViews, policyRolloutView{Rollout: rollout, Targets: targets})
-	}
-	rollbackAvailable := false
-	if policy.Status == EnterprisePolicyActive && !policy.HasActiveRollout && policy.PreviousRevisionID != "" {
-		previous, previousErr := s.store.PolicyRevisionByID(r.Context(), policy.ID, policy.PreviousRevisionID)
-		if previousErr == nil {
-			if item, ok := s.systemPolicyTemplate(r.Context(), previous.SystemPolicyVersionID); ok && item.Status != systempolicy.StatusWithdrawn {
-				rollbackAvailable = true
+		servers, serverErr := s.store.ListServers(r.Context(), policy.EnterpriseID, systemPolicyServerLimit)
+		if serverErr != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "보호 서버를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+		serverChoices = make([]policyServerChoice, 0, len(servers))
+		for _, server := range servers {
+			if !server.Revoked && server.EnterprisePolicyID != policy.ID {
+				serverChoices = append(serverChoices, policyServerChoice{Server: server})
+			}
+		}
+	case "rollouts":
+		rollouts, rolloutErr := s.store.ListPolicyRollouts(r.Context(), session.ScopeEnterpriseID(), policy.ID, 50)
+		if rolloutErr != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "단계 배포 이력을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+		rolloutViews = make([]policyRolloutView, 0, len(rollouts))
+		for _, rollout := range rollouts {
+			targets, targetErr := s.store.ListPolicyRolloutTargets(r.Context(), rollout.ID)
+			if targetErr != nil {
+				s.renderAdminError(w, r, http.StatusInternalServerError, "서버별 단계 배포 결과를 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+				return
+			}
+			rolloutViews = append(rolloutViews, policyRolloutView{Rollout: rollout, Targets: targets})
+		}
+	case "revisions":
+		revisions, err = s.store.ListPolicyRevisions(r.Context(), session.ScopeEnterpriseID(), policy.ID, 50)
+		if err != nil {
+			s.renderAdminError(w, r, http.StatusInternalServerError, "정책 개정본을 불러올 수 없습니다", "잠시 후 다시 시도하세요.")
+			return
+		}
+	case "overview":
+		if policy.Status == EnterprisePolicyActive && !policy.HasActiveRollout && policy.PreviousRevisionID != "" {
+			previous, previousErr := s.store.PolicyRevisionByID(r.Context(), policy.ID, policy.PreviousRevisionID)
+			if previousErr == nil {
+				if item, ok := s.systemPolicyTemplate(r.Context(), previous.SystemPolicyVersionID); ok && item.Status != systempolicy.StatusWithdrawn {
+					rollbackAvailable = true
+				}
 			}
 		}
 	}
 	data := map[string]any{
-		"Policy": policy, "PolicyServers": members, "PolicyServerChoices": serverChoices, "Rollouts": rolloutViews, "Revisions": revisions, "RollbackAvailable": rollbackAvailable,
+		"Tab": tab, "Policy": policy, "PolicyServers": members, "PolicyServerChoices": serverChoices, "Rollouts": rolloutViews, "Revisions": revisions, "RollbackAvailable": rollbackAvailable,
 		"Notice": r.URL.Query().Get("notice"), "Error": pageError, "ScopeLabel": policy.EnterpriseName,
 	}
 	if status != http.StatusOK {
@@ -560,5 +584,9 @@ func (s *Server) writePolicyMutationError(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) redirectEnterprisePolicy(w http.ResponseWriter, r *http.Request, policyID, notice string) {
-	http.Redirect(w, r, "/policies/"+policyID+"?notice="+url.QueryEscape(notice), http.StatusSeeOther)
+	query := url.Values{"notice": []string{notice}}
+	if tab := enterprisePolicyDetailTab(r.FormValue("return_tab")); tab != "overview" {
+		query.Set("tab", tab)
+	}
+	http.Redirect(w, r, "/policies/"+policyID+"?"+query.Encode(), http.StatusSeeOther)
 }

@@ -1445,6 +1445,10 @@
       showGlobalBusy("페이지를 새로 불러오는 중입니다.");
       window.location.reload();
     }
+    if (event.target.closest("[data-print-report]")) {
+      window.print();
+      return;
+    }
     if (event.target.closest("[data-event-drawer-close]")) closeEventDrawer();
     const row = event.target.closest("[data-incident-id]");
     if (row) {

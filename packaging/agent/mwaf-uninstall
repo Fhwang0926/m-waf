@@ -97,6 +97,9 @@ manager=$(json_value manager_url "$agent_config")
 if [ -n "$manager" ] && [ -r /etc/mwaf-agent/manager-ca.crt ] && [ -r /var/lib/mwaf-agent/agent.crt ] && [ -r /var/lib/mwaf-agent/agent.key ]; then
   curl --fail --silent --show-error --max-time 5 --cacert /etc/mwaf-agent/manager-ca.crt --cert /var/lib/mwaf-agent/agent.crt --key /var/lib/mwaf-agent/agent.key -X POST "$manager/agent/v1/unregister" >/dev/null 2>&1 || echo "Manager 등록 해제는 완료하지 못했습니다. 관리자 화면에서 수동 등록 해제하세요." >&2
 fi
+if [ -x /usr/sbin/mwaf-agent-service ]; then
+  /usr/sbin/mwaf-agent-service stop >/dev/null 2>&1 || true
+fi
 systemctl disable --now mwaf-agent >/dev/null 2>&1 || true
 
 if [ "$package_prerm" -eq 0 ]; then

@@ -29,8 +29,12 @@ Route constants must be changed in that package first. Client and Manager code m
 
 ## Authentication
 
+The quick command downloads the installer with `wget --no-check-certificate` and immediately verifies its SHA-256 against the value copied from the authenticated Manager UI. The verified installer then uses the copied SPKI pin with curl `--insecure --pinnedpubkey` only to download the public M-WAF CA. All enrollment, package, and Agent traffic uses the downloaded CA through normal certificate verification. Operators that pre-provision the CA can continue to pass `--ca` directly.
+
 | Phase | Authentication | Result |
 |---|---|---|
+| Installer bootstrap | Installer SHA-256 from authenticated UI | Exact downloaded installer bytes verified before execution |
+| Bootstrap trust | Manager TLS SPKI pin | Verified download of the public M-WAF CA |
 | Bootstrap | Enterprise install token over server-authenticated TLS | Short-lived, one-use enrollment session |
 | Enrollment | Enrollment token plus Agent-generated CSR | Per-Agent certificate and CA chain |
 | Normal operation | mTLS certificate whose identity maps to one active server | Enterprise-scoped heartbeat, policy, package, and command access |
@@ -43,6 +47,7 @@ The shared TLS listener accepts a client certificate when supplied. Every authen
 
 | Method | Path | Request | Response |
 |---|---|---|---|
+| GET | `/bootstrap/v1/ca.crt` | none | Public M-WAF CA certificate |
 | POST | `/agent/v1/enroll` | `EnrollRequest` | `EnrollResponse` |
 | POST | `/agent/v1/heartbeat` | `HeartbeatRequest` | empty success |
 | POST | `/agent/v1/certificate/renew` | `CertificateRenewRequest` | `CertificateRenewResponse` |

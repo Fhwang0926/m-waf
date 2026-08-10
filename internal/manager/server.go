@@ -56,6 +56,7 @@ type Server struct {
 	bootstrapLimiter *requestLimiter
 	installLimiter   *requestLimiter
 	downloadLimiter  *requestLimiter
+	bootstrapTLSPin  string
 	policySyncMu     sync.Mutex
 	policySyncSignal chan struct{}
 	overviewCacheMu  sync.Mutex
@@ -69,6 +70,10 @@ type Server struct {
 }
 
 func NewServer(cfg config.Manager, store *Store, logger *slog.Logger) (*Server, error) {
+	bootstrapTLSPin, err := loadTLSPublicKeyPin(cfg.TLSCertificate)
+	if err != nil {
+		return nil, fmt.Errorf("load Manager TLS public key pin: %w", err)
+	}
 	ca, err := LoadCertificateAuthority(cfg.AgentCACertificate, cfg.AgentCAPrivateKey)
 	if err != nil {
 		return nil, err
@@ -94,7 +99,7 @@ func NewServer(cfg config.Manager, store *Store, logger *slog.Logger) (*Server, 
 	server := &Server{
 		cfg: cfg, instanceID: randomID(), store: store, catalog: catalog, catalogErr: catalogErr, ca: ca, policySigner: policySigner, policyCatalog: policyCatalog, templates: templates,
 		sessions: newSessionManager(cfg.SessionKey), loginLimiter: newLoginLimiter(),
-		bootstrapLimiter: newRequestLimiter(60, time.Minute), installLimiter: newRequestLimiter(60, time.Minute), downloadLimiter: newRequestLimiter(8, time.Minute), logger: logger,
+		bootstrapLimiter: newRequestLimiter(60, time.Minute), installLimiter: newRequestLimiter(60, time.Minute), downloadLimiter: newRequestLimiter(8, time.Minute), bootstrapTLSPin: bootstrapTLSPin, logger: logger,
 		policySyncSignal: make(chan struct{}, 1), overviewCache: make(map[string]overviewCacheEntry), runtimeSources: make(map[string]runtimePolicySource), geoIP: geoIP,
 	}
 	if err := server.loadRuntimePolicySources(); err != nil {

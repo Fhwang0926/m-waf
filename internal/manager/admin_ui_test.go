@@ -2,6 +2,8 @@ package manager
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -57,7 +59,7 @@ func TestNavigationVisibilityByRole(t *testing.T) {
 	}
 
 	system := render(RoleSystemAdmin)
-	for _, label := range []string{"운영 현황", "보안 이벤트", "보호 정책", "IP 정책", "보호 서버", "서버 설치", "사용자 관리", "기업 관리", "CRS 관리", "시스템 정책", "감사 로그", "시스템 설정"} {
+	for _, label := range []string{"운영 현황", "보안 이벤트", "보고서", "보호 정책", "IP 정책", "보호 서버", "서버 설치", "사용자 관리", "기업 관리", "CRS 관리", "시스템 정책", "감사 로그", "시스템 설정"} {
 		if !strings.Contains(system, label) {
 			t.Fatalf("system administrator navigation is missing %q: %s", label, system)
 		}
@@ -105,6 +107,10 @@ func TestNavigationVisibilityByRole(t *testing.T) {
 	}
 	if !strings.Contains(user, `class="side-link active" href="/"`) {
 		t.Fatalf("dashboard navigation is not active: %s", user)
+	}
+	reports := render(RoleEnterpriseUser, "reports")
+	if !strings.Contains(reports, `class="side-link active" href="/reports"`) || strings.Contains(reports, `class="side-link active" href="/events"`) {
+		t.Fatalf("report navigation is not independently active: %s", reports)
 	}
 }
 
@@ -259,14 +265,14 @@ func TestEnrollmentQuickInstallKeepsTokenOutOfCommand(t *testing.T) {
 		"Active": "enrollments", "Session": session, "CSRF": "token", "ScopeLabel": "전체 기업",
 		"IsSystemAdmin": true, "CanAccessSystemManagement": true, "InSystemConsole": true, "CanOperate": true, "CanManageUsers": true,
 		"AccountURL": "/account?area=system", "SelectedEnterpriseID": "enterprise-1", "SelectedEnterpriseName": "Example", "InstallToken": installToken,
-		"CABase64": "Q0E=", "AgentURL": "https://manager.example:10443",
+		"BootstrapTLSPin": "sha256//example", "BootstrapInstallerSHA256": strings.Repeat("a", 64), "AgentURL": "https://manager.example:10443",
 	}
 	var output bytes.Buffer
 	if err := templates.ExecuteTemplate(&output, "enrollment.html", data); err != nil {
 		t.Fatal(err)
 	}
 	html := output.String()
-	for _, expected := range []string{"Agent 설치와 자동 등록", "Agent 설치 명령 복사", "별도 입력이 필요하지 않습니다", `data-enrollment-command`, `data-enterprise-id="enterprise-1"`, `data-csrf="token"`, `class="install-command-details"`, "--token-file", "__MWAF_ENROLLMENT_TOKEN__", "Debian", "12 Bookworm", "curl and base64 are required", "mwaf_root_command"} {
+	for _, expected := range []string{"Agent 설치와 자동 등록", "Agent 설치 명령 복사", "별도 입력이 필요하지 않습니다", `data-enrollment-command`, `data-enterprise-id="enterprise-1"`, `data-csrf="token"`, `class="install-command-details"`, "__MWAF_ENROLLMENT_TOKEN__", "Debian", "12 Bookworm", "Docker", "환경 자동 감지", "wget --no-check-certificate", "sha256sum -c -", "--bootstrap-pin", "--token-stdin", strings.Repeat("a", 64)} {
 		if !strings.Contains(html, expected) {
 			t.Fatalf("quick install content %q is missing: %s", expected, html)
 		}
@@ -289,8 +295,13 @@ func TestEnrollmentQuickInstallKeepsTokenOutOfCommand(t *testing.T) {
 		t.Fatalf("install command closing tag is missing: %s", html)
 	}
 	commandHTML := html[commandStart : commandStart+commandEnd]
-	if strings.Contains(commandHTML, "sudo sh /tmp/mwaf-install.sh") {
-		t.Fatalf("quick install must also work when the operator is already root: %s", commandHTML)
+	if strings.Contains(commandHTML, "base64 -d") {
+		t.Fatalf("inline CA payload remains in the quick install command: %s", commandHTML)
+	}
+	for _, removed := range []string{"mwaf_install_dir=", "enrollment.token", "mwaf_root_command", "trap - EXIT"} {
+		if strings.Contains(commandHTML, removed) {
+			t.Fatalf("removed quick-install boilerplate %q remains: %s", removed, commandHTML)
+		}
 	}
 	if strings.Contains(commandHTML, installToken) {
 		t.Fatalf("install token must not be embedded in the copied command")
@@ -307,9 +318,17 @@ func TestBootstrapInstallerInstallsAgentOnlyBeforeManagerPlanning(t *testing.T) 
 	}
 	script := string(raw)
 	for _, expected := range []string{
+		`-d|--manager) manager=$2`,
 		`--token-file) token_file=$2`,
+		`--token-stdin) token_stdin=1`,
+		`exec sudo sh "$0" "$@"`,
+		`--bootstrap-pin) bootstrap_pin=$2`,
+		`--pinnedpubkey "$bootstrap_pin"`,
+		`/bootstrap/v1/ca.crt`,
 		`"installation_mode":"discovery"`,
 		"This first stage installs no",
+		`runtime_mode=container`,
+		`/usr/sbin/mwaf-agent-service start`,
 		"M-WAF unassigned safe policy",
 		"SecRuleEngine DetectionOnly",
 		"Select package-based or custom ZIP installation in Manager",
@@ -318,10 +337,31 @@ func TestBootstrapInstallerInstallsAgentOnlyBeforeManagerPlanning(t *testing.T) 
 			t.Fatalf("bootstrap installer content %q is missing", expected)
 		}
 	}
+	if strings.Contains(script, "systemd systemctl is required") {
+		t.Fatal("bootstrap installer still rejects systemd-free containers")
+	}
+	if strings.Contains(script, "mwaf-agent-container-service") {
+		t.Fatal("bootstrap installer exposes the removed container-only service command")
+	}
 	for _, forbidden := range []string{"a2enconf mwaf", "systemctl reload apache2", "nginx -t", "mwaf-module.deb"} {
 		if strings.Contains(script, forbidden) {
 			t.Fatalf("Agent-only bootstrap must not contain %q", forbidden)
 		}
+	}
+}
+
+func TestBootstrapInstallerSHA256MatchesServedScript(t *testing.T) {
+	raw, err := bootstrapFiles.ReadFile("bootstrap-install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := bootstrapInstallerSHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(raw)
+	if expected := hex.EncodeToString(digest[:]); actual != expected {
+		t.Fatalf("installer SHA-256 mismatch: got %q want %q", actual, expected)
 	}
 }
 

@@ -1,0 +1,128 @@
+#!/bin/sh
+set -u
+
+state_directory=/var/lib/mwaf-agent
+supervisor_pid_file=$state_directory/container-supervisor.pid
+agent_pid_file=$state_directory/container-agent.pid
+config_file=/etc/mwaf-agent/agent.json
+
+read_pid() {
+  [ -r "$1" ] || return 1
+  pid=$(sed -n '1p' "$1")
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$pid"
+}
+
+supervisor_running() {
+  supervisor_pid=$(read_pid "$supervisor_pid_file") || return 1
+  kill -0 "$supervisor_pid" 2>/dev/null || return 1
+  [ -r "/proc/$supervisor_pid/cmdline" ] || return 1
+  tr '\000' ' ' < "/proc/$supervisor_pid/cmdline" | grep -Fq 'mwaf-agent-service supervise'
+}
+
+systemd_running() {
+  command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+}
+
+run_supervisor() {
+  install -d -m 0750 "$state_directory"
+  printf '%s\n' "$$" > "$supervisor_pid_file"
+  chmod 0640 "$supervisor_pid_file"
+  stopping=0
+  agent_pid=""
+
+  restart_agent() {
+    if [ -n "$agent_pid" ]; then kill -TERM "$agent_pid" 2>/dev/null || true; fi
+  }
+  stop_supervisor() {
+    stopping=1
+    restart_agent
+  }
+  cleanup() {
+    saved_pid=$(read_pid "$supervisor_pid_file" 2>/dev/null || true)
+    if [ "$saved_pid" = "$$" ]; then rm -f "$supervisor_pid_file"; fi
+    rm -f "$agent_pid_file"
+  }
+  trap restart_agent HUP
+  trap stop_supervisor INT TERM
+  trap cleanup EXIT
+
+  while [ "$stopping" -eq 0 ]; do
+    /usr/bin/mwaf-agent -config "$config_file" &
+    agent_pid=$!
+    printf '%s\n' "$agent_pid" > "$agent_pid_file"
+    chmod 0640 "$agent_pid_file"
+    wait "$agent_pid" || true
+    agent_pid=""
+    rm -f "$agent_pid_file"
+    if [ "$stopping" -eq 0 ]; then sleep 5; fi
+  done
+}
+
+start_supervisor() {
+  [ -x /usr/bin/mwaf-agent ] || { echo "mwaf-agent binary is not installed" >&2; exit 1; }
+  [ -r "$config_file" ] || { echo "M-WAF Agent configuration is not ready" >&2; exit 1; }
+  install -d -m 0750 "$state_directory"
+  if supervisor_running; then return 0; fi
+  rm -f "$supervisor_pid_file" "$agent_pid_file"
+  if [ -w /proc/1/fd/1 ]; then
+    nohup "$0" supervise </dev/null >>/proc/1/fd/1 2>>/proc/1/fd/2 &
+  else
+    install -d -m 0750 /var/log/mwaf-agent
+    nohup "$0" supervise </dev/null >>/var/log/mwaf-agent/agent.log 2>&1 &
+  fi
+  start_pid=$!
+  waited=0
+  while [ "$waited" -lt 50 ]; do
+    if supervisor_running; then return 0; fi
+    kill -0 "$start_pid" 2>/dev/null || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "M-WAF Agent container supervisor did not start" >&2
+  exit 1
+}
+
+stop_supervisor() {
+  if ! supervisor_running; then
+    rm -f "$supervisor_pid_file" "$agent_pid_file"
+    return 0
+  fi
+  kill -TERM "$supervisor_pid"
+  waited=0
+  while [ "$waited" -lt 30 ]; do
+    supervisor_running || return 0
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "M-WAF Agent container supervisor did not stop" >&2
+  exit 1
+}
+
+case "${1:-}" in
+  start)
+    if systemd_running; then systemctl enable --now mwaf-agent.service; else start_supervisor; fi
+    ;;
+  stop)
+    if systemd_running; then systemctl --no-block stop mwaf-agent.service; else stop_supervisor; fi
+    ;;
+  restart)
+    if systemd_running; then
+      systemctl --no-block restart mwaf-agent.service
+    elif supervisor_running; then
+      kill -HUP "$supervisor_pid"
+    else
+      start_supervisor
+    fi
+    ;;
+  status)
+    if systemd_running; then systemctl is-active --quiet mwaf-agent.service; else supervisor_running; fi
+    ;;
+  supervise)
+    systemd_running && { echo "supervise is only available without systemd" >&2; exit 2; }
+    run_supervisor
+    ;;
+  *) echo "usage: $0 {start|stop|restart|status}" >&2; exit 2 ;;
+esac

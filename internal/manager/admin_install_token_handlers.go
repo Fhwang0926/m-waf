@@ -1,8 +1,9 @@
 package manager
 
 import (
+	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"strconv"
@@ -30,11 +31,17 @@ func (s *Server) renderEnrollment(w http.ResponseWriter, r *http.Request, extra 
 		selectedEnterpriseID, selected = s.enterpriseIDForSession(r.Context(), session, "")
 	}
 	selectedEnterpriseName := session.EnterpriseName
+	installerSHA256, err := bootstrapInstallerSHA256()
+	if err != nil {
+		s.renderAdminError(w, r, http.StatusInternalServerError, "설치 명령을 준비할 수 없습니다", "잠시 후 다시 시도하세요.")
+		return
+	}
 	data := map[string]any{
-		"AgentURL":             s.cfg.PublicURL,
-		"CABase64":             base64.StdEncoding.EncodeToString([]byte(s.ca.CertificatePEM())),
-		"FormEnterpriseID":     selectedEnterpriseID,
-		"SelectedEnterpriseID": selectedEnterpriseID,
+		"AgentURL":                 s.cfg.PublicURL,
+		"BootstrapTLSPin":          s.bootstrapTLSPin,
+		"BootstrapInstallerSHA256": installerSHA256,
+		"FormEnterpriseID":         selectedEnterpriseID,
+		"SelectedEnterpriseID":     selectedEnterpriseID,
 	}
 	if session.IsSystemAdmin() {
 		enterprises, err := s.store.ListEnterprises(r.Context())
@@ -108,6 +115,15 @@ func (s *Server) renderEnrollment(w http.ResponseWriter, r *http.Request, extra 
 		w.WriteHeader(status)
 	}
 	_ = s.templates.ExecuteTemplate(w, "enrollment.html", s.viewData(r, "enrollments", data))
+}
+
+func bootstrapInstallerSHA256() (string, error) {
+	raw, err := bootstrapFiles.ReadFile("bootstrap-install.sh")
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func installTokenParameters(name, daysText, maxText string) (string, int, int, bool) {

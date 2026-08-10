@@ -11,8 +11,9 @@
   <div class="install-environment-grid" role="list">
     <article class="install-environment-card" role="listitem"><span class="install-environment-label">운영체제</span><div class="install-supported-os"><span><strong>Ubuntu</strong><small>Server 24.04 LTS</small></span><span><strong>Debian</strong><small>12 Bookworm</small></span></div><div class="install-environment-meta"><strong>공식 DEB 지원</strong><span class="badge info">amd64</span></div></article>
     <article class="install-environment-card" role="listitem"><span class="install-environment-label">웹서버</span><div class="install-brand-row"><span class="install-logo-surface"><img class="install-logo-apache" src="/static/brand-apache.png" alt="Apache HTTP Server"></span><span class="install-brand-join">또는</span><span class="install-logo-surface"><img class="install-logo-nginx" src="/static/brand-nginx.png" alt="Nginx"></span></div><div class="install-environment-meta"><strong>둘 중 하나</strong></div></article>
+    <article class="install-environment-card" role="listitem"><span class="install-environment-label">실행 환경</span><div class="install-supported-os"><span><strong>일반 서버</strong><small>systemd 서비스</small></span><span><strong>Docker</strong><small>Agent 프로세스</small></span></div><div class="install-environment-meta"><strong>환경 자동 감지</strong><span class="badge info">OCI</span></div></article>
   </div>
-  <p class="muted install-environment-note">이 단계에서는 Apache, Nginx, ModSecurity와 설정 파일을 변경하지 않습니다. Agent가 등록된 뒤 감지된 웹서버별로 배포판 패키지 또는 커스텀 ZIP 설치를 선택합니다.</p>
+  <p class="muted install-environment-note">설치 명령은 wget, sha256sum과 curl을 사용합니다. 이 단계에서는 Apache, Nginx, ModSecurity와 설정 파일을 변경하지 않습니다. Docker에서는 systemd를 추가하지 않고 Agent 프로세스를 실행합니다. Agent가 등록된 뒤 감지된 웹서버별로 배포판 패키지 또는 커스텀 ZIP 설치를 선택합니다.</p>
 </section>
 
 {{if .InstallToken}}<section class="panel danger-zone"><div class="alert warn" role="alert"><strong>자동화용 토큰을 안전하게 보관하세요</strong><div>이 원문은 지금 한 번만 표시됩니다. 일반 서버 설치는 아래 버튼이 15분 단기 토큰을 자동으로 포함하므로 별도 입력이 필요하지 않습니다.</div></div>
@@ -21,19 +22,7 @@
   <p id="install-token-copy-status" class="copy-status" aria-live="polite"></p>
   <div class="install-quickstart" aria-labelledby="new-install-heading"><div class="install-quickstart-head"><div><p class="eyebrow">1단계</p><h2 id="new-install-heading">Agent 설치와 자동 등록</h2><p class="muted">버튼을 누르면 15분 동안 한 번 사용할 수 있는 등록 토큰이 포함된 명령을 생성해 복사합니다. 이 명령은 Agent만 설치합니다.</p></div><div class="install-quick-actions"><button class="button install-copy-primary" type="button" data-enrollment-command data-command-target="enterprise-install-command" data-copy-status="install-command-copy-status" data-enterprise-id="{{.SelectedEnterpriseID}}" data-csrf="{{.CSRF}}">Agent 설치 명령 복사</button></div></div>
   <p id="install-command-copy-status" class="copy-status" aria-live="polite"></p>
-  <details class="install-command-details"><summary>설치 명령 직접 보기</summary><pre id="enterprise-install-command" class="install-command" tabindex="0"># 설치 명령 복사 버튼을 누르면 단기 등록 토큰이 자동으로 채워집니다.
-command -v curl &gt;/dev/null 2&gt;&amp;1 &amp;&amp; command -v base64 &gt;/dev/null 2&gt;&amp;1 || { echo 'curl and base64 are required' &gt;&amp;2; exit 1; }
-umask 077
-mwaf_install_dir=$(mktemp -d)
-trap 'rm -rf "$mwaf_install_dir"' EXIT HUP INT TERM
-printf '%s' '{{.CABase64}}' | base64 -d &gt; "$mwaf_install_dir/manager-ca.crt"
-printf '%s\n' '__MWAF_ENROLLMENT_TOKEN__' &gt; "$mwaf_install_dir/enrollment.token"
-curl --fail --cacert "$mwaf_install_dir/manager-ca.crt" {{.AgentURL}}/bootstrap/v1/install.sh -o "$mwaf_install_dir/install.sh"
-mwaf_root_command=
-if [ "$(id -u)" -ne 0 ]; then command -v sudo &gt;/dev/null 2&gt;&amp;1 || { echo 'run as root or install sudo' &gt;&amp;2; exit 1; }; mwaf_root_command=sudo; fi
-$mwaf_root_command sh "$mwaf_install_dir/install.sh" --manager {{.AgentURL}} --ca "$mwaf_install_dir/manager-ca.crt" --token-file "$mwaf_install_dir/enrollment.token"
-rm -rf "$mwaf_install_dir"
-trap - EXIT HUP INT TERM</pre></details>
+  <details class="install-command-details"><summary>설치 명령 직접 보기</summary><pre id="enterprise-install-command" class="install-command" tabindex="0">mkdir -p ./mwaf_install &amp;&amp; wget --no-check-certificate {{.AgentURL}}/bootstrap/v1/install.sh -O ./mwaf_install/installer.sh &amp;&amp; printf '%s  %s\n' '{{.BootstrapInstallerSHA256}}' './mwaf_install/installer.sh' | sha256sum -c - &amp;&amp; printf '%s\n' '__MWAF_ENROLLMENT_TOKEN__' | sh ./mwaf_install/installer.sh -d {{.AgentURL}} --bootstrap-pin '{{.BootstrapTLSPin}}' --token-stdin</pre></details>
   </div>
 </section>{{end}}
 
@@ -41,19 +30,7 @@ trap - EXIT HUP INT TERM</pre></details>
   {{if and .IsSystemAdmin (not .Enterprises)}}<div class="empty-state"><div class="empty-state-content"><h3>기업 등록이 먼저 필요합니다</h3><p>설치되는 서버가 속할 기업 범위를 먼저 생성하세요.</p><div class="actions"><a class="button" href="/enterprises?create=1">기업 등록</a></div></div></div>{{else}}
   {{with .ActiveInstallToken}}<div class="alert success"><strong>자동화용 기업 토큰이 활성 상태입니다</strong><div><span class="mono">{{.DisplayPrefix}}…</span> · 등록 {{.EnrollmentCount}}대 · {{if .LastUsedAt.Valid}}마지막 사용 {{formatKST .LastUsedAt.Time "2006-01-02 15:04"}} KST{{else}}아직 사용하지 않음{{end}}</div></div><div class="install-quickstart" aria-labelledby="existing-install-heading"><div class="install-quickstart-head"><div><p class="eyebrow">1단계</p><h3 id="existing-install-heading">Agent 설치와 자동 등록</h3><p class="muted">버튼을 누르면 15분 동안 한 번 사용할 수 있는 등록 토큰이 포함된 Agent 설치 명령을 복사합니다. 토큰을 따로 입력할 필요가 없습니다.</p></div><div class="install-quick-actions"><button class="button install-copy-primary" type="button" data-enrollment-command data-command-target="existing-install-command" data-copy-status="existing-copy-status" data-enterprise-id="{{$.SelectedEnterpriseID}}" data-csrf="{{$.CSRF}}">Agent 설치 명령 복사</button>{{if $.InstallTokens}}<button class="secondary" type="button" data-open-details="install-token-history">토큰 재발급</button>{{end}}</div></div>
   <p id="existing-copy-status" class="copy-status" aria-live="polite"></p>
-  <details class="install-command-details"><summary>설치 명령 직접 보기</summary><pre id="existing-install-command" class="install-command" tabindex="0"># 설치 명령 복사 버튼을 누르면 단기 등록 토큰이 자동으로 채워집니다.
-command -v curl &gt;/dev/null 2&gt;&amp;1 &amp;&amp; command -v base64 &gt;/dev/null 2&gt;&amp;1 || { echo 'curl and base64 are required' &gt;&amp;2; exit 1; }
-umask 077
-mwaf_install_dir=$(mktemp -d)
-trap 'rm -rf "$mwaf_install_dir"' EXIT HUP INT TERM
-printf '%s' '{{$.CABase64}}' | base64 -d &gt; "$mwaf_install_dir/manager-ca.crt"
-printf '%s\n' '__MWAF_ENROLLMENT_TOKEN__' &gt; "$mwaf_install_dir/enrollment.token"
-curl --fail --cacert "$mwaf_install_dir/manager-ca.crt" {{$.AgentURL}}/bootstrap/v1/install.sh -o "$mwaf_install_dir/install.sh"
-mwaf_root_command=
-if [ "$(id -u)" -ne 0 ]; then command -v sudo &gt;/dev/null 2&gt;&amp;1 || { echo 'run as root or install sudo' &gt;&amp;2; exit 1; }; mwaf_root_command=sudo; fi
-$mwaf_root_command sh "$mwaf_install_dir/install.sh" --manager {{$.AgentURL}} --ca "$mwaf_install_dir/manager-ca.crt" --token-file "$mwaf_install_dir/enrollment.token"
-rm -rf "$mwaf_install_dir"
-trap - EXIT HUP INT TERM</pre></details><p class="muted install-quickstart-note">등록이 끝나면 보호 서버 상세에서 Agent가 확인한 운영체제와 웹서버를 검토하고 설치 유형을 선택하세요.</p></div>{{else}}<p class="muted">활성 설치 토큰은 이 화면을 새로 열 때 자동으로 생성됩니다.</p>{{end}}{{end}}</section>{{end}}
+  <details class="install-command-details"><summary>설치 명령 직접 보기</summary><pre id="existing-install-command" class="install-command" tabindex="0">mkdir -p ./mwaf_install &amp;&amp; wget --no-check-certificate {{$.AgentURL}}/bootstrap/v1/install.sh -O ./mwaf_install/installer.sh &amp;&amp; printf '%s  %s\n' '{{$.BootstrapInstallerSHA256}}' './mwaf_install/installer.sh' | sha256sum -c - &amp;&amp; printf '%s\n' '__MWAF_ENROLLMENT_TOKEN__' | sh ./mwaf_install/installer.sh -d {{$.AgentURL}} --bootstrap-pin '{{$.BootstrapTLSPin}}' --token-stdin</pre></details><p class="muted install-quickstart-note">등록이 끝나면 보호 서버 상세에서 Agent가 확인한 운영체제와 웹서버를 검토하고 설치 유형을 선택하세요.</p></div>{{else}}<p class="muted">활성 설치 토큰은 이 화면을 새로 열 때 자동으로 생성됩니다.</p>{{end}}{{end}}</section>{{end}}
 
 {{if .InstallTokens}}<details id="install-token-history" class="panel panel-subtle install-token-history"><summary>토큰 상태 및 재발급</summary><div class="table-scroll"><table><thead><tr><th>토큰</th><th>상태</th><th>등록 서버</th><th>마지막 사용</th><th>관리</th></tr></thead><tbody>{{range .InstallTokens}}<tr><td><span class="mono">{{.DisplayPrefix}}…</span></td><td><span class="badge {{if .Active}}ok{{else}}warn{{end}}">{{.StatusLabel}}</span>{{if .Persistent}}<small>폐기 전까지 설치 가능</small>{{else}}<small>{{formatKST .ExpiresAt "2006-01-02"}} 설치 만료</small>{{end}}</td><td>{{.EnrollmentCount}}대</td><td>{{if .LastUsedAt.Valid}}{{formatKST .LastUsedAt.Time "2006-01-02 15:04"}} KST{{else}}미사용{{end}}</td><td>{{if .Active}}<details class="danger-disclosure row-danger"><summary>재발급</summary><form method="post" action="/install-tokens/{{.ID}}/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="enterprise_id" value="{{.EnterpriseID}}"><label class="check-row"><input type="checkbox" name="confirm" value="confirmed" required> 기존 토큰의 신규 설치 사용이 폐기됨을 확인했습니다.</label><button class="danger" type="submit">새 설치 토큰 발급</button></form></details>{{else}}<span class="muted">-</span>{{end}}</td></tr>{{end}}</tbody></table></div></details>{{end}}
 </main></body></html>

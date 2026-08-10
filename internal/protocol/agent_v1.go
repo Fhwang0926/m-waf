@@ -16,6 +16,7 @@ const (
 	HealthReadyPattern = "GET /health/ready"
 
 	BootstrapInstallerPattern = "GET /bootstrap/v1/install.sh"
+	BootstrapCAPattern        = "GET /bootstrap/v1/ca.crt"
 	BootstrapSessionPattern   = "POST /bootstrap/v1/sessions"
 	BootstrapResolvePattern   = "POST /bootstrap/v1/packages/resolve"
 	BootstrapPackagePattern   = "GET /bootstrap/v1/packages/{id}"
@@ -36,6 +37,7 @@ const (
 	CommandResultPattern    = "POST /agent/v1/commands/{id}/result"
 
 	BootstrapInstallerPath = "/bootstrap/v1/install.sh"
+	BootstrapCAPath        = "/bootstrap/v1/ca.crt"
 	BootstrapSessionPath   = "/bootstrap/v1/sessions"
 	BootstrapResolvePath   = "/bootstrap/v1/packages/resolve"
 	PackageKeyPath         = "/packages/v1/keys"

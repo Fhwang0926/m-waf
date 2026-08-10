@@ -16,6 +16,7 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /account", account(http.HandlerFunc(s.account)))
 	mux.Handle("POST /account/password", account(http.HandlerFunc(s.updateOwnPassword)))
 	mux.Handle("GET /", enterprise(http.HandlerFunc(s.dashboard)))
+	mux.Handle("GET /reports", enterprise(http.HandlerFunc(s.reports)))
 	mux.Handle("GET /servers", enterprise(http.HandlerFunc(s.servers)))
 	mux.Handle("GET /servers/{id}", enterprise(http.HandlerFunc(s.serverDetail)))
 	mux.Handle("POST /servers/{id}/commands", enterprise(s.requireRole(RoleEnterpriseUser, http.HandlerFunc(s.createServerCommand))))
