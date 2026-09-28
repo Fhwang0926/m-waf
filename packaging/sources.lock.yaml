@@ -11,12 +11,12 @@ crs:
     sha256: ea42fe6e4d1def341ebf4ab1b1e69bcd8b184c1f6ca4e0883633afabc976c084
   - channel: stable
     repository: https://github.com/coreruleset/coreruleset
-    version: v4.28.0
-    commit: 55b09f5acfd16413e7b31041100711ceb7adc89c
-    tag_object_sha: 5d2bd9a1ad7e607813f9e19cc73fa44dd5dd2ceb
+    version: v4.29.0
+    commit: ab3ccd5fcd691424ba3f320d4040c61417270193
+    tag_object_sha: c4b534fe57d772cbf84959c5ae4e7daab7d2020e
     tag_signature_verified: true
-    archive: https://github.com/coreruleset/coreruleset/archive/55b09f5acfd16413e7b31041100711ceb7adc89c.tar.gz
-    sha256: bdd76828d8f5679a9a4db009b66fa77db3d514b25ae3a846fe2889050f840663
+    archive: https://github.com/coreruleset/coreruleset/archive/ab3ccd5fcd691424ba3f320d4040c61417270193.tar.gz
+    sha256: d63eb6aed533ded3cf0e387794ce7e6f17e7c84d6a345689c846cc6d48851639
 ubuntu_24_04:
   apache_module:
     package: libapache2-mod-security2
